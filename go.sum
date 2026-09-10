@@ -94,8 +94,8 @@ github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHP
 github.com/mattn/go-colorable v0.1.14/go.mod h1:6LmQG8QLFO4G5z1gPvYEzlUgJ2wF+stgPZH1UqBm1s8=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
-github.com/mattn/go-sqlite3 v1.14.50 h1:dmdFvo1XG4MPzA4IkAmE9upVz/Nj31uRoM5+jC8hYbY=
-github.com/mattn/go-sqlite3 v1.14.50/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
+github.com/mattn/go-sqlite3 v1.14.52 h1:wVbm2Qnf4OXkqhBTSPuCRZDRnxfbVrrmiCEroVdog8U=
+github.com/mattn/go-sqlite3 v1.14.52/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
 github.com/mdlayher/arp v0.0.0-20220512170110-6706a2966875 h1:ql8x//rJsHMjS+qqEag8n3i4azw1QneKh5PieH9UEbY=
 github.com/mdlayher/arp v0.0.0-20220512170110-6706a2966875/go.mod h1:kfOoFJuHWp76v1RgZCb9/gVUc7XdY877S2uVYbNliGc=
 github.com/mdlayher/ethernet v0.0.0-20220221185849-529eae5b6118 h1:2oDp6OOhLxQ9JBoUuysVz9UZ9uI6oLUbvAZu0x8o+vE=
