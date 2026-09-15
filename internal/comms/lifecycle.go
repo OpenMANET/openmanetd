@@ -397,6 +397,8 @@ func (cfg *CommsConfig) startGPIOSelector(ctx context.Context, svc *Service) {
 
 	svc.Rt.GPIOSel = sel
 
+	cfg.Log.Debug().Msg("comms: GPIO talk group selector started")
+
 	go svc.forwardSelections(events, cfg.Log)
 }
 
@@ -412,6 +414,9 @@ func (s *Service) forwardSelections(events <-chan int, log zerolog.Logger) {
 	src := talkgroup.SourceInit
 
 	for ch := range events {
+		log.Debug().Int("channel", ch).Str("source", src.String()).
+			Msg("comms: applying GPIO talk group selection")
+
 		if err := s.SelectTalkGroup(ch, src); err != nil {
 			log.Warn().Err(err).Int("channel", ch).
 				Msg("comms: GPIO talk group selection failed")
@@ -419,6 +424,8 @@ func (s *Service) forwardSelections(events <-chan int, log zerolog.Logger) {
 
 		src = talkgroup.SourceGPIO
 	}
+
+	log.Debug().Msg("comms: GPIO selection forwarder stopped")
 }
 
 // Start initializes all comms subsystems and blocks until ctx is canceled.

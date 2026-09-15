@@ -311,13 +311,16 @@ func (l *logCapture) wait(t *testing.T) {
 // first read finds no single low line (switch between detents, harness
 // unplugged) the watcher warns once with the raw values and emits nothing,
 // so the daemon keeps its configured channel. Later in-transit glitches
-// stay silent (counter only), and a subsequent clean position still flows.
+// stay silent at warn level (counter only), and a subsequent clean position
+// still flows.
 func TestSelector_BootGlitchWarnsOnce(t *testing.T) {
 	s, fl, handler := newFakeSelector([5]int{1, 1, 1, 1, 1})
 	fl.valuesCalled = make(chan struct{}, 8)
 
 	logs := &logCapture{wrote: make(chan struct{}, 8)}
-	s.Log = zerolog.New(logs)
+	// Warn level: the contract under test is the warn-only diagnostic,
+	// not the debug trace emitted on every read.
+	s.Log = zerolog.New(logs).Level(zerolog.WarnLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -359,4 +362,38 @@ func TestSelector_BootGlitchWarnsOnce(t *testing.T) {
 
 	s.Snapshot(&snap)
 	assert.Equal(t, int64(2), snap.HeldGlitches)
+}
+
+// TestSelector_DebugTracesReads pins the field-triage trace: at debug level
+// every read reports the raw line values and the decoded channel, and a
+// position change reports the from/to transition. Without this an operator
+// cannot tell a mis-wired rotary switch from a decode bug.
+func TestSelector_DebugTracesReads(t *testing.T) {
+	s, fl, handler := newFakeSelector([5]int{0, 1, 1, 1, 1})
+	fl.valuesCalled = make(chan struct{}, 8)
+
+	logs := &logCapture{wrote: make(chan struct{}, 16)}
+	s.Log = zerolog.New(logs).Level(zerolog.DebugLevel)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := s.Events(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, recvChannel(t, events))
+	waitValuesCall(t, fl)
+
+	fl.set([5]int{1, 1, 0, 1, 1})
+	(*handler)()
+
+	assert.Equal(t, 3, recvChannel(t, events))
+
+	out := logs.String()
+	assert.Contains(t, out, `"pins":[17,27,22,24,10]`)
+	assert.Contains(t, out, `"values":[0,1,1,1,1]`)
+	assert.Contains(t, out, `"values":[1,1,0,1,1]`)
+	assert.Contains(t, out, `"decoded":3`)
+	assert.Contains(t, out, `"from":1,"to":3`)
+	assert.Contains(t, out, "gpio: selector edge wakeup")
 }

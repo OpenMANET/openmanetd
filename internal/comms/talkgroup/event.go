@@ -19,6 +19,20 @@ const (
 	SourceInit
 )
 
+// String returns the log-friendly name of the source.
+func (s Source) String() string {
+	switch s {
+	case SourceRPC:
+		return "rpc"
+	case SourceGPIO:
+		return "gpio"
+	case SourceInit:
+		return "init"
+	default:
+		return "unknown"
+	}
+}
+
 // Kind distinguishes exclusive selections from single-direction toggles.
 type Kind uint8
 

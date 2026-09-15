@@ -75,6 +75,10 @@ func (s *Selector) Events(ctx context.Context) (<-chan int, error) {
 		return nil, fmt.Errorf("gpio: request selector lines: %w", err)
 	}
 
+	s.Log.Debug().Str("chip", SelectorChip).Ints("pins", SelectorPins[:]).
+		Dur("debounce", SelectorDebounce).
+		Msg("gpio: selector lines requested (active-low, pull-up bias)")
+
 	out := make(chan int, 1)
 
 	go s.watch(ctx, lines, edge, out)
@@ -110,9 +114,17 @@ func (s *Selector) watch(ctx context.Context, lines lineGroup, edge <-chan struc
 		errStreak = 0
 
 		ch := decodeChannel(vals)
+
+		s.Log.Debug().Ints("pins", SelectorPins[:]).Ints("values", vals).
+			Int("decoded", ch).Int("last", last).Bool("booted", booted).
+			Msg("gpio: selector line read")
+
 		if ch == 0 {
 			// Rotary in transit or wiring fault: hold last selection.
 			s.heldGlitches.Add(1)
+
+			s.Log.Debug().Ints("values", vals).
+				Msg("gpio: no single active selector line; holding last selection")
 
 			if !booted {
 				// Boot has no last selection to hold, so the daemon stays
@@ -125,8 +137,14 @@ func (s *Selector) watch(ctx context.Context, lines lineGroup, edge <-chan struc
 		}
 
 		if ch == last {
+			s.Log.Debug().Int("channel", ch).
+				Msg("gpio: selector unchanged; no event emitted")
+
 			return true
 		}
+
+		s.Log.Debug().Int("from", last).Int("to", ch).Bool("boot", !booted).
+			Msg("gpio: selector position changed; emitting talk group")
 
 		last = ch
 
@@ -157,6 +175,8 @@ func (s *Selector) watch(ctx context.Context, lines lineGroup, edge <-chan struc
 		case <-ctx.Done():
 			return
 		case <-edge:
+			s.Log.Debug().Msg("gpio: selector edge wakeup")
+
 			if !read() {
 				s.Log.Error().Msg("gpio: selector read breaker tripped; selector disabled")
 
