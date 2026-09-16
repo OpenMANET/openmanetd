@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/digineo/go-uci/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 const testOpenMANETConfigPath = "/etc/openmanet/config.yml"
@@ -328,19 +326,6 @@ func TestClearDHCPConfiguredWithReader(t *testing.T) {
 	if configured {
 		t.Error("Expected DHCP to not be configured")
 	}
-}
-
-func TestStageDHCPUnconfiguredWithReader(t *testing.T) {
-	mock := newMockOpenMANETConfigReader()
-	_ = mock.AddSection("openmanetd", "config", "openmanet")
-	_ = mock.SetType("openmanetd", "config", "dhcpconfigured", uci.TypeOption, "1")
-
-	err := StageDHCPUnconfiguredWithReader(mock)
-	require.NoError(t, err)
-
-	values, ok := mock.Get("openmanetd", "config", "dhcpconfigured")
-	require.True(t, ok)
-	assert.Equal(t, []string{"0"}, values)
 }
 
 func TestGetConfigPathWithReader(t *testing.T) {

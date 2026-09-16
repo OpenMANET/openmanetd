@@ -78,13 +78,17 @@ func (arw *AddressReservationWorker) ReserveAddressIfNeeded(ctx context.Context)
 	ticker := time.NewTicker(arw.reserveInterval)
 	defer ticker.Stop()
 
-	deps := arw.productionDeps()
+	arw.runReservationTicks(ctx, ticker.C, arw.productionDeps())
+}
 
+// runReservationTicks accepts clock events separately from I/O so tests can
+// exercise the production loop without wall-clock waits or real hardware.
+func (arw *AddressReservationWorker) runReservationTicks(ctx context.Context, ticks <-chan time.Time, deps reservationDeps) {
 	for {
 		select {
 		case <-arw.done:
 			return
-		case <-ticker.C:
+		case <-ticks:
 			// The LuCI wizard can rewrite these configs while the daemon stays
 			// up. Refresh the worker's private readers before checking the flag
 			// or committing changes against the new network and DHCP state.

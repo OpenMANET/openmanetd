@@ -136,6 +136,7 @@ type reloadTrackingReader struct {
 	mu          sync.Mutex // protects reloadCalls and reloadErr below
 	reloadCalls int
 	reloadErr   error
+	reloadHook  func() error // set before running the synchronous test loop
 }
 
 func newReloadTrackingReader() *reloadTrackingReader {
@@ -144,11 +145,19 @@ func newReloadTrackingReader() *reloadTrackingReader {
 
 func (r *reloadTrackingReader) ReloadConfig() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	r.reloadCalls++
+	err, hook := r.reloadErr, r.reloadHook
+	r.mu.Unlock()
 
-	return r.reloadErr
+	if err != nil {
+		return err
+	}
+
+	if hook != nil {
+		return hook()
+	}
+
+	return nil
 }
 
 func (r *reloadTrackingReader) calls() int {
@@ -211,6 +220,170 @@ func TestAddressReservationStopsWhenUCIReloadFails(t *testing.T) {
 	assert.Equal(t, 1, openmanetReader.calls())
 	assert.Equal(t, 1, networkReader.calls())
 	assert.Equal(t, 0, dhcpReader.calls())
+}
+
+func TestAddressReservationConstructorAndCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cfg := newTestManagementConfig()
+	cfg.addressReservationWorkerReserveInterval = time.Hour
+	arw := NewAddressReservationWorker(cfg, nil, ctx)
+	other := NewAddressReservationWorker(cfg, nil, ctx)
+
+	require.NotNil(t, arw.uciOpenMANETConfig)
+	require.NotNil(t, arw.uciNetworkConfig)
+	require.NotNil(t, arw.uciDHCPConfig)
+	assert.NotSame(t, cfg.uciOpenMANETConfig, arw.uciOpenMANETConfig)
+	assert.NotSame(t, other.uciOpenMANETConfig, arw.uciOpenMANETConfig)
+	assert.NotSame(t, other.uciNetworkConfig, arw.uciNetworkConfig)
+	assert.NotSame(t, other.uciDHCPConfig, arw.uciDHCPConfig)
+
+	cancel()
+	arw.ReserveAddressIfNeeded(ctx)
+}
+
+// Drive the actual reservation loop synchronously with buffered clock events.
+// Readers start with cached state; the second reload simulates files rewritten
+// by the wizard. No wall-clock waits, goroutines, or host UCI files are needed.
+func TestAddressReservationLoopObservesWizardRerun(t *testing.T) {
+	f := newReservationFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	f.arw.done = ctx.Done()
+	openmanetReader := newReloadTrackingReader()
+	networkReader := newReloadTrackingReader()
+	dhcpReader := newReloadTrackingReader()
+	f.arw.uciOpenMANETConfig = openmanetReader
+	f.arw.uciNetworkConfig = networkReader
+	f.arw.uciDHCPConfig = dhcpReader
+
+	require.NoError(t, openmanetReader.SetType("openmanetd", "config", "dhcpconfigured", uci.TypeOption, "1"))
+
+	openmanetReader.reloadHook = func() error {
+		if openmanetReader.calls() == 2 {
+			assert.Zero(t, f.reboots, "the already-configured first tick must stay idle")
+			assert.Zero(t, networkReader.commitCalls)
+
+			return openmanetReader.SetType("openmanetd", "config", "dhcpconfigured", uci.TypeOption, "0")
+		}
+
+		return nil
+	}
+	networkReader.reloadHook = func() error {
+		return networkReader.SetType("network", "wan", "device", uci.TypeOption, "wizard-uplink")
+	}
+	dhcpReader.reloadHook = func() error {
+		return dhcpReader.SetType("dhcp", "wizard_dns", "local", uci.TypeOption, "/wizard/")
+	}
+	deps := f.deps()
+	deps.openMANETReader, deps.networkReader, deps.dhcpReader = openmanetReader, networkReader, dhcpReader
+	deps.reboot = func() error {
+		f.reboots++
+
+		cancel()
+
+		return nil
+	}
+
+	ticks := make(chan time.Time, 2) // exactly one idle tick, then one wizard rerun
+	ticks <- time.Time{}
+
+	ticks <- time.Time{}
+
+	f.arw.runReservationTicks(ctx, ticks, deps)
+
+	assert.Equal(t, 1, f.reboots)
+	assert.Equal(t, 2, openmanetReader.calls())
+	assert.Equal(t, 2, networkReader.calls())
+	assert.Equal(t, 2, dhcpReader.calls())
+	assert.Equal(t, "1", firstValue(openmanetReader.fakeNetworkReader, "openmanetd", "config", "dhcpconfigured"))
+	assert.NotEmpty(t, firstValue(networkReader.fakeNetworkReader, "network", "ahwlan", "ipaddr"))
+	assert.Equal(t, "wizard-uplink", firstValue(networkReader.fakeNetworkReader, "network", "wan", "device"))
+	assert.Equal(t, "/wizard/", firstValue(dhcpReader.fakeNetworkReader, "dhcp", "wizard_dns", "local"))
+	assert.Positive(t, openmanetReader.commitCalls)
+	assert.Positive(t, networkReader.commitCalls)
+	assert.Positive(t, dhcpReader.commitCalls)
+}
+
+func TestAddressReservationLoopReloadFailureSkipsWrites(t *testing.T) {
+	for failureIndex, name := range []string{"openmanetd", "network", "dhcp"} {
+		t.Run(name, func(t *testing.T) {
+			f := newReservationFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			f.arw.done = ctx.Done()
+			readers := []*reloadTrackingReader{newReloadTrackingReader(), newReloadTrackingReader(), newReloadTrackingReader()}
+			f.arw.uciOpenMANETConfig, f.arw.uciNetworkConfig, f.arw.uciDHCPConfig = readers[0], readers[1], readers[2]
+			readers[failureIndex].reloadHook = func() error {
+				cancel()
+
+				return errors.New("injected reload failure")
+			}
+			deps := f.deps()
+			deps.openMANETReader, deps.networkReader, deps.dhcpReader = readers[0], readers[1], readers[2]
+
+			ticks := make(chan time.Time, 1) // one failing tick, then cancellation
+			ticks <- time.Time{}
+
+			f.arw.runReservationTicks(ctx, ticks, deps)
+
+			for i, reader := range readers {
+				assert.Zero(t, reader.commitCalls)
+				assert.Empty(t, reader.data, "reload failure must prevent even staged UCI writes")
+
+				if i <= failureIndex {
+					assert.Equal(t, 1, reader.calls())
+				} else {
+					assert.Zero(t, reader.calls())
+				}
+			}
+
+			assert.Zero(t, f.reboots)
+			assert.Zero(t, f.reloads)
+		})
+	}
+}
+
+func TestAddressReservationLoopRetriesAfterReservationError(t *testing.T) {
+	f := newReservationFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	f.arw.done = ctx.Done()
+	f.arw.uciOpenMANETConfig, f.arw.uciNetworkConfig, f.arw.uciDHCPConfig = f.openmanet, f.network, f.dhcp
+	deps := f.deps()
+	meshCalls := 0
+	deps.getMeshConfig = func(string) (*batmanadv.MeshConfig, error) {
+		meshCalls++
+		if meshCalls == 1 {
+			return nil, errors.New("mesh temporarily unavailable")
+		}
+
+		f.assertNoWrites(t)
+
+		return &batmanadv.MeshConfig{GwMode: f.gwMode}, nil
+	}
+	deps.reboot = func() error {
+		f.reboots++
+
+		cancel()
+
+		return nil
+	}
+
+	ticks := make(chan time.Time, 2) // failed reservation followed by a successful retry
+	ticks <- time.Time{}
+
+	ticks <- time.Time{}
+
+	f.arw.runReservationTicks(ctx, ticks, deps)
+
+	assert.Equal(t, 2, meshCalls)
+	assert.Equal(t, 1, f.reboots)
+	assert.Equal(t, "1", f.dhcpConfigured())
 }
 
 func TestCleanUpInterfacesWithDeps_GatewayModeSkips(t *testing.T) {

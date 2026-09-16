@@ -266,27 +266,15 @@ func ClearDHCPConfigured() error {
 
 // ClearDHCPConfiguredWithReader marks DHCP as not configured using the provided reader.
 func ClearDHCPConfiguredWithReader(reader OpenMANETConfigReader) error {
-	if err := StageDHCPUnconfiguredWithReader(reader); err != nil {
-		return err
-	}
-
-	if err := reader.Commit(); err != nil {
-		return fmt.Errorf("failed to commit OpenMANET config: %w", err)
-	}
-
-	return nil
-}
-
-// StageDHCPUnconfiguredWithReader marks DHCP as not configured without
-// committing. Callers that apply several UCI changes atomically, such as the
-// setup wizard, use this so the flag is rolled back with the rest of the
-// wizard state if a later phase fails.
-func StageDHCPUnconfiguredWithReader(reader OpenMANETConfigReader) error {
 	// Ensure the section exists
 	_ = reader.AddSection(openmanetdConfigName, "config", "openmanet")
 
 	if err := reader.SetType(openmanetdConfigName, "config", "dhcpconfigured", uci.TypeOption, "0"); err != nil {
 		return fmt.Errorf("failed to clear dhcpconfigured: %w", err)
+	}
+
+	if err := reader.Commit(); err != nil {
+		return fmt.Errorf("failed to commit OpenMANET config: %w", err)
 	}
 
 	return nil
