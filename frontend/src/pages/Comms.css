@@ -217,6 +217,14 @@
 /* ── Audio panel ─────────────────────────────────────────────────────────── */
 .comms-audio-panel { display: flex; flex-direction: column; gap: 10px; }
 
+.comms-device-audio-empty {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  padding: 10px 0;
+}
+
 .audio-controls {
   display: flex;
   flex-direction: column;

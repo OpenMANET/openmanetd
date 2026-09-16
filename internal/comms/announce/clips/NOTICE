@@ -1,0 +1,34 @@
+Talk-group voice announcement clips
+===================================
+
+The Ogg-Opus files in this directory (tg_01.opus … tg_05.opus, spoken
+"talk group one" … "talk group five") are text-to-speech audio synthesized
+with the Piper neural TTS voice "en_US-libritts_r-medium".
+
+Attribution (Creative Commons Attribution 4.0 International, CC BY 4.0)
+----------------------------------------------------------------------
+
+  Voice model: en_US-libritts_r-medium
+  Author:      Michael Hansen (rhasspy) / Piper
+  Source:      https://huggingface.co/rhasspy/piper-voices
+               en/en_US/libritts_r/medium/
+  Trained on:  LibriTTS-R (OpenSLR SLR141, http://www.openslr.org/141/)
+  License:     Creative Commons Attribution 4.0 International (CC BY 4.0)
+               https://creativecommons.org/licenses/by/4.0/
+
+These clips are adapted material: text was synthesized to speech and then
+resampled to 48 kHz mono, loudness-normalized, silence-trimmed, padded, and
+Opus-encoded. See tools/gen-announce-clips.sh for the exact pipeline.
+
+CC BY 4.0 permits redistribution and adaptation, including commercially,
+provided attribution is given as above and any changes are indicated. This
+NOTICE satisfies that requirement and must ship alongside the clips.
+
+Regenerating
+------------
+
+Run tools/gen-announce-clips.sh with Piper on PATH and the voice model at
+$HOME/.local/share/piper/en_US-libritts_r-medium.onnx (override with
+PIPER_VOICE). If Piper is unavailable the script falls back to espeak-ng for
+development only — do not ship espeak-ng output; it is not the licensed voice
+this NOTICE describes.

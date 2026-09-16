@@ -56,6 +56,11 @@ buf: ## Generate protobuf code
 	buf format -w proto
 	buf generate
 
+.PHONY: proto-lint
+proto-lint: ## Format proto files and lint them with buf
+	buf format -w proto
+	cd proto && buf lint
+
 .PHONY: test
 test: fmt vet buf sqlc-gen ## Run tests.
 	go test ./internal/... -coverprofile=coverage.out -covermode=atomic

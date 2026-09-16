@@ -236,3 +236,20 @@ func TestNewCachedWirelessProvider_DefaultTTL(t *testing.T) {
 	p := handlers.NewCachedWirelessProvider(&fakeWirelessInner{}, 0)
 	assert.Equal(t, handlers.DefaultWirelessCacheTTL, p.TTL)
 }
+
+func TestEnsureCachedWireless(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, handlers.EnsureCachedWireless(nil), "nil stays nil")
+
+	var typedNil *handlers.CachedWirelessProvider
+
+	assert.Nil(t, handlers.EnsureCachedWireless(typedNil), "a typed nil must not become a non-nil interface")
+
+	cached := handlers.NewCachedWirelessProvider(&fakeWirelessInner{}, time.Second)
+	assert.Same(t, cached, handlers.EnsureCachedWireless(cached), "an existing cache is reused, not re-wrapped")
+
+	wrapped := handlers.EnsureCachedWireless(&fakeWirelessInner{})
+	_, ok := wrapped.(*handlers.CachedWirelessProvider)
+	assert.True(t, ok, "a raw provider is wrapped")
+}

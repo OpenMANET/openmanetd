@@ -4,7 +4,7 @@
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const setupState = {
@@ -52,10 +52,12 @@ beforeEach(() => {
     radios: [],
     ethernetPorts: [],
   }));
+  sessionStorage.clear();
 });
 
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
 });
 
 function renderWizard() {
@@ -119,5 +121,56 @@ describe('TestSetupWizardError', () => {
     await waitFor(() => {
       expect(screen.getByText(/Failed to contact the setup service/i)).toBeInTheDocument();
     });
+  });
+});
+
+describe('TestSetupWizardSkip', () => {
+  let assignSpy;
+  let originalLocation;
+
+  beforeEach(() => {
+    originalLocation = window.location;
+    // jsdom convention: delete + replace so window.location.assign can be
+    // spied on without triggering an actual navigation.
+    delete window.location;
+    window.location = { ...originalLocation, assign: vi.fn() };
+    assignSpy = window.location.assign;
+  });
+
+  afterEach(() => {
+    window.location = originalLocation;
+  });
+
+  it('shows the skip confirmation dialog when "Skip for now" is clicked', async () => {
+    renderWizard();
+    await screen.findByTestId('step-identity');
+    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
+    const dialog = screen.getByRole('alertdialog', { name: /skip setup confirmation/i });
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText(/this device stays unconfigured/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/no mesh, network, or firewall configuration applied/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/no admin password/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/setup reopens on your next visit until completed/i)).toBeInTheDocument();
+  });
+
+  it('Cancel closes the skip confirmation without dismissing setup', async () => {
+    renderWizard();
+    await screen.findByTestId('step-identity');
+    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
+    const dialog = screen.getByRole('alertdialog', { name: /skip setup confirmation/i });
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+    expect(screen.queryByRole('alertdialog', { name: /skip setup confirmation/i })).toBeNull();
+    expect(sessionStorage.getItem('omd-setup-dismissed')).toBeNull();
+    expect(assignSpy).not.toHaveBeenCalled();
+  });
+
+  it('confirming skip writes the session flag and navigates to /', async () => {
+    renderWizard();
+    await screen.findByTestId('step-identity');
+    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
+    const dialog = screen.getByRole('alertdialog', { name: /skip setup confirmation/i });
+    fireEvent.click(within(dialog).getByRole('button', { name: /skip for now/i }));
+    expect(sessionStorage.getItem('omd-setup-dismissed')).toBe('1');
+    expect(assignSpy).toHaveBeenCalledWith('/');
   });
 });

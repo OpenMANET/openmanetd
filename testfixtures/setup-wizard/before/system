@@ -5,7 +5,8 @@ config system
         option log_size '128'
         option urandom_seed '0'
         option compat_version '1.0'
-        option default_wifi_key '6A6C67MK'
+        option default_wifi_key 'pxm5rAD1'
+        option morse_wifi_version '2'
 
 config timeserver 'ntp'
         option enabled '1'

@@ -83,9 +83,39 @@ describe('TestFetchMeshStatus', () => {
     expect(result.nodes).toEqual([{ hostname: 'node1', ip: '10.0.0.1' }]);
     expect(result.neighbors).toEqual([{
       name: 'node2', mac: 'aa:bb:cc:dd:ee:ff', signal: -50, throughput: 100,
+      iface: '', tx: null, rx: null,
     }]);
     expect(result.interfaces).toEqual([{
       name: 'wlh0', type: 'mesh', frequency: 5180, channel_width: 80,
+    }]);
+  });
+
+  it('maps link rates and the interface name when present', async () => {
+    const transport = createRouterTransport(({ service }) => {
+      service(StatusService, { getServiceStatus() { return { status: {} }; } });
+      service(NodeService, { listNodes() { return { nodes: [] }; } });
+      service(InterfaceService, { listWirelessInterfaces() { return { interfaces: [] }; } });
+      service(MeshNeighborService, {
+        listMeshNeighbors() {
+          return {
+            neighbors: [{
+              neighbor: 'node2', hardwareAddress: 'aa:bb:cc:dd:ee:ff', signal: -50, throughput: 100,
+              interface: 'mesh1',
+              tx: { bitrateKbps: 86700, phy: 4, widthMhz: 40, mcs: 7, nss: 2 },
+              rx: { bitrateKbps: 72200, phy: 2, widthMhz: 20, mcs: 7, nss: 1 },
+            }],
+          };
+        },
+      });
+    });
+
+    const result = await fetchWithTransport(transport);
+
+    expect(result.neighbors).toEqual([{
+      name: 'node2', mac: 'aa:bb:cc:dd:ee:ff', signal: -50, throughput: 100,
+      iface: 'mesh1',
+      tx: { bitrateKbps: 86700, phy: 4, widthMhz: 40, mcs: 7, nss: 2 },
+      rx: { bitrateKbps: 72200, phy: 2, widthMhz: 20, mcs: 7, nss: 1 },
     }]);
   });
 

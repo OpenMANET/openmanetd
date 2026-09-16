@@ -147,7 +147,7 @@ config rule
         option src '*'
         option dest_ip '239.192.41.1'
         option dest '*'
-        option dest_port '33801-38864'
+        option dest_port '38801-38864'
         option proto 'udp'
         option target 'ACCEPT'
 

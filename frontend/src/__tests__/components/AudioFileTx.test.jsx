@@ -20,7 +20,7 @@ vi.mock('../../services/audioEngine.js', () => ({
 }));
 
 import AudioFileTxPanel from '../../components/AudioFileTx.jsx';
-import { loadFile, startPlayback, stopPlayback } from '../../services/audioFileTx.js';
+import { loadFile, startPlayback, stopPlayback, isPlaying } from '../../services/audioFileTx.js';
 import { getAudioContext, getEncoder, resetTxTimestamp } from '../../services/audioEngine.js';
 
 afterEach(() => {
@@ -192,5 +192,42 @@ describe('TestAudioFileTxLoop', () => {
     expect(toggle.classList.contains('on')).toBe(true);
     fireEvent.click(track);
     expect(toggle.classList.contains('on')).toBe(false);
+  });
+});
+
+describe('TestAudioFileTxTimerCleanup', () => {
+  it('clears the completion-poll interval on unmount', async () => {
+    vi.useFakeTimers();
+    try {
+      getAudioContext.mockReturnValue({});
+      getEncoder.mockReturnValue({ state: 'configured' });
+      isPlaying.mockReturnValue(true);
+      loadFile.mockResolvedValue({
+        audioBuffer: { duration: 3.0, sampleRate: 48000 },
+        name: 'clip.wav',
+        duration: 3.0,
+        sampleRate: 48000,
+      });
+
+      const { unmount } = renderPanel();
+      const fileInput = document.querySelector('input[type="file"]');
+      await act(async () => {
+        fireEvent.change(fileInput, {
+          target: { files: [new File(['audio'], 'clip.wav', { type: 'audio/wav' })] },
+        });
+      });
+
+      fireEvent.click(screen.getByText('PLAY'));
+      expect(vi.getTimerCount()).toBe(1); // completion poll armed
+
+      unmount();
+
+      // The poll must not survive unmount — a leaked interval firing after
+      // jsdom teardown crashes the whole run with "window is not defined"
+      // on slow CI runners.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

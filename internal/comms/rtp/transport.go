@@ -2,7 +2,7 @@ package rtp
 
 import (
 	"io"
-	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,8 +24,12 @@ type PacketWriter interface {
 
 // PacketReader abstracts the UDP receive path so receiveLoop can be exercised
 // with pre-seeded byte sequences in tests.
+//
+// The netip.AddrPort form is deliberate: *net.UDPConn.ReadFromUDPAddrPort is
+// allocation-free, whereas ReadFromUDP heap-allocates a *net.UDPAddr and its
+// IP slice per packet when the result crosses an interface boundary.
 type PacketReader interface {
-	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
+	ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error)
 	Close() error
 }
 
@@ -115,11 +119,11 @@ func (s *SwappableSender) Close() error {
 // SwappableReceiver wraps a PacketReader so it can be atomically replaced at
 // runtime without races with the blocking receive loop.
 //
-// ReadFromUDP snapshots the current implementation under a read lock and then
-// releases the lock before blocking, so a concurrent swap is never blocked by
-// an in-flight I/O call. Closing the old connection after the swap unblocks
-// any in-progress ReadFromUDP on the old socket, causing receiveLoop to loop
-// back and immediately read from the new socket.
+// ReadFromUDPAddrPort snapshots the current implementation under a read lock
+// and then releases the lock before blocking, so a concurrent swap is never
+// blocked by an in-flight I/O call. Closing the old connection after the swap
+// unblocks any in-progress read on the old socket, causing receiveLoop to
+// loop back and immediately read from the new socket.
 type SwappableReceiver struct {
 	impl PacketReader
 	mu   sync.RWMutex
@@ -129,13 +133,13 @@ func NewSwappableReceiver(r PacketReader) *SwappableReceiver {
 	return &SwappableReceiver{impl: r}
 }
 
-// ReadFromUDP satisfies PacketReader.
-func (r *SwappableReceiver) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+// ReadFromUDPAddrPort satisfies PacketReader.
+func (r *SwappableReceiver) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
 	r.mu.RLock()
 	impl := r.impl
 	r.mu.RUnlock()
 
-	return impl.ReadFromUDP(b)
+	return impl.ReadFromUDPAddrPort(b)
 }
 
 // Close satisfies PacketReader and closes the current underlying reader.
@@ -149,7 +153,7 @@ func (r *SwappableReceiver) Close() error {
 
 // Swap atomically replaces the underlying PacketReader and returns the
 // previous one so the caller can close it (which unblocks any in-flight
-// ReadFromUDP on the old connection).
+// read on the old connection).
 func (r *SwappableReceiver) Swap(newR PacketReader) PacketReader {
 	r.mu.Lock()
 	old := r.impl

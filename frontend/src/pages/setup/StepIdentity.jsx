@@ -8,6 +8,7 @@
 // validator. When status.alreadyConfigured is true the user is shown a
 // warning banner and the Next button is double-confirmed.
 
+import LatSelect from '../../components/LatSelect.jsx';
 import { useSetup, SETUP_ACTIONS } from '../../contexts/SetupContext.jsx';
 import { MeshRole } from '../../gen/openmanet/setup/v1/setup_pb.js';
 import { ROLE_LABELS } from './labels.js';
@@ -26,6 +27,7 @@ function isValidHostname(s) {
 export default function StepIdentity({ status }) {
   const { state, dispatch } = useSetup();
   const hostnameValid = isValidHostname(state.hostname);
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   return (
     <div className="setup-step">
@@ -60,6 +62,21 @@ export default function StepIdentity({ status }) {
         <div className="setup-help">
           Used as the device&apos;s mDNS name (e.g. <code>{state.hostname || 'openmanet-1'}.local</code>).
         </div>
+      </div>
+
+      <div className="lat-field">
+        <label id="setup-timezone-label">Timezone</label>
+        <LatSelect
+          ariaLabel="Timezone"
+          value={state.timezone}
+          options={(status?.timezones ?? []).map((z) => ({ value: z, label: z }))}
+          onChange={(v) => dispatch({ type: SETUP_ACTIONS.SET_TIMEZONE, value: v })}
+        />
+        {state.timezone && state.timezone === browserZone && (
+          <div className="setup-detected">
+            detected from this browser — device clock syncs on apply
+          </div>
+        )}
       </div>
 
       <div className="setup-field">

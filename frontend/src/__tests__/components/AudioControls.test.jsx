@@ -38,6 +38,16 @@ describe('TestAudioControlsRender', () => {
     expect(speaker.value).toBe('80');
     expect(mic.value).toBe('40');
   });
+
+  it('sliders range to 200 for headroom past unity', () => {
+    renderControls({ speakerVol: 150, micVol: 150 });
+    const speaker = screen.getByLabelText('Speaker');
+    const mic = screen.getByLabelText('Mic Gain');
+    expect(speaker.max).toBe('200');
+    expect(mic.max).toBe('200');
+    expect(speaker.value).toBe('150');
+    expect(mic.value).toBe('150');
+  });
 });
 
 describe('TestAudioControlsOnChange', () => {

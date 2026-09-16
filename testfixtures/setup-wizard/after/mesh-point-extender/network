@@ -7,13 +7,6 @@ config interface 'loopback'
 config globals 'globals'
         option ula_prefix 'fd01:ed20:ecb4::/48'
 
-config interface 'lan'
-        option proto 'static'
-        option ipaddr '10.41.254.1'
-        option netmask '255.255.0.0'
-        option ip6assign '60'
-        option dns '1.1.1.1'
-
 config interface 'wan'
         option proto 'dhcp'
 
@@ -39,14 +32,14 @@ config interface 'ahwlan'
         option ip6assign '64'
         option ip6ifaceid 'eui64'
         list ip6class 'local'
-        option ipaddr '10.41.254.229'
-        option dns '1.1.1.1'
+        option ipaddr '10.41.1.2'
+        option dns '10.41.0.3'
         option device 'br-ahwlan'
 
 config device
         option name 'br-ahwlan'
         option type 'bridge'
-        option macaddr 'F2:b5:ad:97:32:5c'
+        option macaddr 'F2:c2:4c:6b:cc:c2'
         list ports 'eth0'
         list ports 'bat0'
 

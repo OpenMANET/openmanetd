@@ -12,10 +12,11 @@ import (
 
 // mockCommsClient records calls to the comms RPC service.
 type mockCommsClient struct {
-	setSendCalls    []setSendCall
-	setReceiveCalls []setReceiveCall
-	pttCalls        []int32
-	statusResp      *commsv1.GetCommsStatusResponse
+	setSendCalls         []setSendCall
+	setReceiveCalls      []setReceiveCall
+	selectTalkGroupCalls []int32
+	pttCalls             []int32
+	statusResp           *commsv1.GetCommsStatusResponse
 }
 
 type setSendCall struct {
@@ -52,6 +53,16 @@ func (m *mockCommsClient) SetReceiveTalkGroup(_ context.Context, req *commsv1.Se
 	return &commsv1.SetReceiveTalkGroupResponse{Success: true}, nil
 }
 
+func (m *mockCommsClient) SelectTalkGroup(_ context.Context, req *commsv1.SelectTalkGroupRequest) (*commsv1.SelectTalkGroupResponse, error) {
+	m.selectTalkGroupCalls = append(m.selectTalkGroupCalls, req.Talkgroup)
+
+	return &commsv1.SelectTalkGroupResponse{Success: true}, nil
+}
+
+func (m *mockCommsClient) StreamTalkGroupEvents(_ context.Context, _ *emptypb.Empty) (*connect.ServerStreamForClient[commsv1.StreamTalkGroupEventsResponse], error) {
+	return nil, nil
+}
+
 func (m *mockCommsClient) SendPTTEvent(_ context.Context, req *commsv1.SendPTTEventRequest) (*commsv1.SendPTTEventResponse, error) {
 	m.pttCalls = append(m.pttCalls, req.Event)
 
@@ -66,12 +77,47 @@ func (m *mockCommsClient) StreamAudioRx(_ context.Context, _ *commsv1.StreamAudi
 	return nil, nil
 }
 
+func (m *mockCommsClient) GetAudioMixer(_ context.Context, _ *emptypb.Empty) (*commsv1.GetAudioMixerResponse, error) {
+	return &commsv1.GetAudioMixerResponse{}, nil
+}
+
+func (m *mockCommsClient) UpdateAudioMixer(_ context.Context, _ *commsv1.UpdateAudioMixerRequest) (*commsv1.UpdateAudioMixerResponse, error) {
+	return &commsv1.UpdateAudioMixerResponse{}, nil
+}
+
 func newTestBridge() (*Bridge, *mockCommsClient) {
 	comms := &mockCommsClient{}
 	hub := websocket.NewHub(nil)
 	b := NewBridge(hub, comms)
 
 	return b, comms
+}
+
+// TestWSChannelForTalkgroup pins the talkgroup→WS-channel-byte mapping used
+// by the audio RX loop. Zero (a daemon that predates the talkgroup field)
+// and out-of-range values fall back to channel 1 so audio keeps flowing.
+func TestWSChannelForTalkgroup(t *testing.T) {
+	tests := []struct {
+		name      string
+		talkgroup int32
+		want      byte
+	}{
+		{name: "zero falls back to 1", talkgroup: 0, want: 1},
+		{name: "channel 1", talkgroup: 1, want: 1},
+		{name: "channel 2", talkgroup: 2, want: 2},
+		{name: "channel 5", talkgroup: 5, want: 5},
+		{name: "max byte", talkgroup: 255, want: 255},
+		{name: "above byte range falls back", talkgroup: 256, want: 1},
+		{name: "negative falls back", talkgroup: -3, want: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wsChannel(tc.talkgroup); got != tc.want {
+				t.Errorf("wsChannel(%d): got %d, want %d", tc.talkgroup, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestBridge_HandleTXToggle(t *testing.T) {

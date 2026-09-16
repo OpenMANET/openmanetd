@@ -166,7 +166,10 @@ const _ = grpc.SupportPackageIsVersion7
 type NodeServiceClient interface {
 	// Retrieves detailed information for a specific node by hostname.
 	GetNode(ctx context.Context, in *GetNodeRequest, opts ...grpc.CallOption) (*GetNodeResponse, error)
-	// Lists all available nodes currently managed by the system.
+	// Lists all nodes currently managed by the system. Rows are fed by the
+	// alfred poll and expire: a peer silent for longer than alfred.nodeExpiry
+	// (default 24h) is deleted on the next poll and drops out of this list.
+	// No expiry runs while alfred itself is unreachable.
 	ListNodes(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListNodesResponse, error)
 }
 
@@ -202,7 +205,10 @@ func (c *nodeServiceClient) ListNodes(ctx context.Context, in *emptypb.Empty, op
 type NodeServiceServer interface {
 	// Retrieves detailed information for a specific node by hostname.
 	GetNode(context.Context, *GetNodeRequest) (*GetNodeResponse, error)
-	// Lists all available nodes currently managed by the system.
+	// Lists all nodes currently managed by the system. Rows are fed by the
+	// alfred poll and expire: a peer silent for longer than alfred.nodeExpiry
+	// (default 24h) is deleted on the next poll and drops out of this list.
+	// No expiry runs while alfred itself is unreachable.
 	ListNodes(context.Context, *emptypb.Empty) (*ListNodesResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }

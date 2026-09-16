@@ -3,7 +3,7 @@ package comms
 import (
 	"context"
 	"errors"
-	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
@@ -166,7 +166,7 @@ type trackingReader struct {
 	mu     sync.Mutex
 }
 
-func (r *trackingReader) ReadFromUDP(_ []byte) (int, *net.UDPAddr, error) {
+func (r *trackingReader) ReadFromUDPAddrPort(_ []byte) (int, netip.AddrPort, error) {
 	// Block forever until closed – tests drive this via Close().
 	select {} //nolint:staticcheck
 }
@@ -183,7 +183,7 @@ func (r *trackingReader) Close() error {
 // ─── mockPacket / mockReader ──────────────────────────────────────────────────
 
 type mockPacket struct {
-	src  *net.UDPAddr
+	src  netip.AddrPort
 	data []byte
 }
 
@@ -203,7 +203,7 @@ func newMockReader(pkts ...mockPacket) *mockReader {
 	}
 }
 
-func (m *mockReader) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+func (m *mockReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
 	for {
 		m.mu.Lock()
 
@@ -220,7 +220,7 @@ func (m *mockReader) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 
 		select {
 		case <-m.closed:
-			return 0, nil, errors.New("reader closed")
+			return 0, netip.AddrPort{}, errors.New("reader closed")
 		default:
 		}
 	}
@@ -239,6 +239,24 @@ func (m *mockReader) remaining() int {
 
 	return len(m.packets)
 }
+
+// ─── fakeErrReader ───────────────────────────────────────────────────────────
+
+// fakeErrReader is a PacketReader whose reads always fail with err. reads
+// counts attempts so tests can assert receiveLoop backs off instead of
+// busy-spinning on a permanently failing socket.
+type fakeErrReader struct {
+	err   error
+	reads atomic.Int64
+}
+
+func (f *fakeErrReader) ReadFromUDPAddrPort(_ []byte) (int, netip.AddrPort, error) {
+	f.reads.Add(1)
+
+	return 0, netip.AddrPort{}, f.err
+}
+
+func (f *fakeErrReader) Close() error { return nil }
 
 // ─── mockEventSource ─────────────────────────────────────────────────────────
 

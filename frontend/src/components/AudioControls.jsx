@@ -26,13 +26,15 @@ export default React.memo(function AudioControls({
 
   return (
     <div className="audio-controls">
+      {/* 0-200: values past 100 amplify past unity, kept clean by the
+          audio engine's limiters. 100 = unity gain. */}
       <div className="pbar-row">
         <span className="pbar-label">Speaker</span>
         <input
           type="range"
           className="lat-slider"
           min="0"
-          max="100"
+          max="200"
           value={speakerVol}
           onChange={(e) => onSpeakerChange(Number(e.target.value))}
           aria-label="Speaker"
@@ -46,7 +48,7 @@ export default React.memo(function AudioControls({
           type="range"
           className="lat-slider"
           min="0"
-          max="100"
+          max="200"
           value={micVol}
           onChange={(e) => onMicChange(Number(e.target.value))}
           aria-label="Mic Gain"

@@ -59,13 +59,17 @@
   border: 1px solid var(--border-subtle);
 }
 
+/* Fixed key column keeps the value next to its label rather than pushed to
+   the far edge of a stretched grid cell. Wide enough for "DNS Forwarding". */
 .net-panel .status-strip .kv {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  align-items: baseline;
+  gap: 8px;
   font-size: 11px;
   border-bottom: none;
   padding: 2px 0;
+  min-width: 0;
 }
 
 .net-panel .status-strip .kv .k {
@@ -73,11 +77,14 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-size: 10px;
+  white-space: nowrap;
 }
 
 .net-panel .status-strip .kv .v {
   color: var(--text);
   font-family: var(--font-mono);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .net-panel .status-strip .kv .v.accent { color: var(--accent); }
@@ -138,7 +145,7 @@
   }
 
   .net-panel .status-strip {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
 
   /* Tables can become very wide on narrow screens; rely on horizontal scroll

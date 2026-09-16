@@ -4,7 +4,7 @@ package comms
 
 import (
 	"context"
-	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -78,10 +78,10 @@ func newIntegrationReceiver(t *testing.T) (*CommsConfig, *PortChannel, *CommsRun
 	}
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
+	pc.Decoder = &mockDecoder{fillValue: 1234, returnN: int(rtp.FrameSamples)}
 
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{fillValue: 1234, returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 
 	cfg := &CommsConfig{Log: zerolog.Nop(), Loopback: true}
@@ -135,7 +135,7 @@ func drainConcealmentFrames(cfg *CommsConfig, pc *PortChannel, rt *CommsRuntime)
 // pushPackets enqueues raw datagrams onto the mockReader so the next
 // ReadFromUDP calls return them. Safe to call concurrently with receiveLoop.
 func pushPackets(reader *mockReader, raws ...[]byte) {
-	src := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4)}
+	src := netip.MustParseAddrPort("1.2.3.4:5004")
 
 	reader.mu.Lock()
 	defer reader.mu.Unlock()

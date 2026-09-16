@@ -43,24 +43,26 @@ Every snapshot is a single JSON object with this shape:
 
 ```json
 {
-  "schema_version": "1.2.0",
+  "schema_version": "1.6.0",
   "captured_at_start": "2026-04-09T12:34:56.789012345Z",
   "captured_at_end":   "2026-04-09T12:34:56.789013101Z",
   "daemon": { ... },
   "runtime": { ... },
   "sections": [
-    { "name": "comms",      "data": { ... } },
-    { "name": "blos",       "data": { ... } },
-    { "name": "sysupgrade", "data": { ... } }
+    { "name": "comms",       "data": { ... } },
+    { "name": "blos",        "data": { ... } },
+    { "name": "sysupgrade",  "data": { ... } },
+    { "name": "audio_mixer", "data": { ... } },
+    { "name": "wireless",    "data": { ... } }
   ]
 }
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | string | Semver of the envelope schema. Bump minor for additive fields, major for breaking changes. The current value is `1.2.0`. |
+| `schema_version` | string | Semver of the envelope schema. Bump minor for additive fields, major for breaking changes. The current value is `1.6.0`. |
 | `captured_at_start` | RFC3339 timestamp | Wall-clock time when the capture loop began reading counters. |
-| `captured_at_end` | RFC3339 timestamp | Wall-clock time when the capture loop finished. The difference `captured_at_end - captured_at_start` bounds the counter-read skew window; in practice this is microseconds. |
+| `captured_at_end` | RFC3339 timestamp | Wall-clock time when the capture loop finished. The difference `captured_at_end - captured_at_start` bounds the counter-read skew window; in practice this is microseconds, but it can stretch into milliseconds when the `wireless` section's cache is cold (the first `Refresh` after the 5 s TTL walks netlink under the registry mutex). |
 | `daemon.version` | string | openmanetd build version. Empty until the build system populates it. |
 | `daemon.hostname` | string | The result of `os.Hostname()` at daemon startup. |
 | `daemon.pid` | int | Unix process ID. |
@@ -105,9 +107,13 @@ so reading them does not stall the TX or RX paths.
   "broadcasting": false,
   "remote_rx_active": false,
   "control_source": "openvlm",
+  "active_talkgroup": 2,
+  "talkgroup_events_dropped": 0,
   "broadcast_encoder": { ... },
   "web_bridge": { ... },
   "fec_adapter": { ... },
+  "announcer": { ... },
+  "gpio_selector": { ... },
   "ports": [ ... ]
 }
 ```
@@ -118,9 +124,13 @@ so reading them does not stall the TX or RX paths.
 | `broadcasting` | bool | `true` when the TX gate is currently open (mid-PTT). |
 | `remote_rx_active` | bool | `true` when the half-duplex cache reports a remote packet was received recently; TX is blocked while this is set. |
 | `control_source` | string | Active PTT control source: `openvlm`, `nanoptt`, `web`, or `roip`. |
+| `active_talkgroup` | int | 1-based talk group currently active; 0 = never selected or comms down. See **comms.talkgroup** below. |
+| `talkgroup_events_dropped` | uint64 | Talk group events shed by bounded-buffer stream subscribers. See **comms.talkgroup** below. |
 | `broadcast_encoder` | object | TX-side audio encoder counters. |
 | `web_bridge` | object | Web-mode RX bridge counters. |
 | `fec_adapter` | object | Adaptive Opus FEC control-loop state. See **comms.fec_adapter** below. |
+| `announcer` | object | Voice-announcement player counters. See **comms.talkgroup** below. |
+| `gpio_selector` | object | Hardware talk group selector counters. See **comms.talkgroup** below. |
 | `ports` | array | Per-talk-group counters. |
 
 #### `comms.broadcast_encoder`
@@ -151,8 +161,10 @@ audio bridge that ships them to browser clients.
 
 | Field | Unit | Meaning |
 |---|---|---|
-| `rx_push_in` | count | Monotonic count of frames offered to the bridge (every `PushRxFrame` invocation). |
-| `rx_push_drop` | count | Monotonic count of frames dropped because the bridge's internal channel was full. Compute `rx_push_drop / rx_push_in` — sustained ratios above ~1% mean the browser client is not draining RX fast enough. |
+| `rx_push_in` | count | Monotonic count of frames offered to the bridge (every `PushRxFrame` invocation). Frames only reach the bridge while at least one consumer is attached — see `rx_gated_no_consumer`. |
+| `rx_push_drop` | count | Monotonic count of frames discarded by the bridge: the *oldest* queued frame evicted when the ~200 ms channel is full (drop-oldest — the consumer resumes on fresh audio, never more than ~200 ms behind live), plus any stale frames flushed when the first consumer attaches. Compute `rx_push_drop / rx_push_in` — sustained ratios above ~1% mean the browser client is not draining RX fast enough. |
+| `rx_gated_no_consumer` | count | Monotonic count of frames the playout drain discarded without offering to the bridge because no RPC stream was attached. Rising while `consumers` is 0 is normal idle web mode (an unattended node receiving traffic), not loss. |
+| `consumers` | gauge | Number of `StreamAudioRx` RPC streams currently attached. When 0, `rx_push_in` stops advancing by design and `rx_gated_no_consumer` advances instead. |
 
 #### `comms.fec_adapter`
 
@@ -174,6 +186,25 @@ mesh links), so no inter-node feedback protocol is needed. See
 | `write_errors` | count | Monotonic count of `SetPacketLossPerc` calls that the Opus encoder rejected. Should stay at 0 in production; non-zero means something is wrong with the encoder state. |
 | `floor` | perc (0-100) | The operator-configured lower bound from `comms.packetLossPerc`. The adapter will never drop below this value; it is also the initial level at startup. |
 
+#### `comms.talkgroup` — selection, announcer, and hardware selector
+
+Exclusive talk group selection (`SelectTalkGroup`, RPC- or hardware-driven),
+the voice-announcement player that reads selection changes back to the
+operator, and the Raven 5-position GPIO selector. `announcer` and
+`gpio_selector` read as all-zero when the corresponding subsystem isn't
+wired in (web mode for the announcer, a non-Raven board or
+`comms.gpioSelector.enable: false` for the selector) — zero here means
+"not present", not "broken".
+
+| Field | Unit | Meaning |
+|---|---|---|
+| `active_talkgroup` | channel number | 1-based talk group currently active; 0 = never selected or comms down. |
+| `talkgroup_events_dropped` | count | Talk group events shed by bounded-buffer stream subscribers. A rising value with an active `StreamTalkGroupEvents` client means that client reads too slowly. |
+| `announcer.plays` | count | Voice announcement playbacks started since comms start. |
+| `announcer.frame_drops` | count | Announcement frames refused by a full playback buffer. |
+| `gpio_selector.transitions` | count | Accepted hardware selector position changes. **Includes the one boot-time selection** — the selector emits the initial switch position at start, which counts as a transition, so a fresh daemon shows `transitions >= 1` even before the operator has touched the switch. |
+| `gpio_selector.held_glitches` | count | Selector edge wakeups where zero or multiple pins were active and the previous selection was held. |
+
 #### `comms.ports[*]`
 
 One entry per configured multicast talk group. The slice order mirrors
@@ -183,14 +214,16 @@ One entry per configured multicast talk group. The slice order mirrors
 |---|---|---|
 | `address` | string | Multicast group address (e.g. `239.0.0.1`). |
 | `port` | int | UDP port. |
+| `qos_dscp` | int (0-63) | DSCP the kernel actually holds on this port's RTP sender socket, read back once at socket build time (RTCP carries the same marking). 46 = EF (default, WMM AC_VI on the mesh), 48 = CS6 (AC_VO). 0 = unmarked: `comms.dscp: 0`, a receive-only port, or a marking failure — see the QoS heuristic below. |
+| `qos_so_priority` | int | Kernel `SO_PRIORITY` read-back for the same socket. `256 + qos_dscp>>3` (e.g. 261 for EF) when fully applied — the 802.1d passthrough range that pins the WMM access class on the first hop. A value of 0-6 with a nonzero `qos_dscp` means the `SO_PRIORITY` setsockopt failed (missing CAP_NET_ADMIN) and the socket runs TOS-only; batman-adv still derives the class from the IP header on every hop. |
 | `send_enabled` | bool | Runtime toggle — if `false`, the TX path skips this talk group. |
 | `receive_enabled` | bool | Runtime toggle — if `false`, incoming RTP is not pushed into the jitter buffer. |
 | `playback_underruns` | count | Number of playback-side decode failures that had to recover via PLC (packet loss concealment). |
 | `rx_pkts` | count | Monotonic count of successful `ReadFromUDP` returns on this port's receive socket (packets the kernel handed userspace). |
 | `rx_loopback` | count | Packets dropped by the loopback filter (own-IP suppression) before reaching the RTP parser. |
-| `rx_parse_errs` | count | Packets that failed `rtp.ParseIncoming`. Sustained nonzero deltas indicate a non-RTP sender aliasing the port. |
+| `rx_parse_errs` | count | Packets that failed `rtp.ParseIncoming`. Sustained nonzero deltas indicate a non-RTP sender aliasing the port. Only counted while the port is receive-enabled — muted ports discard packets before parsing, so a muted port always shows a zero delta here regardless of traffic. |
 | `rx_pushed` | count | Packets that `PushWithSSRC` accepted into the jitter buffer. In a healthy stream, `rx_pushed ≈ rx_pkts - rx_loopback - rx_parse_errs`. |
-| `rx_push_rejected` | count | Packets that `PushWithSSRC` rejected as stale-cursor, duplicate, or overflow. A sustained nonzero delta with `jitter.ssrc_resets` flat indicates a consumer-side cursor-advance bug or sender reordering. |
+| `rx_push_rejected` | count | Packets that `PushWithSSRC` rejected as stale-cursor, duplicate, overflow, or oversized (payload larger than the RFC 6716 1275-byte frame cap — a conforming Opus sender never produces these). A sustained nonzero delta with `jitter.ssrc_resets` flat indicates a consumer-side cursor-advance bug, sender reordering, or a non-Opus sender aliasing the port. |
 | `web_popped_skipped` | count | `webPlayoutLoop` observed the jitter buffer advancing past a missing sequence number (only happens when the buffer is half-full of out-of-order packets). Zero on the portaudio playout path. |
 | `jitter.overflows` | count | Incoming packets rejected because the jitter buffer was full. Sustained non-zero deltas across snapshots mean the receiver is behind the sender or the network is bursting. |
 | `jitter.ssrc_resets` | count | Mid-stream SSRC transitions the jitter buffer handled by resetting. High values (multiple per minute) suggest multiple talkers or sender restarts. |
@@ -199,7 +232,7 @@ One entry per configured multicast talk group. The slice order mirrors
 | `jitter.gap_runs_2_5` | count | Gap runs of 2–5 frames (40–100 ms). |
 | `jitter.gap_runs_6_10` | count | Gap runs of 6–10 frames (120–200 ms). |
 | `jitter.gap_runs_11_20` | count | Gap runs of 11–20 frames (220–400 ms). |
-| `jitter.gap_runs_21_50` | count | Gap runs of 21–50 frames (420 ms–1 s). Will only fire if `MaxDepth` is raised above 24. |
+| `jitter.gap_runs_21_50` | count | Gap runs of 21–50 frames (420 ms–1 s). Runs longer than 31 cannot occur at the current `MaxDepth` of 32. |
 | `jitter.gap_runs_over_50` | count | Gap runs of 51+ frames (>1 s). Will only fire if `MaxDepth` is raised above 50. |
 | `rx_gate.last_mark_unix_nano` | unix-nanoseconds | Timestamp of the most recent Mark call; 0 = never marked. |
 | `rx_gate.threshold_ns` | nanoseconds | Half-duplex receive window. Default is 400 ms. |
@@ -264,6 +297,80 @@ One entry per configured multicast talk group. The slice order mirrors
 | `child_pid` | int32 | pid | PID of the detached sysupgrade child once it has been launched via setsid+nohup. 0 before the runner returns; once non-zero the daemon has handed off control. |
 | `in_progress` | bool | — | True while a per-upgrade goroutine or detached sysupgrade child is alive. Useful as a one-field check before deciding whether `phase` is meaningful. |
 | `capable` | bool | — | True when all sysupgrade preconditions are satisfied (binary present, squashfs root, /overlay mounted). |
+
+### `audio_mixer` — hardware mixer cache
+
+Last daemon-side reading of the sound card's ALSA mixer (speaker/mic
+volume, AGC), cached atomically on every startup apply, `GetAudioMixer`,
+and `UpdateAudioMixer`. This is a cache, not live hardware: changes made
+out-of-band (alsamixer, VOL+/VOL− buttons) appear only after the next API
+read.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `speaker_volume_pct` | int | Last known playback volume percent (0–100). -1 = never read or control absent. |
+| `mic_volume_pct` | int | Last known capture volume percent (0–100). -1 = never read or control absent. |
+| `agc_known` | bool | Whether the Auto Gain Control switch has been observed at all. When false, `agc_enabled` is meaningless. |
+| `agc_enabled` | bool | Last known Auto Gain Control state. When true, the CM108B adjusts capture gain itself and manual mic volume changes may appear ineffective. |
+
+### `wireless` — mesh station rates
+
+Every mesh-point wifi interface with the stations the driver currently
+knows (`iw station dump` data via nl80211), read through the same
+TTL-bounded wireless cache the API handlers use. Values are therefore at
+most `DefaultWirelessCacheTTL` (5 s) old, and the netlink refresh that
+fills them is shared with — not added to — the API's own polling. The
+section is registered only when the mesh management workers are running
+(`alfred.enable`); on a daemon without them the section is absent.
+
+```json
+{
+  "interfaces": [
+    {
+      "name": "mesh1",
+      "stations": [
+        {
+          "mac": "9c:ef:d5:f9:80:4d",
+          "signal_dbm": -61,
+          "signal_avg_dbm": -63,
+          "tx_bitrate_kbps": 86700,
+          "tx_phy": "he",
+          "tx_width_mhz": 40,
+          "tx_mcs": 7,
+          "tx_nss": 2,
+          "rx_bitrate_kbps": 72200,
+          "rx_phy": "ht",
+          "rx_width_mhz": 20,
+          "rx_mcs": 7,
+          "rx_nss": 1,
+          "tx_retries": 12,
+          "tx_failed": 3,
+          "inactive_ms": 1500
+        }
+      ]
+    },
+    { "name": "mesh0", "stations": [] }
+  ]
+}
+```
+
+| Field | Type | Unit | Meaning |
+|---|---|---|---|
+| `error` | string | — | Present only when the wifi interface list could not be read (nl80211 failure); `interfaces` is then empty. |
+| `interfaces[*].name` | string | — | Linux interface name of a mesh-point (802.11s) interface. AP and station interfaces are not listed. |
+| `interfaces[*].error` | string | — | Present only when the station dump for this interface failed; `stations` is then empty and the other interfaces are still reported. |
+| `interfaces[*].stations[*].mac` | string | — | Peer MAC, lowercase colon-separated. Empty when the driver returned an address that is not 6 bytes. |
+| `…stations[*].signal_dbm` | int32 | dBm | Signal of the last received PPDU from this peer (`NL80211_STA_INFO_SIGNAL`). |
+| `…stations[*].signal_avg_dbm` | int32 | dBm | Driver-averaged signal (`NL80211_STA_INFO_SIGNAL_AVG`); the value the mesh admission floor (`mesh_rssi_threshold`) is compared against. |
+| `…stations[*].tx_bitrate_kbps` | int32 | kbit/s | Rate the local radio last transmitted to this peer with. When the driver reports no rate attributes this is the plain station bitrate and `tx_phy` is empty. |
+| `…stations[*].tx_phy` | string | — | Modulation family of the TX rate: `legacy` (802.11a/b/g), `ht` (n), `vht` (ac), `he` (ax), `eht` (be), or `""` when unknown. S1G/HaLow rates report width 1–16 with `legacy` or `ht` depending on which attributes the driver emits; `mcs` is −1 until the parser learns the S1G attributes. |
+| `…stations[*].tx_width_mhz` | int32 | MHz | Channel width the TX rate used: 1/2/4/8/16 (S1G), 20/40/80/160/320; 160 for 80+80. 0 when unknown. |
+| `…stations[*].tx_mcs` | int32 | index | MCS of the TX rate. -1 for legacy rates and when not reported. HT indexes are per-stream (`MCS = HT_MCS % 8`, `NSS = HT_MCS/8 + 1`): an HT40 2SS MCS15 link renders as `tx_mcs: 7` with `tx_nss: 2`, while `iw station dump` prints `MCS 15`. |
+| `…stations[*].tx_nss` | int32 | count | Spatial streams of the TX rate. -1 when not reported. |
+| `…stations[*].rx_bitrate_kbps`, `rx_phy`, `rx_width_mhz`, `rx_mcs`, `rx_nss` | as TX | as TX | The same five fields for the rate the peer last used towards this radio. |
+| `…stations[*].tx_retries` | int64 | count | Cumulative frames the driver retransmitted to this peer (`NL80211_STA_INFO_TX_RETRIES`). |
+| `…stations[*].tx_failed` | int64 | count | Cumulative frames that exhausted retries to this peer (`NL80211_STA_INFO_TX_FAILED`). |
+| `…stations[*].inactive_ms` | int64 | milliseconds | Time since the driver last saw traffic from this peer. |
 
 ## Interpretation heuristics for LLM triage
 
@@ -352,6 +459,63 @@ thumb in order and flag anything that fits.
    tight). Cross-reference `sysupgrade.capable` and
    `sysupgrade.capable_reason` to confirm the device should ever
    have been able to flash in the first place.
+14. **Voice QoS marking state.** For every Send-enabled port,
+   `comms.ports[*].qos_dscp` should equal the configured `comms.dscp`
+   (default 46) and `qos_so_priority` should equal `256 + qos_dscp>>3`
+   (261 at the default). `qos_dscp == 0` on a Send-enabled port while
+   `comms.dscp` is nonzero means the marking setsockopt failed at
+   startup — voice is riding best-effort; check daemon logs for
+   "QoS marking". A nonzero `qos_dscp` with `qos_so_priority` in 0-6
+   means TOS-only marking (`SO_PRIORITY` was refused, typically missing
+   CAP_NET_ADMIN): batman-adv hops still classify correctly from the IP
+   header, but a socket egressing a wlan directly would not. If voice
+   latency under load is the complaint and these fields read 0, fix
+   marking before tuning anything else — an unmarked voice stream
+   queues behind bulk traffic in the WMM best-effort class on every
+   hop.
+15. **"No audio heard" triage order.** Before suspecting the jitter
+   buffer or playback path, check `audio_mixer.speaker_volume_pct` — a
+   value at or near 0 means the hardware mixer is turned down. -1 means
+   the daemon has never touched the mixer (no `comms.audio` config and
+   no API call), so the hardware may be at any level.
+16. **"Mic too quiet / too hot" with `agc_enabled: true`.** The CM108B's
+   AGC overrides manual capture gain; toggle AGC off via
+   `UpdateAudioMixer` before tuning `mic_volume_pct`.
+17. **Selector wiring health.** A steadily rising
+   `comms.gpio_selector.held_glitches` with flat
+   `comms.gpio_selector.transitions` indicates a stuck or miswired
+   selector (multiple pins grounded, or a floating line) — the
+   operator's switch turns are being ignored. Occasional held-glitches
+   during transitions are normal rotary behavior (the wiper bridges two
+   contacts briefly as it turns). Cross-check `comms.active_talkgroup`
+   against the physical switch position; remember `transitions` starts
+   at 1 on a fresh boot (the selector emits the initial position as a
+   transition), so `transitions == 1` with zero held-glitches since
+   boot is healthy, not stuck.
+18. **Announcement audibility.** `comms.announcer.plays` rising with
+   `comms.announcer.frame_drops` near zero is healthy. Sustained
+   `frame_drops` means the playback buffer is contended — check whether
+   the active port's stream is running
+   (`comms.ports[*].receive_enabled`).
+19. **2.4 GHz link fell back to HT.** On a `mesh1` (batmesh1) station,
+   `wireless.interfaces[*].stations[*].tx_phy` of `"ht"` or
+   `tx_width_mhz` of 20 while `signal_dbm` is above −70 means the HE40
+   configured by setup did not negotiate: the peer lacks HE, the two
+   radios disagree on width, or `noscan` is missing on one side. Expect
+   roughly a third of the ~100 Mbps ceiling the batmesh1 tuning targets.
+   Compare `htmode` on both nodes before touching anything else. A
+   `mesh0` (HaLow) station at 1–16 MHz is normal whichever of
+   `legacy`/`ht` it reports.
+20. **Rate/RSSI mismatch.** `tx_mcs ≤ 2` with `signal_dbm > −70` on an
+   `he` or `ht` link means rate control is backing off for interference
+   or retries, not distance. Read `tx_retries` and `tx_failed` deltas
+   across two snapshots: rising `tx_failed` with a strong signal points
+   at a hidden node or a co-channel neighbor, not at range.
+21. **Admission floor at work.** A station with `signal_avg_dbm` below
+   the configured `mesh_rssi_threshold` (−80 by default) that persists
+   across snapshots is a peering that predates the threshold write;
+   `inactive_ms` growing without bound means the peer is gone and the
+   plink will time out on its own.
 
 ## Skew note
 
@@ -360,7 +524,9 @@ the first atomic load and the last, the system keeps running — so
 derived values that combine multiple counters (e.g. `encode_dur_sum_ns /
 encode_dur_count`) may be off by one frame. The window is bounded
 exactly by `captured_at_end - captured_at_start`, typically a few
-microseconds. When comparing deltas across two snapshots, treat values
+microseconds — though it can reach milliseconds on a cold `wireless`
+cache, where the first `Refresh` after the 5 s TTL walks netlink under
+the registry mutex. When comparing deltas across two snapshots, treat values
 that moved by less than ~50 as within the skew noise floor.
 
 No producer-side locks are added for capture; this is an explicit

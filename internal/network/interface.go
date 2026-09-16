@@ -15,6 +15,16 @@ const (
 	DefaultBatmanInterfaceName            string = "bat0"
 	DefaultEthernetInterfaceName          string = "eth0"
 	DefaultSecondaryEthernetInterfaceName string = "eth1"
+
+	// DefaultBridgeMTU and DefaultEthernetMTU are the transport MTUs
+	// for br-ahwlan and the ethernet ports bridged into it: 1500 minus
+	// the batman-adv header, so frames from the wired side fit through
+	// bat0 without fragmentation. The daemon applies them through
+	// netlink at every start (internal/mgmt) and the setup wizard
+	// persists them as `option mtu` on the UCI device sections so a
+	// network reload keeps them.
+	DefaultBridgeMTU   int = 1460
+	DefaultEthernetMTU int = 1460
 )
 
 type NetworkInterface struct {

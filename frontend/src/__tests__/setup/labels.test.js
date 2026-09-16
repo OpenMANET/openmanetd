@@ -63,6 +63,12 @@ describe('LabelMaps', () => {
   it('ENCRYPTION_LABELS covers every WifiEncryption', () => {
     assertLabelsCoverEnum(WifiEncryption, ENCRYPTION_LABELS, 'WifiEncryption');
   });
+
+  it('labels the two mixed modes by what OpenWrt actually configures', () => {
+    // psk-mixed = wpa=3 (WPA1+WPA2 PSK); sae-mixed = psk-sae (WPA2+WPA3).
+    expect(ENCRYPTION_LABELS[WifiEncryption.PSK_MIXED]).toBe('WPA / WPA2 (mixed, legacy)');
+    expect(ENCRYPTION_LABELS[WifiEncryption.SAE_MIXED]).toBe('WPA2 / WPA3 (mixed)');
+  });
 });
 
 describe('optionsFromMap', () => {

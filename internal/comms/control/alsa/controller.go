@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 
 	"github.com/gen2brain/alsa"
 	"github.com/rs/zerolog"
@@ -22,9 +21,8 @@ import (
 	"github.com/openmanet/openmanetd/internal/comms/control"
 )
 
-// DefaultControlName is the ALSA simple-control name the controller adjusts
-// when Controller.ControlName is empty. "Master" is the conventional name
-// for the primary playback volume on USB sound cards including the CM108B.
+// DefaultControlName is the first playback candidate the controller tries
+// when Controller.ControlName is empty (see PlaybackVolumeNames).
 const DefaultControlName = "Master"
 
 // DefaultStep is the per-press change applied to the raw mixer-control
@@ -38,17 +36,19 @@ const DefaultStep = 1
 // without requiring a real /dev/snd/controlC* device.
 type Mixer interface {
 	CtlByName(name string) (Ctl, error)
+	ControlNames() []string
 	Close() error
 }
 
 // Ctl is the minimal subset of github.com/gen2brain/alsa.MixerCtl used by
-// the controller.
+// the controller and Volume.
 type Ctl interface {
 	NumValues() uint32
 	Value(index uint) (int, error)
 	SetValue(index uint, value int) error
 	RangeMin() (int, error)
 	RangeMax() (int, error)
+	IsBool() bool
 }
 
 // Opener opens an ALSA mixer for the given card index. Production callers
@@ -81,14 +81,6 @@ func (c *Controller) Handle(ctx context.Context, ev control.AuxEvent) {
 	}
 }
 
-func (c *Controller) controlName() string {
-	if c.ControlName != "" {
-		return c.ControlName
-	}
-
-	return DefaultControlName
-}
-
 func (c *Controller) step() int {
 	if c.Step > 0 {
 		return c.Step
@@ -109,24 +101,21 @@ func (c *Controller) opener() Opener {
 // clamped to [RangeMin, RangeMax]. Errors at any step are logged and
 // swallowed so a transient ALSA failure cannot crash the daemon.
 func (c *Controller) adjust(_ context.Context, dir int) {
-	cardStr := os.Getenv("ALSA_CARD")
-	if cardStr == "" {
-		c.Log.Debug().Msg("alsa-vol: ALSA_CARD not set; volume event ignored")
-
-		return
-	}
-
-	cardNum, err := strconv.Atoi(cardStr)
-	if err != nil || cardNum < 0 {
-		c.Log.Warn().Err(err).Str("ALSA_CARD", cardStr).
-			Msg("alsa-vol: ALSA_CARD is not a non-negative integer; volume event ignored")
-
-		return
-	}
-
-	m, err := c.opener()(uint(cardNum))
+	card, err := CardFromEnv()
 	if err != nil {
-		c.Log.Warn().Err(err).Int("card", cardNum).Msg("alsa-vol: failed to open mixer")
+		ev := c.Log.Debug()
+		if os.Getenv("ALSA_CARD") != "" {
+			ev = c.Log.Warn()
+		}
+
+		ev.Err(err).Msg("alsa-vol: volume event ignored")
+
+		return
+	}
+
+	m, err := c.opener()(card)
+	if err != nil {
+		c.Log.Warn().Err(err).Uint("card", card).Msg("alsa-vol: failed to open mixer")
 
 		return
 	}
@@ -137,17 +126,20 @@ func (c *Controller) adjust(_ context.Context, dir int) {
 		}
 	}()
 
-	name := c.controlName()
+	var (
+		ctl  Ctl
+		name string
+	)
 
-	ctl, err := m.CtlByName(name)
-	if err != nil {
-		c.Log.Warn().Err(err).Str("control", name).Msg("alsa-vol: control not found")
-
-		return
+	if c.ControlName != "" {
+		name = c.ControlName
+		ctl, err = m.CtlByName(name)
+	} else {
+		ctl, name, err = ResolveCtl(m, PlaybackVolumeNames)
 	}
 
-	if ctl == nil {
-		c.Log.Warn().Str("control", name).Msg("alsa-vol: nil control")
+	if err != nil || ctl == nil {
+		c.Log.Warn().Err(err).Str("control", name).Msg("alsa-vol: control not found")
 
 		return
 	}
@@ -228,18 +220,28 @@ func clamp(v, lo, hi int) int {
 
 // DefaultOpener is the production Opener: it opens the kernel mixer for the
 // given card via gen2brain/alsa and wraps the result so the controller's
-// Mixer/Ctl interfaces are satisfied.
+// Mixer/Ctl interfaces are satisfied. A second handle to the same control
+// node backs elemIO, which replaces the library's element value accessors
+// for INTEGER/BOOLEAN controls (see elemio.go for why).
 func DefaultOpener(card uint) (Mixer, error) {
 	m, err := alsa.MixerOpen(card)
 	if err != nil {
 		return nil, fmt.Errorf("alsa.MixerOpen card=%d: %w", card, err)
 	}
 
-	return &mixerWrap{m: m}, nil
+	eio, err := openElemIO(card)
+	if err != nil {
+		_ = m.Close() // best-effort; the open error is the one worth reporting
+
+		return nil, fmt.Errorf("elem io card=%d: %w", card, err)
+	}
+
+	return &mixerWrap{m: m, eio: eio}, nil
 }
 
 type mixerWrap struct {
-	m *alsa.Mixer
+	m   *alsa.Mixer
+	eio *elemIO
 }
 
 func (w *mixerWrap) CtlByName(name string) (Ctl, error) {
@@ -252,24 +254,68 @@ func (w *mixerWrap) CtlByName(name string) (Ctl, error) {
 		return nil, errors.New("CtlByName returned nil")
 	}
 
-	return &ctlWrap{c: c}, nil
+	return &ctlWrap{c: c, eio: w.eio}, nil
 }
 
 func (w *mixerWrap) Close() error {
+	var errs []error
+
 	if err := w.m.Close(); err != nil {
-		return fmt.Errorf("mixer close: %w", err)
+		errs = append(errs, fmt.Errorf("mixer close: %w", err))
 	}
 
-	return nil
+	if w.eio != nil {
+		if err := w.eio.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (w *mixerWrap) ControlNames() []string {
+	names := make([]string, 0, len(w.m.Ctls))
+	for _, c := range w.m.Ctls {
+		if c != nil {
+			names = append(names, c.Name())
+		}
+	}
+
+	return names
 }
 
 type ctlWrap struct {
-	c *alsa.MixerCtl
+	c   *alsa.MixerCtl
+	eio *elemIO
+}
+
+// routesThroughElemIO reports whether value access must bypass the
+// library: its INTEGER/BOOLEAN accessors overlay the kernel's long array
+// as int32, so channels past the first are unreachable on 64-bit targets.
+// ENUMERATED (u32 array) and INTEGER64/BYTES (other union members) keep
+// the library accessors.
+func (w *ctlWrap) routesThroughElemIO() bool {
+	if w.eio == nil {
+		return false
+	}
+
+	t := w.c.Type()
+
+	return t == alsa.SNDRV_CTL_ELEM_TYPE_BOOLEAN || t == alsa.SNDRV_CTL_ELEM_TYPE_INTEGER
 }
 
 func (w *ctlWrap) NumValues() uint32 { return w.c.NumValues() }
 
 func (w *ctlWrap) Value(index uint) (int, error) {
+	if w.routesThroughElemIO() {
+		v, err := w.eio.value(w.c.ID(), w.c.NumValues(), index)
+		if err != nil {
+			return 0, fmt.Errorf("ctl value: %w", err)
+		}
+
+		return v, nil
+	}
+
 	v, err := w.c.Value(index)
 	if err != nil {
 		return 0, fmt.Errorf("ctl value: %w", err)
@@ -279,6 +325,14 @@ func (w *ctlWrap) Value(index uint) (int, error) {
 }
 
 func (w *ctlWrap) SetValue(index uint, value int) error {
+	if w.routesThroughElemIO() {
+		if err := w.eio.setValue(w.c.ID(), w.c.NumValues(), index, value); err != nil {
+			return fmt.Errorf("ctl set value: %w", err)
+		}
+
+		return nil
+	}
+
 	if err := w.c.SetValue(index, value); err != nil {
 		return fmt.Errorf("ctl set value: %w", err)
 	}
@@ -302,4 +356,8 @@ func (w *ctlWrap) RangeMax() (int, error) {
 	}
 
 	return v, nil
+}
+
+func (w *ctlWrap) IsBool() bool {
+	return w.c.Type() == alsa.SNDRV_CTL_ELEM_TYPE_BOOLEAN
 }

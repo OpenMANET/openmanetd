@@ -99,6 +99,10 @@ func (m *RadioSettings) CloneVT() *RadioSettings {
 		tmpVal := *rhs
 		r.Disabled = &tmpVal
 	}
+	if rhs := m.MeshRssiThreshold; rhs != nil {
+		tmpVal := *rhs
+		r.MeshRssiThreshold = &tmpVal
+	}
 	if len(m.unknownFields) > 0 {
 		r.unknownFields = make([]byte, len(m.unknownFields))
 		copy(r.unknownFields, m.unknownFields)
@@ -267,6 +271,9 @@ func (this *RadioSettings) EqualVT(that *RadioSettings) bool {
 		return false
 	}
 	if this.Mode != that.Mode {
+		return false
+	}
+	if p, q := this.MeshRssiThreshold, that.MeshRssiThreshold; (p == nil && q != nil) || (p != nil && (q == nil || *p != *q)) {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -540,6 +547,11 @@ func (m *RadioSettings) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.MeshRssiThreshold != nil {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(*m.MeshRssiThreshold))
+		i--
+		dAtA[i] = 0x58
 	}
 	if m.Mode != 0 {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.Mode))
@@ -946,6 +958,11 @@ func (m *RadioSettings) MarshalToSizedBufferVTStrict(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.MeshRssiThreshold != nil {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(*m.MeshRssiThreshold))
+		i--
+		dAtA[i] = 0x58
+	}
 	if m.Mode != 0 {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.Mode))
 		i--
@@ -1270,6 +1287,9 @@ func (m *RadioSettings) SizeVT() (n int) {
 	}
 	if m.Mode != 0 {
 		n += 1 + protohelpers.SizeOfVarint(uint64(m.Mode))
+	}
+	if m.MeshRssiThreshold != nil {
+		n += 1 + protohelpers.SizeOfVarint(uint64(*m.MeshRssiThreshold))
 	}
 	n += len(m.unknownFields)
 	return n
@@ -2134,6 +2154,26 @@ func (m *RadioSettings) UnmarshalVT(dAtA []byte) error {
 					break
 				}
 			}
+		case 11:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MeshRssiThreshold", wireType)
+			}
+			var v int32
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.MeshRssiThreshold = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -3397,6 +3437,26 @@ func (m *RadioSettings) UnmarshalVTUnsafe(dAtA []byte) error {
 					break
 				}
 			}
+		case 11:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MeshRssiThreshold", wireType)
+			}
+			var v int32
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.MeshRssiThreshold = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])

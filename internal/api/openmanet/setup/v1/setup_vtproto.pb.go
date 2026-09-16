@@ -8,8 +8,10 @@ import (
 	fmt "fmt"
 	v1 "github.com/openmanet/openmanetd/internal/api/openmanet/wifi_config/v1"
 	protohelpers "github.com/planetscale/vtprotobuf/protohelpers"
+	timestamppb1 "github.com/planetscale/vtprotobuf/types/known/timestamppb"
 	proto "google.golang.org/protobuf/proto"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	io "io"
 	unsafe "unsafe"
 )
@@ -41,6 +43,27 @@ func (m *WifiStaProfile) CloneMessageVT() proto.Message {
 	return m.CloneVT()
 }
 
+func (m *MeshBackhaulProfile) CloneVT() *MeshBackhaulProfile {
+	if m == nil {
+		return (*MeshBackhaulProfile)(nil)
+	}
+	r := new(MeshBackhaulProfile)
+	r.MeshId = m.MeshId
+	r.Passphrase = m.Passphrase
+	r.BandwidthMhz = m.BandwidthMhz
+	r.Channel = m.Channel
+	r.CountryCode = m.CountryCode
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *MeshBackhaulProfile) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
 func (m *RadioApProfile) CloneVT() *RadioApProfile {
 	if m == nil {
 		return (*RadioApProfile)(nil)
@@ -51,6 +74,7 @@ func (m *RadioApProfile) CloneVT() *RadioApProfile {
 	r.Ssid = m.Ssid
 	r.Passphrase = m.Passphrase
 	r.Encryption = m.Encryption
+	r.MeshBackhaul = m.MeshBackhaul.CloneVT()
 	if len(m.unknownFields) > 0 {
 		r.unknownFields = make([]byte, len(m.unknownFields))
 		copy(r.unknownFields, m.unknownFields)
@@ -114,6 +138,8 @@ func (m *MeshNodeProfile) CloneVT() *MeshNodeProfile {
 	r.Role = m.Role
 	r.Mesh = m.Mesh.CloneVT()
 	r.Uplink = m.Uplink.CloneVT()
+	r.Timezone = m.Timezone
+	r.ClientTime = (*timestamppb.Timestamp)((*timestamppb1.Timestamp)(m.ClientTime).CloneVT())
 	if m.DeviceMode != nil {
 		r.DeviceMode = m.DeviceMode.(interface {
 			CloneVT() isMeshNodeProfile_DeviceMode
@@ -164,6 +190,7 @@ func (m *SetupRadio) CloneVT() *SetupRadio {
 	r.Band = m.Band
 	r.HardwareName = m.HardwareName
 	r.IsHalow = m.IsHalow
+	r.SupportsMeshBackhaul = m.SupportsMeshBackhaul
 	if rhs := m.Bandwidths; rhs != nil {
 		tmpContainer := make([]*SetupRadioBandwidth, len(rhs))
 		for k, v := range rhs {
@@ -240,6 +267,7 @@ func (m *GetSetupStatusResponse) CloneVT() *GetSetupStatusResponse {
 	r.AlreadyConfigured = m.AlreadyConfigured
 	r.CurrentHostname = m.CurrentHostname
 	r.CurrentCountry = m.CurrentCountry
+	r.CurrentTimezone = m.CurrentTimezone
 	if rhs := m.Radios; rhs != nil {
 		tmpContainer := make([]*SetupRadio, len(rhs))
 		for k, v := range rhs {
@@ -258,6 +286,11 @@ func (m *GetSetupStatusResponse) CloneVT() *GetSetupStatusResponse {
 			tmpContainer[k] = v.CloneVT()
 		}
 		r.Countries = tmpContainer
+	}
+	if rhs := m.Timezones; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.Timezones = tmpContainer
 	}
 	if len(m.unknownFields) > 0 {
 		r.unknownFields = make([]byte, len(m.unknownFields))
@@ -355,6 +388,37 @@ func (this *WifiStaProfile) EqualMessageVT(thatMsg proto.Message) bool {
 	}
 	return this.EqualVT(that)
 }
+func (this *MeshBackhaulProfile) EqualVT(that *MeshBackhaulProfile) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.MeshId != that.MeshId {
+		return false
+	}
+	if this.Passphrase != that.Passphrase {
+		return false
+	}
+	if this.BandwidthMhz != that.BandwidthMhz {
+		return false
+	}
+	if this.Channel != that.Channel {
+		return false
+	}
+	if this.CountryCode != that.CountryCode {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *MeshBackhaulProfile) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*MeshBackhaulProfile)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
 func (this *RadioApProfile) EqualVT(that *RadioApProfile) bool {
 	if this == that {
 		return true
@@ -374,6 +438,9 @@ func (this *RadioApProfile) EqualVT(that *RadioApProfile) bool {
 		return false
 	}
 	if this.Encryption != that.Encryption {
+		return false
+	}
+	if !this.MeshBackhaul.EqualVT(that.MeshBackhaul) {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -498,6 +565,12 @@ func (this *MeshNodeProfile) EqualVT(that *MeshNodeProfile) bool {
 			}
 		}
 	}
+	if this.Timezone != that.Timezone {
+		return false
+	}
+	if !(*timestamppb1.Timestamp)(this.ClientTime).EqualVT((*timestamppb1.Timestamp)(that.ClientTime)) {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -575,6 +648,9 @@ func (this *SetupRadio) EqualVT(that *SetupRadio) bool {
 		}
 	}
 	if this.IsHalow != that.IsHalow {
+		return false
+	}
+	if this.SupportsMeshBackhaul != that.SupportsMeshBackhaul {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -721,6 +797,18 @@ func (this *GetSetupStatusResponse) EqualVT(that *GetSetupStatusResponse) bool {
 	if this.CurrentCountry != that.CurrentCountry {
 		return false
 	}
+	if len(this.Timezones) != len(that.Timezones) {
+		return false
+	}
+	for i, vx := range this.Timezones {
+		vy := that.Timezones[i]
+		if vx != vy {
+			return false
+		}
+	}
+	if this.CurrentTimezone != that.CurrentTimezone {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -865,6 +953,70 @@ func (m *WifiStaProfile) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	return len(dAtA) - i, nil
 }
 
+func (m *MeshBackhaulProfile) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MeshBackhaulProfile) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *MeshBackhaulProfile) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.CountryCode) > 0 {
+		i -= len(m.CountryCode)
+		copy(dAtA[i:], m.CountryCode)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.CountryCode)))
+		i--
+		dAtA[i] = 0x2a
+	}
+	if m.Channel != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.Channel))
+		i--
+		dAtA[i] = 0x20
+	}
+	if m.BandwidthMhz != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.BandwidthMhz))
+		i--
+		dAtA[i] = 0x18
+	}
+	if len(m.Passphrase) > 0 {
+		i -= len(m.Passphrase)
+		copy(dAtA[i:], m.Passphrase)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Passphrase)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.MeshId) > 0 {
+		i -= len(m.MeshId)
+		copy(dAtA[i:], m.MeshId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.MeshId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
 func (m *RadioApProfile) MarshalVT() (dAtA []byte, err error) {
 	if m == nil {
 		return nil, nil
@@ -894,6 +1046,16 @@ func (m *RadioApProfile) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.MeshBackhaul != nil {
+		size, err := m.MeshBackhaul.MarshalToSizedBufferVT(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0x32
 	}
 	if m.Encryption != 0 {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.Encryption))
@@ -1104,6 +1266,23 @@ func (m *MeshNodeProfile) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		}
 		i -= size
 	}
+	if m.ClientTime != nil {
+		size, err := (*timestamppb1.Timestamp)(m.ClientTime).MarshalToSizedBufferVT(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0x52
+	}
+	if len(m.Timezone) > 0 {
+		i -= len(m.Timezone)
+		copy(dAtA[i:], m.Timezone)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Timezone)))
+		i--
+		dAtA[i] = 0x4a
+	}
 	if len(m.Aps) > 0 {
 		for iNdEx := len(m.Aps) - 1; iNdEx >= 0; iNdEx-- {
 			size, err := m.Aps[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
@@ -1211,6 +1390,16 @@ func (m *SetupRadio) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.SupportsMeshBackhaul {
+		i--
+		if m.SupportsMeshBackhaul {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x30
 	}
 	if m.IsHalow {
 		i--
@@ -1404,6 +1593,22 @@ func (m *GetSetupStatusResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.CurrentTimezone) > 0 {
+		i -= len(m.CurrentTimezone)
+		copy(dAtA[i:], m.CurrentTimezone)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.CurrentTimezone)))
+		i--
+		dAtA[i] = 0x5a
+	}
+	if len(m.Timezones) > 0 {
+		for iNdEx := len(m.Timezones) - 1; iNdEx >= 0; iNdEx-- {
+			i -= len(m.Timezones[iNdEx])
+			copy(dAtA[i:], m.Timezones[iNdEx])
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Timezones[iNdEx])))
+			i--
+			dAtA[i] = 0x52
+		}
 	}
 	if len(m.CurrentCountry) > 0 {
 		i -= len(m.CurrentCountry)
@@ -1719,6 +1924,70 @@ func (m *WifiStaProfile) MarshalToSizedBufferVTStrict(dAtA []byte) (int, error) 
 	return len(dAtA) - i, nil
 }
 
+func (m *MeshBackhaulProfile) MarshalVTStrict() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVTStrict(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *MeshBackhaulProfile) MarshalToVTStrict(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVTStrict(dAtA[:size])
+}
+
+func (m *MeshBackhaulProfile) MarshalToSizedBufferVTStrict(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.CountryCode) > 0 {
+		i -= len(m.CountryCode)
+		copy(dAtA[i:], m.CountryCode)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.CountryCode)))
+		i--
+		dAtA[i] = 0x2a
+	}
+	if m.Channel != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.Channel))
+		i--
+		dAtA[i] = 0x20
+	}
+	if m.BandwidthMhz != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.BandwidthMhz))
+		i--
+		dAtA[i] = 0x18
+	}
+	if len(m.Passphrase) > 0 {
+		i -= len(m.Passphrase)
+		copy(dAtA[i:], m.Passphrase)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Passphrase)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.MeshId) > 0 {
+		i -= len(m.MeshId)
+		copy(dAtA[i:], m.MeshId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.MeshId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
 func (m *RadioApProfile) MarshalVTStrict() (dAtA []byte, err error) {
 	if m == nil {
 		return nil, nil
@@ -1748,6 +2017,16 @@ func (m *RadioApProfile) MarshalToSizedBufferVTStrict(dAtA []byte) (int, error) 
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.MeshBackhaul != nil {
+		size, err := m.MeshBackhaul.MarshalToSizedBufferVTStrict(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0x32
 	}
 	if m.Encryption != 0 {
 		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.Encryption))
@@ -1949,6 +2228,23 @@ func (m *MeshNodeProfile) MarshalToSizedBufferVTStrict(dAtA []byte) (int, error)
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.ClientTime != nil {
+		size, err := (*timestamppb1.Timestamp)(m.ClientTime).MarshalToSizedBufferVTStrict(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0x52
+	}
+	if len(m.Timezone) > 0 {
+		i -= len(m.Timezone)
+		copy(dAtA[i:], m.Timezone)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Timezone)))
+		i--
+		dAtA[i] = 0x4a
+	}
 	if len(m.Aps) > 0 {
 		for iNdEx := len(m.Aps) - 1; iNdEx >= 0; iNdEx-- {
 			size, err := m.Aps[iNdEx].MarshalToSizedBufferVTStrict(dAtA[:i])
@@ -2070,6 +2366,16 @@ func (m *SetupRadio) MarshalToSizedBufferVTStrict(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.SupportsMeshBackhaul {
+		i--
+		if m.SupportsMeshBackhaul {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x30
 	}
 	if m.IsHalow {
 		i--
@@ -2263,6 +2569,22 @@ func (m *GetSetupStatusResponse) MarshalToSizedBufferVTStrict(dAtA []byte) (int,
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.CurrentTimezone) > 0 {
+		i -= len(m.CurrentTimezone)
+		copy(dAtA[i:], m.CurrentTimezone)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.CurrentTimezone)))
+		i--
+		dAtA[i] = 0x5a
+	}
+	if len(m.Timezones) > 0 {
+		for iNdEx := len(m.Timezones) - 1; iNdEx >= 0; iNdEx-- {
+			i -= len(m.Timezones[iNdEx])
+			copy(dAtA[i:], m.Timezones[iNdEx])
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Timezones[iNdEx])))
+			i--
+			dAtA[i] = 0x52
+		}
 	}
 	if len(m.CurrentCountry) > 0 {
 		i -= len(m.CurrentCountry)
@@ -2544,6 +2866,34 @@ func (m *WifiStaProfile) SizeVT() (n int) {
 	return n
 }
 
+func (m *MeshBackhaulProfile) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.MeshId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.Passphrase)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.BandwidthMhz != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.BandwidthMhz))
+	}
+	if m.Channel != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.Channel))
+	}
+	l = len(m.CountryCode)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
 func (m *RadioApProfile) SizeVT() (n int) {
 	if m == nil {
 		return 0
@@ -2567,6 +2917,10 @@ func (m *RadioApProfile) SizeVT() (n int) {
 	}
 	if m.Encryption != 0 {
 		n += 1 + protohelpers.SizeOfVarint(uint64(m.Encryption))
+	}
+	if m.MeshBackhaul != nil {
+		l = m.MeshBackhaul.SizeVT()
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	n += len(m.unknownFields)
 	return n
@@ -2662,6 +3016,14 @@ func (m *MeshNodeProfile) SizeVT() (n int) {
 			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 		}
 	}
+	l = len(m.Timezone)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.ClientTime != nil {
+		l = (*timestamppb1.Timestamp)(m.ClientTime).SizeVT()
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -2709,6 +3071,9 @@ func (m *SetupRadio) SizeVT() (n int) {
 		}
 	}
 	if m.IsHalow {
+		n += 2
+	}
+	if m.SupportsMeshBackhaul {
 		n += 2
 	}
 	n += len(m.unknownFields)
@@ -2800,6 +3165,16 @@ func (m *GetSetupStatusResponse) SizeVT() (n int) {
 		}
 	}
 	l = len(m.CurrentCountry)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if len(m.Timezones) > 0 {
+		for _, s := range m.Timezones {
+			l = len(s)
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	l = len(m.CurrentTimezone)
 	if l > 0 {
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
@@ -3035,6 +3410,191 @@ func (m *WifiStaProfile) UnmarshalVT(dAtA []byte) error {
 	}
 	return nil
 }
+func (m *MeshBackhaulProfile) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MeshBackhaulProfile: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MeshBackhaulProfile: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MeshId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.MeshId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Passphrase", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Passphrase = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field BandwidthMhz", wireType)
+			}
+			m.BandwidthMhz = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.BandwidthMhz |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Channel", wireType)
+			}
+			m.Channel = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Channel |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CountryCode", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.CountryCode = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
 func (m *RadioApProfile) UnmarshalVT(dAtA []byte) error {
 	l := len(dAtA)
 	iNdEx := 0
@@ -3199,6 +3759,42 @@ func (m *RadioApProfile) UnmarshalVT(dAtA []byte) error {
 					break
 				}
 			}
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MeshBackhaul", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.MeshBackhaul == nil {
+				m.MeshBackhaul = &MeshBackhaulProfile{}
+			}
+			if err := m.MeshBackhaul.UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -3853,6 +4449,74 @@ func (m *MeshNodeProfile) UnmarshalVT(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 9:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Timezone", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Timezone = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 10:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientTime", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.ClientTime == nil {
+				m.ClientTime = &timestamppb.Timestamp{}
+			}
+			if err := (*timestamppb1.Timestamp)(m.ClientTime).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -4054,6 +4718,26 @@ func (m *SetupRadio) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.IsHalow = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SupportsMeshBackhaul", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.SupportsMeshBackhaul = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -4643,6 +5327,70 @@ func (m *GetSetupStatusResponse) UnmarshalVT(dAtA []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.CurrentCountry = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 10:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Timezones", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Timezones = append(m.Timezones, string(dAtA[iNdEx:postIndex]))
+			iNdEx = postIndex
+		case 11:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CurrentTimezone", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.CurrentTimezone = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
@@ -5242,6 +5990,203 @@ func (m *WifiStaProfile) UnmarshalVTUnsafe(dAtA []byte) error {
 	}
 	return nil
 }
+func (m *MeshBackhaulProfile) UnmarshalVTUnsafe(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: MeshBackhaulProfile: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: MeshBackhaulProfile: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MeshId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			m.MeshId = stringValue
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Passphrase", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			m.Passphrase = stringValue
+			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field BandwidthMhz", wireType)
+			}
+			m.BandwidthMhz = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.BandwidthMhz |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Channel", wireType)
+			}
+			m.Channel = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Channel |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CountryCode", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			m.CountryCode = stringValue
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
 func (m *RadioApProfile) UnmarshalVTUnsafe(dAtA []byte) error {
 	l := len(dAtA)
 	iNdEx := 0
@@ -5418,6 +6363,42 @@ func (m *RadioApProfile) UnmarshalVTUnsafe(dAtA []byte) error {
 					break
 				}
 			}
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MeshBackhaul", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.MeshBackhaul == nil {
+				m.MeshBackhaul = &MeshBackhaulProfile{}
+			}
+			if err := m.MeshBackhaul.UnmarshalVTUnsafe(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -6100,6 +7081,78 @@ func (m *MeshNodeProfile) UnmarshalVTUnsafe(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 9:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Timezone", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			m.Timezone = stringValue
+			iNdEx = postIndex
+		case 10:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientTime", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.ClientTime == nil {
+				m.ClientTime = &timestamppb.Timestamp{}
+			}
+			if err := (*timestamppb1.Timestamp)(m.ClientTime).UnmarshalVTUnsafe(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -6313,6 +7366,26 @@ func (m *SetupRadio) UnmarshalVTUnsafe(dAtA []byte) error {
 				}
 			}
 			m.IsHalow = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SupportsMeshBackhaul", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.SupportsMeshBackhaul = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -6922,6 +7995,78 @@ func (m *GetSetupStatusResponse) UnmarshalVTUnsafe(dAtA []byte) error {
 				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
 			}
 			m.CurrentCountry = stringValue
+			iNdEx = postIndex
+		case 10:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Timezones", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			m.Timezones = append(m.Timezones, stringValue)
+			iNdEx = postIndex
+		case 11:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CurrentTimezone", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			var stringValue string
+			if intStringLen > 0 {
+				stringValue = unsafe.String(&dAtA[iNdEx], intStringLen)
+			}
+			m.CurrentTimezone = stringValue
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/gorilla/websocket"
 	commsv1 "github.com/openmanet/openmanetd/internal/api/openmanet/comms/v1"
 	"github.com/openmanet/openmanetd/internal/api/openmanet/comms/v1/commsv1connect"
@@ -165,4 +166,133 @@ func TestIntegration_WSClientToRPC(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for SendPTTEvent RPC")
 	}
+}
+
+// streamingCommsHandler serves StreamAudioRx with a repeating frame tagged
+// with a fixed talkgroup, so the bridge's audio RX loop has live frames to
+// forward for the duration of the test.
+type streamingCommsHandler struct {
+	commsv1connect.UnimplementedCommsServiceHandler
+
+	talkgroup int32
+}
+
+func (h *streamingCommsHandler) StreamAudioRx(
+	ctx context.Context,
+	_ *commsv1.StreamAudioRxRequest,
+	stream *connect.ServerStream[commsv1.StreamAudioRxResponse],
+) error {
+	var seq uint32
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			seq++
+			if err := stream.Send(&commsv1.StreamAudioRxResponse{
+				OpusData:  []byte{0xAA, 0xBB},
+				Sequence:  seq,
+				Talkgroup: h.talkgroup,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// TestIntegration_AudioRXCarriesTalkgroupChannel pins the end-to-end talk
+// group attribution path: a StreamAudioRx frame tagged talkgroup 2 must
+// reach a WebSocket client subscribed to channel 2 with channel byte 2 —
+// not the historic hardcoded channel 1 — so per-talkgroup RX toggles and
+// UI attribution work.
+func TestIntegration_AudioRXCarriesTalkgroupChannel(t *testing.T) {
+	commsHandler := &streamingCommsHandler{talkgroup: 2}
+
+	mux := http.NewServeMux()
+	commsPath, commsH := commsv1connect.NewCommsServiceHandler(commsHandler)
+	mux.Handle(commsPath, commsH)
+
+	rpcServer := httptest.NewServer(mux)
+	t.Cleanup(rpcServer.Close)
+
+	commsClient := commsv1connect.NewCommsServiceClient(rpcServer.Client(), rpcServer.URL)
+
+	var b *bridge.Bridge
+
+	hub := ws.NewHub(func(client *ws.Client, data []byte) {
+		b.HandleMessage(client, data)
+	})
+	b = bridge.NewBridge(hub, commsClient)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go hub.Run(ctx)
+
+	wsMux := http.NewServeMux()
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	wsMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade error: %v", err)
+
+			return
+		}
+
+		client := ws.NewClient(hub, conn)
+		hub.Register(client)
+
+		go client.WritePump()
+		go client.ReadPump()
+	})
+
+	wsServer := httptest.NewServer(wsMux)
+	t.Cleanup(wsServer.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http") + "/ws"
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WS dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Subscribe to RX on channel 2 only — the frame must arrive because
+	// the daemon tagged it talkgroup 2, proving the channel byte is the
+	// talkgroup and the hub filter honors it.
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte{ws.OpcodeRXToggle, 2, 1}); err != nil {
+		t.Fatalf("WS write: %v", err)
+	}
+
+	// Start the audio RX loop after the subscription so no frame is
+	// dropped for lack of subscribers while the toggle is in flight.
+	b.StartAudioRXLoop(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	for time.Now().Before(deadline) {
+		_, data, readErr := conn.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("WS read: %v", readErr)
+		}
+
+		if len(data) < ws.AudioRXHeaderSize || data[0] != ws.OpcodeAudioRX {
+			continue
+		}
+
+		if got := data[1]; got != 2 {
+			t.Fatalf("WS audio frame channel byte: got %d, want 2 (talkgroup lost in transit)", got)
+		}
+
+		return // frame arrived with the right channel byte
+	}
+
+	t.Fatal("timed out waiting for an audio RX frame on the WS client")
 }

@@ -190,13 +190,21 @@ export default function BLOSPage() {
     setSaving(true);
     setSaveError(null);
     setSuccess(null);
+    // Pasting an auth key is an intent to bring the tunnel up — the
+    // operator should not also have to flip the toggle. The backend treats
+    // enable_blos=false as "disable", so derive the flag here rather than
+    // trusting the toggle alone.
+    const enable = enableBlos || authKey.trim() !== '';
     try {
-      const req = { enableBlos, authKey };
+      const req = { enableBlos: enable, authKey };
       if (loginServer) req.loginServerUrl = loginServer;
       const resp = await blosClient.updateBLOSConfig(req);
       if (resp.success === false) throw new Error(resp.message || 'Update failed');
       setSuccess(resp.message || 'BLOS configuration updated.');
       setAuthKey('');
+      // Mirror the requested state immediately so the toggle does not lag
+      // behind until the next status poll lands.
+      setEnableBlos(enable);
       refreshBLOSStatus();
     } catch (e) {
       setSaveError('Failed to update BLOS: ' + e.message);
@@ -394,7 +402,7 @@ export default function BLOSPage() {
               placeholder="Paste auth key"
               autoComplete="off"
             />
-            <span className="hint">Never echoed back · blank keeps current</span>
+            <span className="hint">Never echoed back · blank keeps current · entering a key enables BLOS</span>
           </div>
 
           <div className="lat-field">

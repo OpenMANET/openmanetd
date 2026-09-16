@@ -13,7 +13,7 @@ import (
 // minor component when adding fields, the major component when removing or
 // renaming them. Consumers (including Claude) are expected to key their
 // expectations off this value.
-const SchemaVersion = "1.2.0"
+const SchemaVersion = "1.6.0"
 
 // Snapshotter is implemented by producers that expose runtime state to the
 // snapshot framework. Refresh atomically loads the producer's current

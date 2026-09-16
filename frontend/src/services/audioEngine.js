@@ -38,14 +38,38 @@ import { appendReplay } from './replayBuffer.js';
 
 let audioCtx = null;
 let gainNode = null;
+let rxLimiter = null;      // DynamicsCompressorNode after gainNode — lets the
+                           // speaker gain run past unity without hard clipping
 let decoderNode = null;    // AudioWorkletNode or ScriptProcessorNode
 let opusDecoder = null;    // WebCodecs AudioDecoder
 let opusEncoder = null;    // WebCodecs AudioEncoder
 let micStream = null;      // MediaStream from getUserMedia
 let micSource = null;      // MediaStreamAudioSourceNode
+let micGainNode = null;    // GainNode applying mic gain in the audio graph
+let micLimiter = null;     // DynamicsCompressorNode after micGainNode
 let micProcessor = null;   // ScriptProcessorNode for mic input
 let micSilentGain = null;  // Silent gain node keeping micProcessor alive
 let txTimestamp = 0;       // Microsecond timestamp for AudioEncoder
+
+// Limiter settings shared by the RX (speaker) and TX (mic) paths: a
+// high-ratio compressor with a fast attack acts as a safety limiter, so
+// gains above 1.0 compress gracefully instead of clipping at the DAC or
+// the Opus encoder. Signals below -6 dBFS pass through unaffected.
+function configureLimiter(limiter) {
+  limiter.threshold.value = -6;
+  limiter.knee.value = 6;
+  limiter.ratio.value = 12;
+  limiter.attack.value = 0.003;
+  limiter.release.value = 0.25;
+  return limiter;
+}
+
+// Creates a configured limiter, or null on engines without
+// DynamicsCompressorNode — callers fall back to a direct connection.
+function createLimiter() {
+  if (typeof audioCtx.createDynamicsCompressor !== 'function') return null;
+  return configureLimiter(audioCtx.createDynamicsCompressor());
+}
 
 let useWorklet = false;    // true if AudioWorklet path succeeded
 let ringState = null;      // { ringBuf, ring, state } from createRingBuffer
@@ -113,10 +137,18 @@ export async function initAudio(onLog, opts = {}) {
     sampleRate: SAMPLE_RATE,
   });
 
-  // Master gain node for speaker volume.  Default is 80% (0.8).
+  // Master gain node for speaker volume.  Default is 80% (0.8).  The gain
+  // feeds a limiter so slider values past 100% amplify cleanly instead of
+  // clipping at the destination.
   gainNode = audioCtx.createGain();
   gainNode.gain.value = 0.8;
-  gainNode.connect(audioCtx.destination);
+  rxLimiter = createLimiter();
+  if (rxLimiter) {
+    gainNode.connect(rxLimiter);
+    rxLimiter.connect(audioCtx.destination);
+  } else {
+    gainNode.connect(audioCtx.destination);
+  }
 
   // ── Try AudioWorklet + SharedArrayBuffer (preferred path) ──────────────
   // AudioWorklet runs the PCM reader on a dedicated audio thread, which is
@@ -370,9 +402,38 @@ function getMicConstraints() {
 // -----------------------------------------------------------------------------
 // setMicGain(value)
 // -----------------------------------------------------------------------------
-// Sets the mic gain.  `value` is 0-100 (matching the range slider).
+// Sets the mic gain.  `value` is 0-200 (matching the range slider); values
+// above 100 amplify past unity, limited by the mic-path limiter.
 export function setMicGain(value) {
   micGain = value / 100;
+  if (micGainNode) micGainNode.gain.value = micGain;
+}
+
+// Wires micSource → micGainNode → micLimiter → micProcessor.  The gain
+// lives in the audio graph (not the copy loop) so amplification past
+// unity is limited before it reaches the encoder, and the level meter
+// sees exactly what will be encoded.
+function connectMicChain() {
+  micGainNode = audioCtx.createGain();
+  micGainNode.gain.value = micGain;
+  micSource.connect(micGainNode);
+
+  micLimiter = createLimiter();
+  if (micLimiter) {
+    micGainNode.connect(micLimiter);
+    micLimiter.connect(micProcessor);
+  } else {
+    micGainNode.connect(micProcessor);
+  }
+}
+
+// Copies a ScriptProcessor input buffer.  The browser reuses the
+// underlying buffer between callbacks, so a copy is required before
+// handing samples to AudioData or the level meter.
+function copyFrame(input) {
+  const frame = new Float32Array(input.length);
+  frame.set(input);
+  return frame;
 }
 
 // -----------------------------------------------------------------------------
@@ -440,17 +501,17 @@ export async function startMic(onEncodedChunk, onMicLevel) {
       micProcessor.onaudioprocess = (e) => {
         if (!opusEncoder || opusEncoder.state === 'closed') return;
         const input = e.inputBuffer.getChannelData(0);
-        const gained = new Float32Array(input.length);
-        for (let i = 0; i < input.length; i++) gained[i] = input[i] * micGain;
-        if (onMicLevel) onMicLevel(gained);
+        // Gain is applied by micGainNode in the graph; just copy.
+        const frame = copyFrame(input);
+        if (onMicLevel) onMicLevel(frame);
         try {
           const ad = new AudioData({
             format: 'f32-planar',
             sampleRate: SAMPLE_RATE,
-            numberOfFrames: gained.length,
+            numberOfFrames: frame.length,
             numberOfChannels: 1,
             timestamp: txTimestamp,
-            data: gained,
+            data: frame,
           });
           txTimestamp += (input.length / SAMPLE_RATE) * 1000000;
           opusEncoder.encode(ad);
@@ -482,9 +543,8 @@ export async function startMic(onEncodedChunk, onMicLevel) {
 
       const input = e.inputBuffer.getChannelData(0);
 
-      // Apply mic gain before encoding.
-      const gained = new Float32Array(input.length);
-      for (let i = 0; i < input.length; i++) gained[i] = input[i] * micGain;
+      // Gain is applied by micGainNode in the graph; just copy.
+      const gained = copyFrame(input);
 
       // Notify consumer for level metering (with gained audio).
       if (onMicLevel) onMicLevel(gained);
@@ -507,7 +567,7 @@ export async function startMic(onEncodedChunk, onMicLevel) {
       }
     };
 
-    micSource.connect(micProcessor);
+    connectMicChain();
 
     // Connect the processor to a silent gain node so the browser doesn't
     // garbage-collect the ScriptProcessorNode.  (A disconnected
@@ -537,6 +597,14 @@ export function stopMic() {
     micProcessor.disconnect();
     micProcessor = null;
   }
+  if (micLimiter) {
+    micLimiter.disconnect();
+    micLimiter = null;
+  }
+  if (micGainNode) {
+    micGainNode.disconnect();
+    micGainNode = null;
+  }
   if (micSource) {
     micSource.disconnect();
     micSource = null;
@@ -552,7 +620,8 @@ export function stopMic() {
 // -----------------------------------------------------------------------------
 // setVolume(value)
 // -----------------------------------------------------------------------------
-// Sets the speaker volume.  `value` is 0-100 (matching the range slider).
+// Sets the speaker volume.  `value` is 0-200 (matching the range slider);
+// values above 100 amplify past unity, limited by the RX limiter.
 export function setVolume(value) {
   if (gainNode) {
     gainNode.gain.value = value / 100;
@@ -624,12 +693,11 @@ export async function startMicMonitor(onMicLevel) {
     micProcessor = audioCtx.createScriptProcessor(1024, 1, 1);
     micProcessor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
-      const gained = new Float32Array(input.length);
-      for (let i = 0; i < input.length; i++) gained[i] = input[i] * micGain;
-      if (onMicLevel) onMicLevel(gained);
+      // Gain is applied by micGainNode in the graph; just copy.
+      if (onMicLevel) onMicLevel(copyFrame(input));
     };
 
-    micSource.connect(micProcessor);
+    connectMicChain();
     micSilentGain = audioCtx.createGain();
     micSilentGain.gain.value = 0;
     micProcessor.connect(micSilentGain);

@@ -170,3 +170,59 @@ describe('TestBLOSUpdateFailure', () => {
     await screen.findByText(/Failed to update BLOS/);
   });
 });
+
+describe('TestBLOSUpdateAuthKeyImpliesEnable', () => {
+  it('requests enable when an auth key is entered with the toggle off', async () => {
+    setSnapshot({ status: { blosEnabled: false }, peers: [], error: null });
+    mockUpdateBLOSConfig.mockResolvedValue({ success: true, message: 'BLOS enabled' });
+
+    render(<BLOSPage />);
+    expect(screen.getByText('Off')).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText('Paste auth key'), {
+      target: { value: 'tskey-auth-xyz' },
+    });
+    fireEvent.click(screen.getByText('Update BLOS Config'));
+
+    await screen.findByText('BLOS enabled');
+    expect(mockUpdateBLOSConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ enableBlos: true, authKey: 'tskey-auth-xyz' }),
+    );
+    // Toggle mirrors the requested state without waiting for the next poll.
+    expect(screen.getByText('On')).toBeTruthy();
+  });
+
+  it('ignores a whitespace-only auth key and keeps the toggle state', async () => {
+    setSnapshot({ status: { blosEnabled: false }, peers: [], error: null });
+    mockUpdateBLOSConfig.mockResolvedValue({ success: true, message: 'BLOS disabled' });
+
+    render(<BLOSPage />);
+
+    fireEvent.change(screen.getByPlaceholderText('Paste auth key'), {
+      target: { value: '   ' },
+    });
+    fireEvent.click(screen.getByText('Update BLOS Config'));
+
+    await screen.findByText('BLOS disabled');
+    expect(mockUpdateBLOSConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ enableBlos: false }),
+    );
+    expect(screen.getByText('Off')).toBeTruthy();
+  });
+
+  it('still sends disable when the toggle is off and no key is entered', async () => {
+    setSnapshot({ status: { blosEnabled: true }, peers: [], error: null });
+    mockUpdateBLOSConfig.mockResolvedValue({ success: true, message: 'BLOS disabled' });
+
+    const { container } = render(<BLOSPage />);
+    fireEvent.click(container.querySelector('.lat-toggle'));
+    expect(screen.getByText('Off')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('Update BLOS Config'));
+
+    await screen.findByText('BLOS disabled');
+    expect(mockUpdateBLOSConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ enableBlos: false }),
+    );
+  });
+});

@@ -177,7 +177,7 @@ func TestEnvelope_JSONRoundTrip(t *testing.T) {
 
 	out, err := json.Marshal(&env)
 	require.NoError(t, err)
-	assert.Contains(t, string(out), `"schema_version":"1.2.0"`)
+	assert.Contains(t, string(out), `"schema_version":"1.6.0"`)
 	assert.Contains(t, string(out), `"count":99`)
 	assert.Contains(t, string(out), `"flag":true`)
 	assert.Contains(t, string(out), `"name":"producer"`)
@@ -196,7 +196,7 @@ func TestEnvelope_JSONRoundTrip(t *testing.T) {
 	}
 
 	require.NoError(t, json.Unmarshal(out, &decoded))
-	assert.Equal(t, "1.2.0", decoded.SchemaVersion)
+	assert.Equal(t, "1.6.0", decoded.SchemaVersion)
 	require.Len(t, decoded.Sections, 1)
 	assert.Equal(t, "producer", decoded.Sections[0].Name)
 	assert.Positive(t, decoded.Runtime.NumGoroutine)
@@ -221,7 +221,7 @@ func TestSchemaVersion_Stable(t *testing.T) {
 
 	// A drift in this constant must be deliberate — bump the copy in
 	// docs/instrumentation-snapshot.md at the same time.
-	assert.Equal(t, "1.2.0", instrumentation.SchemaVersion)
+	assert.Equal(t, "1.6.0", instrumentation.SchemaVersion)
 }
 
 // TestRegistry_CaptureSkewWindow verifies that CapturedAtEnd - CapturedAtStart

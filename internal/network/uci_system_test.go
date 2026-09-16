@@ -116,3 +116,74 @@ func TestSetSystemHostnameWithReader_PropagatesCommitError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr)
 }
+
+func TestStageSystemTimezoneWithReader(t *testing.T) {
+	tests := []struct {
+		name     string
+		zonename string
+		posixTZ  string
+		wantErr  string
+	}{
+		{
+			name:     "writes zonename and timezone without committing",
+			zonename: "America/Denver",
+			posixTZ:  "MST7MDT,M3.2.0,M11.1.0",
+		},
+		{
+			name:    "empty zonename is rejected",
+			posixTZ: "MST7MDT,M3.2.0,M11.1.0",
+			wantErr: "required",
+		},
+		{
+			name:     "empty posixTZ is rejected",
+			zonename: "America/Denver",
+			posixTZ:  "",
+			wantErr:  "required",
+		},
+		{
+			name:    "both empty is rejected",
+			wantErr: "required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newSystemMock(t)
+
+			err := StageSystemTimezoneWithReader(tc.zonename, tc.posixTZ, m)
+
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Equal(t, 0, m.commitCount, "no commit on validation failure")
+
+				return
+			}
+
+			require.NoError(t, err)
+
+			zone, ok := m.Get("system", "@system[0]", "zonename")
+			require.True(t, ok)
+			assert.Equal(t, []string{tc.zonename}, zone)
+
+			tzv, ok := m.Get("system", "@system[0]", "timezone")
+			require.True(t, ok)
+			assert.Equal(t, []string{tc.posixTZ}, tzv)
+
+			assert.Equal(t, 0, m.commitCount, "StageSystemTimezoneWithReader must not commit")
+			assert.False(t, m.commitCalled, "StageSystemTimezoneWithReader must not commit")
+		})
+	}
+}
+
+func TestStageSystemTimezoneWithReader_NoSystemSection(t *testing.T) {
+	m := &mockConfigReader{
+		data:         map[string]map[string]map[string][]string{},
+		sectionTypes: map[string]map[string]string{},
+		anonSections: map[string][]string{},
+	}
+
+	err := StageSystemTimezoneWithReader("America/Denver", "MST7MDT,M3.2.0,M11.1.0", m)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no 'system' section")
+}

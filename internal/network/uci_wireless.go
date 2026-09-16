@@ -14,6 +14,7 @@ const (
 	defaultWirelessConfigPath string = "/etc/config/wireless"
 	wirelessConfigName        string = "wireless"
 	wifiIfaceSectionType      string = "wifi-iface"
+	wifiDeviceSectionType     string = "wifi-device"
 
 	// UCI option keys repeated across wifi-device and wifi-iface sections
 	// and their whitelists. Centralized so goconst is happy.
@@ -40,6 +41,13 @@ const (
 	wirelessOptionPath                   string = "path"
 	wirelessOptionReconf                 string = "reconf"
 	wirelessOptionType                   string = "type"
+	wirelessOptionMeshFwding             string = "mesh_fwding"
+	wirelessOptionMeshRSSIThreshold      string = "mesh_rssi_threshold"
+	wirelessOptionMcastRate              string = "mcast_rate"
+	wirelessOptionMeshNolearn            string = "mesh_nolearn"
+	wirelessOptionMeshRetryTimeout       string = "mesh_retry_timeout"
+	wirelessOptionMeshConfirmTimeout     string = "mesh_confirm_timeout"
+	wirelessOptionMeshHoldingTimeout     string = "mesh_holding_timeout"
 )
 
 // allWifiDeviceOptions enumerates every wifi-device option that
@@ -55,10 +63,14 @@ var allWifiDeviceOptions = []string{ //nolint:gochecknoglobals // package-level 
 }
 
 // allWifiIfaceOptions enumerates every wifi-iface option that
-// UCIWirelessIface can persist.
+// UCIWirelessIface can persist. WhitelistInterfaceFields iterates this
+// list to decide which options to delete on a wizard reset; expanding the
+// struct schema requires expanding this list as well.
 var allWifiIfaceOptions = []string{ //nolint:gochecknoglobals // package-level constant
-	networkDeviceType, networkConfigName, wirelessOptionMode, wirelessOptionKey, wirelessOptionMeshID, "mesh_fwding",
-	"mesh_rssi_threshold", wirelessOptionEncryption, wirelessOptionSSID, wirelessOptionBeaconInt, wirelessOptionDisabled,
+	networkDeviceType, networkConfigName, wirelessOptionMode, wirelessOptionKey, wirelessOptionMeshID, wirelessOptionMeshFwding,
+	wirelessOptionMeshRSSIThreshold, wirelessOptionEncryption, wirelessOptionSSID, wirelessOptionBeaconInt, wirelessOptionDisabled,
+	wirelessOptionMcastRate, wirelessOptionMeshNolearn,
+	wirelessOptionMeshRetryTimeout, wirelessOptionMeshConfirmTimeout, wirelessOptionMeshHoldingTimeout,
 }
 
 // WizardWifiDeviceWhitelist is the field whitelist applied to every
@@ -113,6 +125,195 @@ type UCIWirelessIface struct {
 	SSID              string `uci:"option ssid"`
 	BeaconInt         string `uci:"option beacon_int"`
 	Disabled          string `uci:"option disabled"`
+
+	// Secondary-link tuning written by ApplySecondaryMeshPolicy. Empty
+	// values are skipped on write and the setter never deletes options.
+	// The startup reconcile (EnsureSecondaryMeshPolicyOptions) adds only
+	// what is missing, so a hand-edited value survives a boot; the wizard
+	// and the wireless settings handler re-assert the full set on every
+	// write they make.
+	McastRate          string `uci:"option mcast_rate"`
+	MeshNolearn        string `uci:"option mesh_nolearn"`
+	MeshRetryTimeout   string `uci:"option mesh_retry_timeout"`
+	MeshConfirmTimeout string `uci:"option mesh_confirm_timeout"`
+	MeshHoldingTimeout string `uci:"option mesh_holding_timeout"`
+}
+
+// Mesh-link settings shared by the daemon's boot-time fallback
+// (mgmt.setupBatMesh1Interface) and the setup wizard's phase 8. Both
+// write the same wifi-iface for a batman-adv hardif, so the values live
+// here rather than in either caller.
+const (
+	// WifiModeMesh is the wifi-iface `mode` value for 802.11s mesh links.
+	WifiModeMesh = "mesh"
+
+	// wifiEncryptionSAE is the only encryption a mesh link may use.
+	wifiEncryptionSAE = "sae"
+
+	// SecondaryMeshChannel2G and SecondaryMeshHTMode2G are the radio
+	// settings applied to the 2.4 GHz radio that carries the secondary
+	// batman-adv link (batmesh1): channel 8, 40 MHz HE.
+	//
+	// 40 MHz is the default because the link's job is a stable ~100 Mbps
+	// between nearby nodes. At HE40 that floor is met around 2SS MCS 4-5
+	// (~103-138 Mbps PHY), rates that hold at -65..-70 dBm on a moving
+	// node. At HE20 the same throughput needs MCS 9-11 (256/1024-QAM),
+	// which demands ~8-10 dB more SNR and collapses under motion. The
+	// ~3 dB wideband noise penalty of 40 MHz is smaller than the MCS
+	// margin it buys. A 40 MHz pair occupies half the 2.4 GHz band, so
+	// 20 MHz stays selectable in the wizard for congested spectrum.
+	// OpenWrt 24.10 wifi-scripts set noscan for any radio carrying a mesh
+	// iface, which is what allows a >20 MHz mesh on 2.4 GHz.
+	SecondaryMeshChannel2G = "8"
+	SecondaryMeshHTMode2G  = "HE40"
+
+	// SecondaryMeshRSSIThreshold is the mesh_rssi_threshold (dBm) applied
+	// to the 2.4 GHz secondary link. wpa_supplicant treats -255..-1 as a
+	// dBm floor for accepting a mesh peer, 0 as "no threshold", and 1 as
+	// "leave the driver default alone".
+	//
+	// The secondary link exists to carry traffic between nodes close
+	// enough for 2.4 GHz to be decisively faster than the 900 MHz primary
+	// (S1G/HaLow) link, not to extend range. The primary link owns range.
+	// So the threshold is set at the crossover point rather than at the
+	// edge of usability: a 2.4 GHz link that is merely *reachable* is
+	// worse than no 2.4 GHz link at all, because batman-adv will use it
+	// and the low MCS rate consumes airtime out of all proportion to the
+	// traffic it carries.
+	//
+	// -80 dBm holds HE20 MCS2/MCS3 (~14-20 Mbps of real throughput) with
+	// a few dB of fade margin for mobile nodes, against roughly 1-4 Mbps
+	// from a 2 MHz HaLow channel -- several times faster, which is the
+	// bar. Dropping to -85 would admit MCS0/MCS1 links at ~4-9 Mbps that
+	// flap under motion and are not worth preferring over the primary.
+	SecondaryMeshRSSIThreshold = "-80"
+
+	// SecondaryMeshMcastRate is the mcast_rate (kbit/s) for the 2.4 GHz
+	// secondary link. Without it every group-addressed frame on the
+	// 802.11s link -- batman-adv OGMs and ELP probes, plus every ATAK and
+	// voice multicast packet that batman-adv floods as broadcast -- goes
+	// out at the lowest legacy rate (1 Mbps) and each of batman-adv's
+	// three per-hardif retransmissions burns ~24x the airtime it needs.
+	// 24 Mbps OFDM is a mandatory 802.11g rate that any peer admitted at
+	// or above SecondaryMeshRSSIThreshold can decode.
+	SecondaryMeshMcastRate = "24000"
+
+	// SecondaryMeshNolearn disables 802.11s path learning on the link.
+	// batman-adv owns routing; the wizard already writes mesh_nolearn=1
+	// into mesh11sd.mesh_params, but the Morse-patched mesh11sd applies
+	// that only to the S1G interface, so the 2.4 GHz link needs the
+	// option on its own wifi-iface.
+	SecondaryMeshNolearn = "1"
+
+	// SecondaryMeshPlinkTimeoutMs is written to mesh_retry_timeout,
+	// mesh_confirm_timeout and mesh_holding_timeout (all in ms, max
+	// 255). Maxing them stops a node that reconnects quickly after a
+	// fade from re-peering faster than its neighbours finish tearing the
+	// old link down, which otherwise ends in the nl80211 "key addition
+	// failed" path and a 300 s SAE peer block -- a mobile-node failure
+	// mode documented by upstream mesh11sd v5.0.0.
+	SecondaryMeshPlinkTimeoutMs = "255"
+)
+
+// MeshLink describes one 802.11s wifi-iface bound to a batman-adv hardif.
+type MeshLink struct {
+	Radio         string // wifi-device section, e.g. "radio0"
+	Network       string // batadv_hardif interface, e.g. BatmanSecondaryIface
+	MeshID        string
+	Key           string
+	RSSIThreshold string // mesh_rssi_threshold in dBm; empty omits the option
+}
+
+// Section returns the wifi-iface section name for the link,
+// "<Network>_<Radio>" (e.g. "batmesh1_radio0"). The primary link keeps
+// the factory "default_<radio>" section, so callers use Section only for
+// secondary hardifs — the name can never collide with the AP section the
+// wizard writes on the same radio.
+func (l MeshLink) Section() string {
+	return l.Network + "_" + l.Radio
+}
+
+// IfaceConfig returns the wifi-iface option set for the link: the hardif
+// binding, mode=mesh, the credentials, mesh_fwding=0 (batman-adv does
+// the forwarding), the RSSI threshold when set, encryption=sae, and,
+// when the link is the secondary hardif (BatmanSecondaryIface), the
+// tuning from ApplySecondaryMeshPolicy.
+func (l MeshLink) IfaceConfig() *UCIWirelessIface {
+	cfg := &UCIWirelessIface{
+		Device:            l.Radio,
+		Network:           l.Network,
+		Mode:              WifiModeMesh,
+		MeshID:            l.MeshID,
+		Key:               l.Key,
+		MeshFwding:        "0",
+		MeshRSSIThreshold: l.RSSIThreshold,
+		Encryption:        wifiEncryptionSAE,
+	}
+	if l.Network == BatmanSecondaryIface {
+		cfg.ApplySecondaryMeshPolicy()
+	}
+
+	return cfg
+}
+
+// ApplySecondaryMeshPolicy sets the daemon-owned tuning options for the
+// 2.4 GHz secondary link on c. MeshLink.IfaceConfig and the wireless
+// settings handler both call it so the option set has one definition;
+// SecondaryMeshPolicyOptions is the same set as option/value pairs.
+func (c *UCIWirelessIface) ApplySecondaryMeshPolicy() {
+	c.McastRate = SecondaryMeshMcastRate
+	c.MeshNolearn = SecondaryMeshNolearn
+	c.MeshRetryTimeout = SecondaryMeshPlinkTimeoutMs
+	c.MeshConfirmTimeout = SecondaryMeshPlinkTimeoutMs
+	c.MeshHoldingTimeout = SecondaryMeshPlinkTimeoutMs
+}
+
+// SecondaryMeshPolicyOption is one tuning option the daemon owns on the
+// batmesh1 wifi-iface.
+type SecondaryMeshPolicyOption struct {
+	Option string
+	Value  string
+}
+
+// SecondaryMeshPolicyOptions returns the options and values every
+// batmesh1 wifi-iface must carry, in write order. It must stay in step
+// with ApplySecondaryMeshPolicy; a test pins the two together.
+func SecondaryMeshPolicyOptions() []SecondaryMeshPolicyOption {
+	return []SecondaryMeshPolicyOption{
+		{Option: wirelessOptionMcastRate, Value: SecondaryMeshMcastRate},
+		{Option: wirelessOptionMeshNolearn, Value: SecondaryMeshNolearn},
+		{Option: wirelessOptionMeshRetryTimeout, Value: SecondaryMeshPlinkTimeoutMs},
+		{Option: wirelessOptionMeshConfirmTimeout, Value: SecondaryMeshPlinkTimeoutMs},
+		{Option: wirelessOptionMeshHoldingTimeout, Value: SecondaryMeshPlinkTimeoutMs},
+	}
+}
+
+// EnsureSecondaryMeshPolicyOptions adds every SecondaryMeshPolicyOptions
+// entry that section lacks and returns the option names it added, in
+// policy order. Options already present keep their value, whatever it
+// is, so a hand-edited section is never overwritten. It does not
+// commit; the caller decides whether a reload is warranted.
+func EnsureSecondaryMeshPolicyOptions(reader ConfigReader, section string) ([]string, error) {
+	if section == "" {
+		return nil, fmt.Errorf("section cannot be empty")
+	}
+
+	policy := SecondaryMeshPolicyOptions()
+	added := make([]string, 0, len(policy))
+
+	for _, p := range policy {
+		if _, exists := reader.Get(wirelessConfigName, section, p.Option); exists {
+			continue
+		}
+
+		if err := reader.SetType(wirelessConfigName, section, p.Option, uci.TypeOption, p.Value); err != nil {
+			return added, fmt.Errorf("setting %s.%s.%s: %w", wirelessConfigName, section, p.Option, err)
+		}
+
+		added = append(added, p.Option)
+	}
+
+	return added, nil
 }
 
 // UCIWirelessConfigReader wraps the UCI functions for wireless configuration.
@@ -425,6 +626,36 @@ func GetWirelessDeviceByNameWithReader(name string, reader ConfigReader) (*UCIWi
 	return config, nil
 }
 
+// ifaceOptionFields maps every wifi-iface option to its field on cfg, in
+// write order. Shared by the getter and the setter so the two cannot
+// drift.
+func ifaceOptionFields(cfg *UCIWirelessIface) []struct {
+	field  *string
+	option string
+} {
+	return []struct {
+		field  *string
+		option string
+	}{
+		{field: &cfg.Device, option: networkDeviceType},
+		{field: &cfg.Network, option: networkConfigName},
+		{field: &cfg.Mode, option: wirelessOptionMode},
+		{field: &cfg.Key, option: wirelessOptionKey},
+		{field: &cfg.MeshID, option: wirelessOptionMeshID},
+		{field: &cfg.MeshFwding, option: wirelessOptionMeshFwding},
+		{field: &cfg.MeshRSSIThreshold, option: wirelessOptionMeshRSSIThreshold},
+		{field: &cfg.Encryption, option: wirelessOptionEncryption},
+		{field: &cfg.SSID, option: wirelessOptionSSID},
+		{field: &cfg.BeaconInt, option: wirelessOptionBeaconInt},
+		{field: &cfg.Disabled, option: wirelessOptionDisabled},
+		{field: &cfg.McastRate, option: wirelessOptionMcastRate},
+		{field: &cfg.MeshNolearn, option: wirelessOptionMeshNolearn},
+		{field: &cfg.MeshRetryTimeout, option: wirelessOptionMeshRetryTimeout},
+		{field: &cfg.MeshConfirmTimeout, option: wirelessOptionMeshConfirmTimeout},
+		{field: &cfg.MeshHoldingTimeout, option: wirelessOptionMeshHoldingTimeout},
+	}
+}
+
 // GetWirelessIfaceByName loads and returns the UCI wireless interface configuration by name.
 //
 // Parameters:
@@ -448,48 +679,10 @@ func GetWirelessIfaceByName(name string) (*UCIWirelessIface, error) {
 func GetWirelessIfaceByNameWithReader(name string, reader ConfigReader) (*UCIWirelessIface, error) {
 	config := &UCIWirelessIface{}
 
-	if values, ok := reader.Get(wirelessConfigName, name, "device"); ok && len(values) > 0 {
-		config.Device = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "network"); ok && len(values) > 0 {
-		config.Network = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "mode"); ok && len(values) > 0 {
-		config.Mode = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "key"); ok && len(values) > 0 {
-		config.Key = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "mesh_id"); ok && len(values) > 0 {
-		config.MeshID = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "mesh_fwding"); ok && len(values) > 0 {
-		config.MeshFwding = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "mesh_rssi_threshold"); ok && len(values) > 0 {
-		config.MeshRSSIThreshold = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "encryption"); ok && len(values) > 0 {
-		config.Encryption = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "ssid"); ok && len(values) > 0 {
-		config.SSID = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "beacon_int"); ok && len(values) > 0 {
-		config.BeaconInt = values[0]
-	}
-
-	if values, ok := reader.Get(wirelessConfigName, name, "disabled"); ok && len(values) > 0 {
-		config.Disabled = values[0]
+	for _, f := range ifaceOptionFields(config) {
+		if values, ok := reader.Get(wirelessConfigName, name, f.option); ok && len(values) > 0 {
+			*f.field = values[0]
+		}
 	}
 
 	return config, nil
@@ -524,7 +717,7 @@ func SetWirelessDeviceConfigWithReader(section string, config *UCIWirelessDevice
 		return fmt.Errorf("config cannot be nil")
 	}
 
-	_ = reader.AddSection(wirelessConfigName, section, "wifi-device")
+	_ = reader.AddSection(wirelessConfigName, section, wifiDeviceSectionType)
 
 	if config.Type != "" {
 		if err := reader.SetType(wirelessConfigName, section, "type", uci.TypeOption, config.Type); err != nil {
@@ -660,76 +853,20 @@ func SetWirelessIfaceConfig(section string, config *UCIWirelessIface) error {
 
 // SetWirelessIfaceConfigWithReader creates or updates a wireless interface configuration using
 // the provided reader.
-func SetWirelessIfaceConfigWithReader(section string, config *UCIWirelessIface, reader ConfigReader) error { //nolint:gocognit
+func SetWirelessIfaceConfigWithReader(section string, config *UCIWirelessIface, reader ConfigReader) error {
 	if config == nil {
 		return fmt.Errorf("config cannot be nil")
 	}
 
 	_ = reader.AddSection(wirelessConfigName, section, "wifi-iface")
 
-	if config.Device != "" {
-		if err := reader.SetType(wirelessConfigName, section, "device", uci.TypeOption, config.Device); err != nil {
-			return fmt.Errorf("failed to set device: %w", err)
+	for _, f := range ifaceOptionFields(config) {
+		if *f.field == "" {
+			continue
 		}
-	}
 
-	if config.Network != "" {
-		if err := reader.SetType(wirelessConfigName, section, "network", uci.TypeOption, config.Network); err != nil {
-			return fmt.Errorf("failed to set network: %w", err)
-		}
-	}
-
-	if config.Mode != "" {
-		if err := reader.SetType(wirelessConfigName, section, "mode", uci.TypeOption, config.Mode); err != nil {
-			return fmt.Errorf("failed to set mode: %w", err)
-		}
-	}
-
-	if config.Key != "" {
-		if err := reader.SetType(wirelessConfigName, section, "key", uci.TypeOption, config.Key); err != nil {
-			return fmt.Errorf("failed to set key: %w", err)
-		}
-	}
-
-	if config.MeshID != "" {
-		if err := reader.SetType(wirelessConfigName, section, "mesh_id", uci.TypeOption, config.MeshID); err != nil {
-			return fmt.Errorf("failed to set mesh_id: %w", err)
-		}
-	}
-
-	if config.MeshFwding != "" {
-		if err := reader.SetType(wirelessConfigName, section, "mesh_fwding", uci.TypeOption, config.MeshFwding); err != nil {
-			return fmt.Errorf("failed to set mesh_fwding: %w", err)
-		}
-	}
-
-	if config.MeshRSSIThreshold != "" {
-		if err := reader.SetType(wirelessConfigName, section, "mesh_rssi_threshold", uci.TypeOption, config.MeshRSSIThreshold); err != nil {
-			return fmt.Errorf("failed to set mesh_rssi_threshold: %w", err)
-		}
-	}
-
-	if config.Encryption != "" {
-		if err := reader.SetType(wirelessConfigName, section, "encryption", uci.TypeOption, config.Encryption); err != nil {
-			return fmt.Errorf("failed to set encryption: %w", err)
-		}
-	}
-
-	if config.SSID != "" {
-		if err := reader.SetType(wirelessConfigName, section, "ssid", uci.TypeOption, config.SSID); err != nil {
-			return fmt.Errorf("failed to set ssid: %w", err)
-		}
-	}
-
-	if config.BeaconInt != "" {
-		if err := reader.SetType(wirelessConfigName, section, "beacon_int", uci.TypeOption, config.BeaconInt); err != nil {
-			return fmt.Errorf("failed to set beacon_int: %w", err)
-		}
-	}
-
-	if config.Disabled != "" {
-		if err := reader.SetType(wirelessConfigName, section, "disabled", uci.TypeOption, config.Disabled); err != nil {
-			return fmt.Errorf("failed to set disabled: %w", err)
+		if err := reader.SetType(wirelessConfigName, section, f.option, uci.TypeOption, *f.field); err != nil {
+			return fmt.Errorf("failed to set %s: %w", f.option, err)
 		}
 	}
 
@@ -875,4 +1012,73 @@ func DisableAllInterfaces(reader ConfigReader) error {
 	}
 
 	return nil
+}
+
+// IsMorseDevice reports whether the named wifi-device section is a
+// Morse Micro HaLow radio (`option type 'morse'`). The comparison is
+// case-insensitive, matching the wizard's HaLow detection.
+func IsMorseDevice(reader ConfigReader, deviceName string) bool {
+	typ, ok := reader.Get(wirelessConfigName, deviceName, "type")
+	if !ok || len(typ) == 0 {
+		return false
+	}
+
+	return strings.EqualFold(typ[0], "morse")
+}
+
+// RemoveNonMeshIfacesOnMorseDevices deletes every wifi-iface whose
+// `device` is a type=morse wifi-device and whose `mode` is anything
+// but mesh (a missing mode counts: netifd defaults it to ap). A HaLow
+// radio only ever carries 802.11s mesh links; an AP or STA section on
+// one is a leftover from an older wizard build (the meshap_<radio>
+// overlay) or a hand edit, and would let the settings UI bring up an
+// AP on the mesh radio. Returns the deleted section names. Does not
+// commit.
+func RemoveNonMeshIfacesOnMorseDevices(reader ConfigReader) ([]string, error) {
+	devices, err := reader.GetSections(wirelessConfigName, wifiDeviceSectionType)
+	if err != nil {
+		return nil, fmt.Errorf("listing wifi-device sections: %w", err)
+	}
+
+	morse := make(map[string]struct{}, len(devices))
+
+	for _, dev := range devices {
+		if IsMorseDevice(reader, dev) {
+			morse[dev] = struct{}{}
+		}
+	}
+
+	if len(morse) == 0 {
+		return nil, nil
+	}
+
+	ifaces, err := reader.GetSections(wirelessConfigName, wifiIfaceSectionType)
+	if err != nil {
+		return nil, fmt.Errorf("listing wifi-iface sections: %w", err)
+	}
+
+	var removed []string
+
+	for _, iface := range ifaces {
+		dev, ok := reader.Get(wirelessConfigName, iface, "device")
+		if !ok || len(dev) == 0 {
+			continue
+		}
+
+		if _, onMorse := morse[dev[0]]; !onMorse {
+			continue
+		}
+
+		if mode, _ := reader.Get(wirelessConfigName, iface, "mode"); len(mode) > 0 && mode[0] == WifiModeMesh {
+			continue
+		}
+
+		if err := reader.DelSection(wirelessConfigName, iface); err != nil {
+			return removed, fmt.Errorf("deleting %s: %w", iface, err)
+		}
+
+		removed = append(removed, iface)
+	}
+
+	return removed, nil
 }

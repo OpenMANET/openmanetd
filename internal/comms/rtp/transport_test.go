@@ -1,7 +1,7 @@
 package rtp
 
 import (
-	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -225,13 +225,13 @@ func TestSwappableSender_StressWritersAndSwapper(t *testing.T) {
 // ─── SwappableReceiver tests ──────────────────────────────────────────────────
 
 func TestSwappableReceiver_ReadsFromInitialImpl(t *testing.T) {
-	src := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}
+	src := netip.MustParseAddrPort("127.0.0.1:1234")
 	r := newMockReader(mockPacket{src: src, data: []byte{42}})
 	sr := NewSwappableReceiver(r)
 
 	buf := make([]byte, 10)
 
-	n, addr, err := sr.ReadFromUDP(buf)
+	n, addr, err := sr.ReadFromUDPAddrPort(buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestSwappableReceiver_CloseUnblocksRead(t *testing.T) {
 		defer close(done)
 
 		buf := make([]byte, 10)
-		_, _, _ = sr.ReadFromUDP(buf)
+		_, _, _ = sr.ReadFromUDPAddrPort(buf)
 	}()
 
 	time.Sleep(20 * time.Millisecond)
@@ -292,13 +292,13 @@ func TestSwappableReceiver_CloseUnblocksRead(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(300 * time.Millisecond):
-		t.Error("Close should unblock ReadFromUDP")
+		t.Error("Close should unblock ReadFromUDPAddrPort")
 	}
 }
 
 // TestSwappableReceiver_ConcurrentSwapAndRead verifies that simultaneous
-// ReadFromUDP calls and swap calls do not produce a data race under the
-// race detector. The pattern mirrors TestSwappableSender_ConcurrentWritesAndSwap.
+// read calls and swap calls do not produce a data race under the race
+// detector. The pattern mirrors TestSwappableSender_ConcurrentWritesAndSwap.
 func TestSwappableReceiver_ConcurrentSwapAndRead(t *testing.T) {
 	r1 := &safeCountingReader{}
 	r2 := &safeCountingReader{}
@@ -320,7 +320,7 @@ func TestSwappableReceiver_ConcurrentSwapAndRead(t *testing.T) {
 			buf := make([]byte, 10)
 
 			for j := 0; j < readsEach; j++ {
-				_, _, _ = sr.ReadFromUDP(buf)
+				_, _, _ = sr.ReadFromUDPAddrPort(buf)
 			}
 		}()
 	}

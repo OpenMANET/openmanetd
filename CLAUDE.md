@@ -23,7 +23,7 @@
 ## Architecture
 
 ```
-cmd/                              Cobra CLI: root.go (full daemon), frontend.go (frontend-only mode)
+cmd/                              Cobra CLI: root.go (full daemon), frontend.go (frontend-only mode), setup_reset.go (re-open the setup wizard)
 internal/openmanet/               Start() wires all subsystems
 internal/openmanet/server/        ConnectRPC HTTP server setup + service registration
 internal/openmanet/server/handlers/   Service handler implementations (one file per service)

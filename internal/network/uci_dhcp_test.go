@@ -1582,57 +1582,19 @@ func TestWhitelistAndIgnoreAllPools_DisablesAndStrips(t *testing.T) {
 	// lan/wan, so this test is mostly verifying no false positives).
 }
 
-func TestSetupDnsmasqInstance_WritesAll11Options(t *testing.T) {
-	m := newDhcpResetMock(t)
-
-	require.NoError(t, SetupDnsmasqInstance(m, "@dnsmasq[0]", "ahwlan"))
-
-	expect := map[string]string{
-		"domainneeded":     "1",
-		"localize_queries": "1",
-		"rebind_localhost": "1",
-		"local":            "/ahwlan/",
-		"domain":           "ahwlan",
-		"expandhosts":      "1",
-		"cachesize":        "1000",
-		"authoritative":    "1",
-		"readethers":       "1",
-		"localservice":     "1",
-		"ednspacket_max":   "1232",
-	}
-
-	for k, want := range expect {
-		v, ok := m.Get("dhcp", "@dnsmasq[0]", k)
-		require.Truef(t, ok, "missing %s", k)
-		assert.Equalf(t, want, v[0], "key %s", k)
-	}
-}
-
-func TestSetupDnsmasqInstance_RejectsEmptyArgs(t *testing.T) {
-	m := newDhcpResetMock(t)
-	require.Error(t, SetupDnsmasqInstance(m, "", "ahwlan"))
-	require.Error(t, SetupDnsmasqInstance(m, "@dnsmasq[0]", ""))
-}
-
 func TestCreateDhcpPool_WritesStandardFields(t *testing.T) {
 	m := newDhcpResetMock(t)
 
 	rng := newSeededRand(t, 42)
-	name, err := CreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", rng)
+	name, err := CreateDhcpPool(m, "ahwlan", nil, rng)
 	require.NoError(t, err)
 	assert.Equal(t, "ahwlan", name)
 
 	expect := map[string]string{
-		"limit":       DefaultDhcpPoolLimit,
-		"leasetime":   DefaultDhcpPoolLeasetime,
-		"ra":          "server",
-		"ra_slaac":    "1",
-		"dns_service": "0",
-		"ignore":      "0",
-		"force":       "1",
-		"dns":         CloudflareIPv6DNS,
-		"ra_flags":    "none",
-		"interface":   "ahwlan",
+		"limit":     DefaultDhcpPoolLimit,
+		"leasetime": DefaultDhcpPoolLeasetime,
+		"force":     "1",
+		"interface": "ahwlan",
 	}
 
 	for k, want := range expect {
@@ -1647,30 +1609,26 @@ func TestCreateDhcpPool_WritesStandardFields(t *testing.T) {
 
 	startVal := v[0]
 	assert.NotEmpty(t, startVal)
+
+	// Fixture-shape: no dnsmasq instance binding and none of the
+	// options the old wizard used to write (a second dnsmasq
+	// instance races the global one for port 53).
+	for _, gone := range []string{"instance", "ra", "ra_slaac", "ra_flags", "dns", "dns_service", "ignore"} {
+		_, ok := m.Get("dhcp", "ahwlan", gone)
+		assert.Falsef(t, ok, "option %q must not be written", gone)
+	}
 }
 
-func TestCreateDhcpPool_DoesNotSetInstanceForAnonymousDnsmasq(t *testing.T) {
+func TestCreateDhcpPool_WritesExtraOptions(t *testing.T) {
 	m := newDhcpResetMock(t)
-	rng := newSeededRand(t, 7)
+	rng := newSeededRand(t, 0)
 
-	_, err := CreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", rng)
+	name, err := CreateDhcpPool(m, "lan", map[string][]string{"dhcp_option": {"3", "6"}}, rng)
 	require.NoError(t, err)
 
-	_, ok := m.Get("dhcp", "ahwlan", "instance")
-	assert.False(t, ok, "anonymous dnsmasq should not set `instance`")
-}
-
-func TestCreateDhcpPool_SetsInstanceForNamedDnsmasq(t *testing.T) {
-	m := newDhcpResetMock(t)
-	require.NoError(t, m.AddSection("dhcp", "ahwlan_dns", "dnsmasq"))
-
-	rng := newSeededRand(t, 7)
-	_, err := CreateDhcpPool(m, "ahwlan_dns", "ahwlan", rng)
-	require.NoError(t, err)
-
-	v, ok := m.Get("dhcp", "ahwlan", "instance")
+	v, ok := m.Get("dhcp", name, "dhcp_option")
 	require.True(t, ok)
-	assert.Equal(t, "ahwlan_dns", v[0])
+	assert.Equal(t, []string{"3", "6"}, v)
 }
 
 func TestCreateDhcpPool_ResolvesNameClashByAppendingSuffix(t *testing.T) {
@@ -1679,7 +1637,7 @@ func TestCreateDhcpPool_ResolvesNameClashByAppendingSuffix(t *testing.T) {
 	require.NoError(t, m.AddSection("dhcp", "ahwlan", "dhcp"))
 
 	rng := newSeededRand(t, 0)
-	name, err := CreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", rng)
+	name, err := CreateDhcpPool(m, "ahwlan", nil, rng)
 	require.NoError(t, err)
 	assert.NotEqual(t, "ahwlan", name)
 }
@@ -1687,13 +1645,11 @@ func TestCreateDhcpPool_ResolvesNameClashByAppendingSuffix(t *testing.T) {
 func TestCreateDhcpPool_RejectsEmptyArgs(t *testing.T) {
 	m := newDhcpResetMock(t)
 	rng := newSeededRand(t, 0)
-	_, err := CreateDhcpPool(m, "", "ahwlan", rng)
+
+	_, err := CreateDhcpPool(m, "", nil, rng)
 	require.Error(t, err)
 
-	_, err = CreateDhcpPool(m, "@dnsmasq[0]", "", rng)
-	require.Error(t, err)
-
-	_, err = CreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", nil)
+	_, err = CreateDhcpPool(m, "ahwlan", nil, nil)
 	require.Error(t, err)
 }
 
@@ -1704,9 +1660,53 @@ func TestGetOrCreateDhcpPool_ReturnsEnabledMatch(t *testing.T) {
 	require.NoError(t, m.SetType("dhcp", "ahwlan", "interface", uci.TypeOption, "ahwlan"))
 
 	rng := newSeededRand(t, 0)
-	got, err := GetOrCreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", rng)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", nil, rng)
 	require.NoError(t, err)
 	assert.Equal(t, "ahwlan", got)
+}
+
+// TestGetOrCreateDhcpPool_EnabledMatchBackfillsOptions pins that the
+// enabled-match path (an already-enabled pool matching networkID) is
+// NOT a bare pass-through: it must also run backfillPoolOptions, not
+// rely on the caller having already run the wizard's reset phase
+// (which sets ignore=1 before this function ever sees the pool in
+// production). Without this, a pool that reaches GetOrCreateDhcpPool
+// already enabled — by construction, or via a future caller that
+// doesn't go through the reset phase — would keep whatever
+// interface/force/extraOptions it happened to have, silently
+// skipping the wizard's option set.
+func TestGetOrCreateDhcpPool_EnabledMatchBackfillsOptions(t *testing.T) {
+	m := newDhcpResetMock(t)
+
+	// Enabled pool (no `ignore`) matching networkID, but missing
+	// every field the wizard is supposed to guarantee.
+	require.NoError(t, m.AddSection("dhcp", "ahwlan", "dhcp"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "interface", uci.TypeOption, "ahwlan"))
+
+	rng := newSeededRand(t, 0)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", map[string][]string{"dhcp_option": {"3", "6"}}, rng)
+	require.NoError(t, err)
+	assert.Equal(t, "ahwlan", got)
+
+	force, ok := m.Get("dhcp", "ahwlan", "force")
+	require.True(t, ok, "force must be backfilled on the enabled-match path")
+	assert.Equal(t, "1", force[0])
+
+	limit, ok := m.Get("dhcp", "ahwlan", "limit")
+	require.True(t, ok, "limit must be backfilled on the enabled-match path")
+	assert.Equal(t, DefaultDhcpPoolLimit, limit[0])
+
+	lease, ok := m.Get("dhcp", "ahwlan", "leasetime")
+	require.True(t, ok, "leasetime must be backfilled on the enabled-match path")
+	assert.Equal(t, DefaultDhcpPoolLeasetime, lease[0])
+
+	start, ok := m.Get("dhcp", "ahwlan", "start")
+	require.True(t, ok, "start must be backfilled on the enabled-match path")
+	assert.NotEmpty(t, start[0])
+
+	dhcpOpt, ok := m.Get("dhcp", "ahwlan", "dhcp_option")
+	require.True(t, ok, "extraOptions must be backfilled on the enabled-match path")
+	assert.Equal(t, []string{"3", "6"}, dhcpOpt)
 }
 
 func TestGetOrCreateDhcpPool_ReenablesDisabledMatch(t *testing.T) {
@@ -1717,7 +1717,7 @@ func TestGetOrCreateDhcpPool_ReenablesDisabledMatch(t *testing.T) {
 	require.NoError(t, m.SetType("dhcp", "ahwlan", "ignore", uci.TypeOption, "1"))
 
 	rng := newSeededRand(t, 0)
-	got, err := GetOrCreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", rng)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", nil, rng)
 	require.NoError(t, err)
 	assert.Equal(t, "ahwlan", got)
 
@@ -1729,7 +1729,7 @@ func TestGetOrCreateDhcpPool_CreatesNewWhenAbsent(t *testing.T) {
 	m := newDhcpResetMock(t)
 	rng := newSeededRand(t, 0)
 
-	got, err := GetOrCreateDhcpPool(m, "@dnsmasq[0]", "ahwlan", rng)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", nil, rng)
 	require.NoError(t, err)
 	assert.Equal(t, "ahwlan", got)
 
@@ -1737,4 +1737,96 @@ func TestGetOrCreateDhcpPool_CreatesNewWhenAbsent(t *testing.T) {
 	v, ok := m.Get("dhcp", "ahwlan", "interface")
 	require.True(t, ok)
 	assert.Equal(t, "ahwlan", v[0])
+}
+
+// TestGetOrCreateDhcpPool_ReenableBackfillsForce pins the idempotence
+// fix: the reset phase's WhitelistAndIgnoreAllPools strips `force`
+// (it isn't in WizardDhcpPoolWhitelist) before setting ignore=1. The
+// old re-enable path only cleared `ignore`, so a second wizard run
+// silently dropped `force` from an already-provisioned pool. start/
+// limit/leasetime (whitelisted, so they survive reset) must be kept
+// unchanged rather than reshuffled.
+func TestGetOrCreateDhcpPool_ReenableBackfillsForce(t *testing.T) {
+	m := newDhcpResetMock(t)
+
+	require.NoError(t, m.AddSection("dhcp", "ahwlan", "dhcp"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "interface", uci.TypeOption, "ahwlan"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "start", uci.TypeOption, "271"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "limit", uci.TypeOption, "16"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "leasetime", uci.TypeOption, "12h"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "ignore", uci.TypeOption, "1"))
+	// `force` absent — this is what WhitelistAndIgnoreAllPools leaves
+	// behind since force isn't whitelisted.
+
+	rng := newSeededRand(t, 0)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", nil, rng)
+	require.NoError(t, err)
+	assert.Equal(t, "ahwlan", got)
+
+	v, ok := m.Get("dhcp", "ahwlan", "force")
+	require.True(t, ok, "force must be backfilled on re-enable")
+	assert.Equal(t, "1", v[0])
+
+	// start/limit/leasetime kept unchanged, not reshuffled.
+	start, ok := m.Get("dhcp", "ahwlan", "start")
+	require.True(t, ok)
+	assert.Equal(t, "271", start[0])
+
+	limit, ok := m.Get("dhcp", "ahwlan", "limit")
+	require.True(t, ok)
+	assert.Equal(t, "16", limit[0])
+
+	lease, ok := m.Get("dhcp", "ahwlan", "leasetime")
+	require.True(t, ok)
+	assert.Equal(t, "12h", lease[0])
+}
+
+// TestGetOrCreateDhcpPool_ReenableScrubsPriorFirmwareOptions pins the
+// reset-phase interaction: a pool carried over from a prior firmware
+// (or a pre-fix wizard run) may still have `instance`/`ra` from
+// before this fix landed. allDhcpPoolOptions already covers both
+// (neither is in WizardDhcpPoolWhitelist) so WhitelistAndIgnoreAllPools
+// strips them at reset; the re-enable path must not reintroduce them.
+func TestGetOrCreateDhcpPool_ReenableScrubsPriorFirmwareOptions(t *testing.T) {
+	m := newDhcpResetMock(t)
+
+	require.NoError(t, m.AddSection("dhcp", "ahwlan", "dhcp"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "interface", uci.TypeOption, "ahwlan"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "instance", uci.TypeOption, "ahwlan_dns"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "ra", uci.TypeOption, "server"))
+
+	require.NoError(t, WhitelistAndIgnoreAllPools(m))
+
+	rng := newSeededRand(t, 0)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", nil, rng)
+	require.NoError(t, err)
+	assert.Equal(t, "ahwlan", got)
+
+	_, ok := m.Get("dhcp", "ahwlan", "instance")
+	assert.False(t, ok, "instance from a prior-firmware pool must be scrubbed, not reintroduced")
+
+	_, ok = m.Get("dhcp", "ahwlan", "ra")
+	assert.False(t, ok, "ra from a prior-firmware pool must be scrubbed, not reintroduced")
+}
+
+// TestGetOrCreateDhcpPool_ReenableRewritesExtraOptions pins that
+// extraOptions (e.g. mesh-point-none's dhcp_option=[3,6]) are
+// restored on re-enable even though dhcp_option is in the reset
+// phase's option universe and gets stripped like any other
+// non-whitelisted field.
+func TestGetOrCreateDhcpPool_ReenableRewritesExtraOptions(t *testing.T) {
+	m := newDhcpResetMock(t)
+
+	require.NoError(t, m.AddSection("dhcp", "ahwlan", "dhcp"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "interface", uci.TypeOption, "ahwlan"))
+	require.NoError(t, m.SetType("dhcp", "ahwlan", "ignore", uci.TypeOption, "1"))
+
+	rng := newSeededRand(t, 0)
+	got, err := GetOrCreateDhcpPool(m, "ahwlan", map[string][]string{"dhcp_option": {"3", "6"}}, rng)
+	require.NoError(t, err)
+	assert.Equal(t, "ahwlan", got)
+
+	v, ok := m.Get("dhcp", "ahwlan", "dhcp_option")
+	require.True(t, ok)
+	assert.Equal(t, []string{"3", "6"}, v)
 }

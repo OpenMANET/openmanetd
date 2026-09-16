@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -11,49 +12,83 @@ import (
 
 // Default configuration values
 const (
-	DefaultMeshNetInterface                   string = "br-ahwlan"
-	DefaultDBFile                             string = "/etc/openmanetd/openmanetd.db"
-	DefaultAlfredMode                         string = "primary"
-	DefaultAlfredBatInterface                 string = "bat0"
-	DefaultBatmanMulticastEnhancementsEnabled bool   = true
-	// DefaultBatmanMulticastForceflood controls batman-adv's multicast mode.
-	// When true, every multicast frame is flooded to every mesh node. When
-	// false, batman-adv uses IGMP/MLD snooping to deliver each group only to
-	// nodes that have joined it. Voice (continuous, per-channel subscribers)
-	// costs dramatically less bandwidth and CPU under snooping; ATAK CoT
-	// (all-nodes group) is still delivered because every node joins it.
-	// Operators can force-flood explicitly via batman.multicastForceflood
-	// when reliability over raw efficiency is required.
-	DefaultBatmanMulticastForceflood                 bool    = false
-	DefaultAlfredSocketPath                          string  = "/var/run/alfred.sock"
-	DefaultAlfredEnable                              bool    = true
-	DefaultAlfredDataTypeGateway                     bool    = true
-	DefaultAlfredDataTypeNode                        bool    = true
-	DefaultAlfredDataTypePosition                    bool    = true
-	DefaultAlfredDataTypeAddressReserv               bool    = true
-	DefaultAlfredDataTypeMeshNeighbors               bool    = true
-	DefaultCommsEnable                               bool    = false
-	DefaultCommsProtocol                             string  = "rtp"
-	DefaultCommsDebug                                bool    = false
-	DefaultCommsLoopback                             bool    = false
-	DefaultCommsTrace                                bool    = false
-	DefaultCommsControlSource                        string  = "openvlm"
-	DefaultCommsMicGain                              float32 = 8.0
-	DefaultCommsNanoPTTEnable                        bool    = false
-	DefaultCommsNanoPTTDevicePath                    string  = "/dev/hidraw0/*"
-	DefaultCommsNanoPTTDeviceName                    string  = ""
-	DefaultCommsBluetoothPttEnable                   bool    = false
-	DefaultCommsBluetoothPttBluetoothAudioDeviceHint string  = ""
-	DefaultCommsBluetoothPttBluetoothInputDevice     string  = ""
-	DefaultCommsBluetoothPttBluetoothOutputDevice    string  = ""
-	DefaultResetDBOnStart                            bool    = false
-	DefaultEnableGNSS                                bool    = false
-	DefaultGNSSSendAsNMEA                            bool    = false
-	DefaultGNSSSendAsCoT                             bool    = false
-	DefaultGNSSCoTUID                                string  = ""
-	DefaultGNSSSource                                string  = "internal"
-	DefaultEnableBLOS                                bool    = false
-	DefaultBLOSStatusWorkerInterval                  int     = 30 // seconds
+	DefaultMeshNetInterface   string = "br-ahwlan"
+	DefaultDBFile             string = "/etc/openmanetd/openmanetd.db"
+	DefaultAlfredMode         string = "primary"
+	DefaultAlfredBatInterface string = "bat0"
+	// DefaultBatmanMulticastForceflood controls batman-adv's multicast mode
+	// through the bat0 `multicast_mode` UCI option, which the kernel defines
+	// as the negation of forceflood: true writes multicast_mode=0 and every
+	// node classic-floods every multicast frame; false writes
+	// multicast_mode=1 and batman-adv's IGMP/MLD-snooping optimisations
+	// deliver each group only to nodes that announced membership. The
+	// default is true (classic flooding): it is the value the LuCI wizard
+	// and both fixture captures leave on the device, and it keeps comms RTP
+	// audible without every listener gossiping IGMP/MLD membership across
+	// the mesh. Decision D7 (2026-08-27): keep the key, fix the mapping,
+	// default true. Operators can set batman.multicastForceflood: false to
+	// turn the optimisations on. Mapping: network.MulticastModeForForceflood.
+	DefaultBatmanMulticastForceflood   bool   = true
+	DefaultAlfredSocketPath            string = "/var/run/alfred.sock"
+	DefaultAlfredEnable                bool   = true
+	DefaultAlfredDataTypeGateway       bool   = true
+	DefaultAlfredDataTypeNode          bool   = true
+	DefaultAlfredDataTypePosition      bool   = true
+	DefaultAlfredDataTypeAddressReserv bool   = true
+	DefaultAlfredDataTypeMeshNeighbors bool   = true
+	// DefaultAlfredNodeExpiry is how long a peer may stay silent before its
+	// mesh_nodes row is dropped, releasing the address and DHCP window it
+	// advertised so the reservation worker stops treating them as taken
+	// (ledger D4). Zero disables expiry: rows then live until
+	// resetDBOnStart. Key alfred.nodeExpiry, a Go duration string ("24h").
+	DefaultAlfredNodeExpiry   time.Duration = 24 * time.Hour
+	DefaultCommsEnable        bool          = false
+	DefaultCommsProtocol      string        = "rtp"
+	DefaultCommsDebug         bool          = false
+	DefaultCommsLoopback      bool          = false
+	DefaultCommsTrace         bool          = false
+	DefaultCommsControlSource string        = "openvlm"
+	// DefaultCommsMicGain is the TX digital gain applied after the ADC,
+	// in Q8 fixed point with a soft-knee limiter (see comms/audio). 2.0 is
+	// the 2026-08-30 bench residual: at the OpenVLM's shipped +20 dB
+	// analog gain a loud talker's speech body (~9.5k ADC counts) stays
+	// under the 24576 knee, leaving the knee for plosives and transients.
+	// The previous 8.0 was compensating for hardware headroom the bench
+	// showed does not exist (the ADC clips first) and hard-clipped every
+	// sample at or above 4096 counts. Key comms.micGain.
+	DefaultCommsMicGain float32 = 2.0
+	// DefaultCommsAudioSpeakerVolume is the hardware speaker (DAC) volume
+	// percent applied when comms.audio.speakerVolume is unset. 100% maps to
+	// the CM108B DAC maximum of 0 dB — the chip has no positive playback
+	// gain, so full scale cannot over-drive. A fixed default (rather than
+	// the leave-untouched sentinel used for the mic) closes the fleet split
+	// where units provisioned with OpenVLM <= 1.0.2 boot at -10 dB from the
+	// EEPROM while >= 1.0.3 units boot at 0 dB. Key comms.audio.speakerVolume.
+	DefaultCommsAudioSpeakerVolume int = 100
+	// DefaultCommsAudioMicVolume is the hardware mic capture (ADC) volume
+	// percent applied when comms.audio.micVolume is unset. 100% maps onto
+	// the full ALSA range the chip advertises — +23 dB on the CM108B, well
+	// above the +8 dB EEPROM boot value — making the capture level
+	// deterministic at startup regardless of EEPROM vintage or prior
+	// alsamixer state. Operator decision 2026-08-30. Key
+	// comms.audio.micVolume.
+	DefaultCommsAudioMicVolume                       int    = 100
+	DefaultCommsNanoPTTEnable                        bool   = false
+	DefaultCommsNanoPTTDevicePath                    string = "/dev/hidraw0/*"
+	DefaultCommsNanoPTTDeviceName                    string = ""
+	DefaultCommsBluetoothPttEnable                   bool   = false
+	DefaultCommsBluetoothPttBluetoothAudioDeviceHint string = ""
+	DefaultCommsBluetoothPttBluetoothInputDevice     string = ""
+	DefaultCommsBluetoothPttBluetoothOutputDevice    string = ""
+	DefaultCommsGPIOSelectorEnable                   bool   = true
+	DefaultResetDBOnStart                            bool   = false
+	DefaultEnableGNSS                                bool   = false
+	DefaultGNSSSendAsNMEA                            bool   = false
+	DefaultGNSSSendAsCoT                             bool   = false
+	DefaultGNSSCoTUID                                string = ""
+	DefaultGNSSSource                                string = "internal"
+	DefaultEnableBLOS                                bool   = false
+	DefaultBLOSStatusWorkerInterval                  int    = 30 // seconds
 	// DefaultMeshTopologyDeltaSampleInterval is how often the mesh
 	// topology delta tracker polls batadv-vis for a new snapshot. 5
 	// seconds is a compromise between granularity (the UI panel claims
@@ -103,33 +138,45 @@ const (
 	// CommsPacketLossPercMax is the upper clamp for comms.packetLossPerc.
 	// Above 40, primary-frame quality degrades noticeably.
 	CommsPacketLossPercMax int = 40
-	// DefaultCommsPlaybackLatencyMs is the playback-side device buffer depth
-	// suggested to PortAudio. The Go-side jitter buffer cannot save the
-	// audio thread from OS scheduling stalls — only the device buffer can.
-	// 60 ms = three 20 ms callback periods, giving the audio thread two
-	// full periods of slack before the DAC underruns. Some hardware reports
-	// a higher DefaultHighOutputLatency than this; in that case the floor
-	// in buildAudio uses the device value instead so we never go below
-	// what the host API itself recommends.
+	// DefaultCommsDSCP is the DSCP applied to outgoing RTP/RTCP voice
+	// sockets (comms.dscp). 46 (EF, RFC 4594 telephony) maps to skb
+	// priority 261 → WMM AC_VI on every mesh hop under Linux's
+	// precedence-derived classification. 48 (CS6) maps to priority 262 →
+	// AC_VO — flip only after the radio's EDCA behavior is validated
+	// on-air. 0 disables marking entirely (today's best-effort behavior).
+	DefaultCommsDSCP int = 46
+	// CommsDSCPMax is the upper clamp for comms.dscp: DSCP is a 6-bit
+	// field, so 63 is the largest encodable value.
+	CommsDSCPMax int = 63
+	// DefaultCommsPlaybackLatencyMs is the playback-side ALSA period size
+	// expressed in milliseconds. computePlaybackPeriodFrames converts it
+	// to malgo's DeviceConfig.PeriodSizeInFrames, and the LowLatency
+	// profile queues three periods in the playback ring, so worst-case
+	// device latency is ~3x this value (USB audio class devices round the
+	// period up to the next power of two on top of that). The ring is the
+	// audio thread's only protection against OS scheduling stalls — the
+	// Go-side jitter buffer cannot help once samples are due at the DAC.
+	// The PTT settle wait (transmitSettleWait) also anchors on the modeled
+	// ring, so lowering this value shortens PTT start latency too.
 	DefaultCommsPlaybackLatencyMs int = 60
-	// DefaultCommsCaptureLatencyMs is the capture-side device buffer depth
-	// suggested to PortAudio. Mirrors DefaultCommsPlaybackLatencyMs: a
-	// preempted capture audio thread silently drops samples (the ADC device
-	// buffer overruns), which remote listeners hear as a gap in the RTP
-	// stream. 60 ms = three 20 ms callback periods, giving the audio thread
-	// two full periods of slack before sample loss. Floored at the device's
-	// DefaultHighInputLatency in openBroadcastStreamOn so we never undercut
-	// the host API's recommendation.
+	// DefaultCommsCaptureLatencyMs is the capture-side ALSA ring headroom
+	// in milliseconds. Unlike playback, the capture period is pinned at
+	// one Opus frame (960 frames = 20 ms) so the callback fires once per
+	// frame; this value only selects the ring depth in periods via
+	// buildCapturePeriods (ceil(ms/20), clamped into [3, 16]). Values of
+	// 60 or below all hit the 3-period floor and are equivalent. A
+	// preempted capture audio thread silently drops samples (the ADC ring
+	// overruns), which remote listeners hear as a gap in the RTP stream —
+	// raise this above 60 to buy more headroom on devices that drop.
 	DefaultCommsCaptureLatencyMs int = 60
 	// DefaultCommsCaptureFramesPerBuffer is the per-callback frame count
-	// suggested to malgo (DeviceConfig.PeriodSizeInFrames). 0 means
-	// "derive from comms.captureLatencyMs" — a 60 ms latency at 48 kHz
-	// gives a 2880-frame period, which leaves ALSA enough headroom on
-	// USB audio class devices to avoid poll() failures and capture gaps.
-	// The captureChunker re-aligns whatever ALSA actually delivers onto
-	// 960-sample (20 ms) Opus frames, so the encoder pipeline never sees
-	// the discrepancy. Operators can override with a positive value to
-	// pin the period explicitly, or with -1 to let miniaudio pick.
+	// handed to malgo (DeviceConfig.PeriodSizeInFrames). 0 means
+	// audiopool.FrameSize (960 = 20 ms @ 48 kHz), keeping one callback
+	// per Opus frame; a negative value lets miniaudio pick a period
+	// aligned with the native ALSA period; a positive value is passed
+	// through verbatim. The captureChunker re-aligns whatever ALSA
+	// actually delivers onto 960-sample (20 ms) Opus frames, so the
+	// encoder pipeline never sees the discrepancy.
 	DefaultCommsCaptureFramesPerBuffer int  = 0
 	DefaultAuthEnable                  bool = true
 	// DefaultSetupEnabled is the default value for setup.enabled — the
@@ -192,7 +239,11 @@ type Config struct {
 	InstrumentationSnapshotDir                string
 	BLOSAdvertisedMeshSubnet                  string
 	TerminalShell                             string
+	CommsAudioSpeakerControl                  string
+	CommsAudioMicControl                      string
+	CommsAudioAGCControl                      string
 	onChangeCallbacks                         []func(*Config)
+	AlfredNodeExpiry                          time.Duration
 	BLOSStatusWorkerInterval                  int
 	MeshTopologyDeltaSampleInterval           int
 	MeshTopologyMaxDeltaSamples               int
@@ -200,9 +251,12 @@ type Config struct {
 	OpenMANETWebsocketPort                    int
 	CommsEncoderComplexity                    int
 	CommsPacketLossPerc                       int
+	CommsDSCP                                 int
 	CommsPlaybackLatencyMs                    int
 	CommsCaptureLatencyMs                     int
 	CommsCaptureFramesPerBuffer               int
+	CommsAudioSpeakerVolume                   int
+	CommsAudioMicVolume                       int
 	RuntimeGoGC                               int
 	RuntimeGOMAXPROCS                         int
 	AuthSessionMaxAgeSecs                     int
@@ -212,13 +266,15 @@ type Config struct {
 	CommsMicGain                              float32
 	AlfredDataTypeAddressReserv               bool
 	AlfredDataTypeNode                        bool
-	BatmanMulticastEnhancementsEnabled        bool
 	BatmanMulticastForceflood                 bool
 	CommsDebug                                bool
+	CommsGPIOSelectorEnable                   bool
 	CommsEnable                               bool
 	CommsTrace                                bool
 	CommsNanoPTTEnable                        bool
 	CommsBluetoothPttEnable                   bool
+	CommsAudioAGC                             bool
+	CommsAudioAGCSet                          bool
 	ResetDBOnStart                            bool
 	EnableGNSS                                bool
 	GNSSSendAsNMEA                            bool
@@ -334,12 +390,6 @@ func (c *Config) reload() { //nolint:gocognit,gocyclo
 		c.GNSSSource = DefaultGNSSSource
 	}
 
-	if c.v.IsSet("batman.multicastEnhancementsEnabled") {
-		c.BatmanMulticastEnhancementsEnabled = c.v.GetBool("batman.multicastEnhancementsEnabled")
-	} else {
-		c.BatmanMulticastEnhancementsEnabled = DefaultBatmanMulticastEnhancementsEnabled
-	}
-
 	if c.v.IsSet("batman.multicastForceflood") {
 		c.BatmanMulticastForceflood = c.v.GetBool("batman.multicastForceflood")
 	} else {
@@ -402,6 +452,8 @@ func (c *Config) reload() { //nolint:gocognit,gocyclo
 		c.AlfredDataTypeMeshNeighbors = DefaultAlfredDataTypeMeshNeighbors
 	}
 
+	c.AlfredNodeExpiry = parseDurationOrDefault(c.v.GetString("alfred.nodeExpiry"), DefaultAlfredNodeExpiry)
+
 	// Load comms configuration
 	if c.v.IsSet("comms.enable") {
 		c.CommsEnable = c.v.GetBool("comms.enable")
@@ -419,6 +471,12 @@ func (c *Config) reload() { //nolint:gocognit,gocyclo
 		c.CommsDebug = c.v.GetBool("comms.debug")
 	} else {
 		c.CommsDebug = DefaultCommsDebug
+	}
+
+	if c.v.IsSet("comms.gpioSelector.enable") {
+		c.CommsGPIOSelectorEnable = c.v.GetBool("comms.gpioSelector.enable")
+	} else {
+		c.CommsGPIOSelectorEnable = DefaultCommsGPIOSelectorEnable
 	}
 
 	if c.v.IsSet("comms.loopback") {
@@ -629,24 +687,44 @@ func (c *Config) reload() { //nolint:gocognit,gocyclo
 		c.CommsPacketLossPerc = DefaultCommsPacketLossPerc
 	}
 
-	// Load comms playback latency. Suggested to PortAudio as the playback
-	// device buffer depth (StreamDeviceParameters.Latency). Values <= 0
-	// fall back to the default; the actual depth granted by the host API
-	// is logged at Debug level when the playback stream is opened.
+	// Load comms DSCP marking for RTP/RTCP voice egress. IsSet-guarded so
+	// an explicit `dscp: 0` (marking off) is distinguishable from an
+	// absent key (default EF): the zero value is meaningful here, unlike
+	// the latency knobs above. Out-of-range values clamp into [0, 63].
+	if c.v.IsSet("comms.dscp") {
+		switch val := c.v.GetInt("comms.dscp"); {
+		case val < 0:
+			c.CommsDSCP = 0
+		case val > CommsDSCPMax:
+			c.CommsDSCP = CommsDSCPMax
+		default:
+			c.CommsDSCP = val
+		}
+	} else {
+		c.CommsDSCP = DefaultCommsDSCP
+	}
+
+	// Load comms playback latency. The value becomes the ALSA period size
+	// for every playback device (malgo DeviceConfig.PeriodSizeInFrames
+	// after ms→frames conversion); the ring holds three periods, so device
+	// latency scales at ~3x this value. Values <= 0 fall back to the
+	// default; the requested and effective period plus the modeled ring
+	// latency are logged when each playback stream is opened.
 	if val := c.v.GetInt("comms.playbackLatencyMs"); val > 0 {
 		c.CommsPlaybackLatencyMs = val
 	} else {
 		c.CommsPlaybackLatencyMs = DefaultCommsPlaybackLatencyMs
 	}
 
-	// Load comms capture latency. Suggested to PortAudio as the mic capture
-	// device buffer depth (StreamDeviceParameters.Latency on the Input
-	// params). Symmetric to comms.playbackLatencyMs: protects the capture
-	// audio thread against OS preemption that would otherwise cause the
-	// ADC device buffer to overrun and silently drop samples (heard as
-	// stutter by remote listeners). Values <= 0 fall back to the default;
-	// the actual depth granted by the host API is logged at Debug level
-	// when the broadcast stream is opened.
+	// Load comms capture latency. Sets the capture-side ALSA ring depth:
+	// the period is pinned at one Opus frame (960 frames = 20 ms) and this
+	// value picks how many periods deep the ring is (ceil(ms/20), clamped
+	// into [3, 16]), so values of 60 or below all hit the 3-period floor.
+	// The headroom protects the capture audio thread against OS preemption
+	// that would otherwise overrun the ADC ring and silently drop samples
+	// (heard as stutter by remote listeners). Values <= 0 fall back to the
+	// default; the derived period and ring depth are logged when the
+	// broadcast stream is opened.
 	if val := c.v.GetInt("comms.captureLatencyMs"); val > 0 {
 		c.CommsCaptureLatencyMs = val
 	} else {
@@ -654,18 +732,44 @@ func (c *Config) reload() { //nolint:gocognit,gocyclo
 	}
 
 	// Load comms capture frames-per-buffer override. This is the per-
-	// callback frame count suggested to PortAudio. Unlike most numeric
-	// config knobs we use viper.IsSet here so that an explicit value of 0
-	// in YAML (paFramesPerBufferUnspecified — let PortAudio choose) can be
-	// distinguished from "not set in YAML" (fall back to the default of
-	// 960). The escape hatch is only useful on hardware where PortAudio's
-	// native callback pacing is jittery; see the audio/init.go stream
-	// open log for the granted latency and derived period frames.
+	// callback frame count handed to malgo as
+	// DeviceConfig.PeriodSizeInFrames. 0 — also the fallback when the key
+	// is absent — means audiopool.FrameSize (960 = 20 ms @ 48 kHz) so ALSA
+	// wakes the callback once per Opus frame; a negative value lets
+	// miniaudio pick a period aligned with the native ALSA period; a
+	// positive value is passed through verbatim. The IsSet guard predates
+	// the malgo migration (0 and absent now behave identically) and is
+	// kept for config-shape stability. The escape hatch is only useful on
+	// hardware where the fixed 20 ms period paces badly; see the
+	// audio/init.go stream-open log for the requested period and derived
+	// ring depth.
 	if c.v.IsSet("comms.captureFramesPerBuffer") {
 		c.CommsCaptureFramesPerBuffer = c.v.GetInt("comms.captureFramesPerBuffer")
 	} else {
 		c.CommsCaptureFramesPerBuffer = DefaultCommsCaptureFramesPerBuffer
 	}
+
+	// Load comms hardware audio mixer levels. Both volume levels are
+	// policy, not passthrough: unset keys apply the 100% defaults so
+	// speaker and capture levels do not depend on which OpenVLM EEPROM
+	// image a unit was provisioned with or on prior alsamixer state.
+	// Out-of-range values are silently clamped to [0, 100].
+	c.CommsAudioSpeakerVolume = DefaultCommsAudioSpeakerVolume
+	if c.v.IsSet("comms.audio.speakerVolume") {
+		c.CommsAudioSpeakerVolume = clampPct(c.v.GetInt("comms.audio.speakerVolume"))
+	}
+
+	c.CommsAudioMicVolume = DefaultCommsAudioMicVolume
+	if c.v.IsSet("comms.audio.micVolume") {
+		c.CommsAudioMicVolume = clampPct(c.v.GetInt("comms.audio.micVolume"))
+	}
+
+	c.CommsAudioAGCSet = c.v.IsSet("comms.audio.agc")
+	c.CommsAudioAGC = c.v.GetBool("comms.audio.agc")
+
+	c.CommsAudioSpeakerControl = c.v.GetString("comms.audio.speakerControl")
+	c.CommsAudioMicControl = c.v.GetString("comms.audio.micControl")
+	c.CommsAudioAGCControl = c.v.GetString("comms.audio.agcControl")
 
 	// Load auth configuration
 	if c.v.IsSet("auth.enable") {
@@ -740,6 +844,19 @@ func (c *Config) reload() { //nolint:gocognit,gocyclo
 	}
 }
 
+// clampPct clamps v into the [0, 100] percent range.
+func clampPct(v int) int {
+	if v < 0 {
+		return 0
+	}
+
+	if v > 100 {
+		return 100
+	}
+
+	return v
+}
+
 // OnConfigChange registers a callback function to be called when the configuration changes.
 func (c *Config) OnConfigChange(callback func(*Config)) {
 	c.mu.Lock()
@@ -782,14 +899,6 @@ func (c *Config) GetResetDBOnStart() bool {
 	defer c.mu.RUnlock()
 
 	return c.ResetDBOnStart
-}
-
-// GetEnableBatmanMulticastEnhancements returns whether batman-adv multicast enhancements are enabled.
-func (c *Config) GetEnableBatmanMulticastEnhancements() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.BatmanMulticastEnhancementsEnabled
 }
 
 // GetBatmanMulticastForceflood returns whether batman-adv multicast forceflood is enabled.
@@ -884,6 +993,16 @@ func (c *Config) GetAlfredDataTypeMeshNeighbors() bool {
 	return c.AlfredDataTypeMeshNeighbors
 }
 
+// GetAlfredNodeExpiry returns how long a silent peer stays in mesh_nodes
+// before its row (and the address it reserved) is dropped. Zero disables
+// expiry.
+func (c *Config) GetAlfredNodeExpiry() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.AlfredNodeExpiry
+}
+
 // GetCommsEnable returns whether the comms subsystem is enabled.
 func (c *Config) GetCommsEnable() bool {
 	c.mu.RLock()
@@ -906,6 +1025,15 @@ func (c *Config) GetCommsDebug() bool {
 	defer c.mu.RUnlock()
 
 	return c.CommsDebug
+}
+
+// GetCommsGPIOSelectorEnable returns whether the hardware talk group
+// selector is enabled (honored only on boards that wire one).
+func (c *Config) GetCommsGPIOSelectorEnable() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsGPIOSelectorEnable
 }
 
 // GetCommsLoopback returns whether comms loopback mode is enabled.
@@ -1242,10 +1370,22 @@ func (c *Config) GetCommsPacketLossPerc() int {
 	return c.CommsPacketLossPerc
 }
 
-// GetCommsPlaybackLatencyMs returns the playback device buffer depth
-// suggested to PortAudio, in milliseconds. The actual depth granted by the
-// host API may be smaller; the playback stream open log records the granted
-// value at Debug level for verification.
+// GetCommsDSCP returns the DSCP for outgoing RTP/RTCP voice sockets,
+// clamped to [0, 63] by the loader. 0 means marking is disabled. See
+// DefaultCommsDSCP for the value-to-access-class mapping.
+func (c *Config) GetCommsDSCP() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsDSCP
+}
+
+// GetCommsPlaybackLatencyMs returns the playback ALSA period size in
+// milliseconds. malgo queues three periods in the playback ring, so
+// worst-case device latency is ~3x this value (USB audio class devices
+// round the period up to the next power of two on top of that). The
+// playback stream-open log records the requested and effective period
+// for verification.
 func (c *Config) GetCommsPlaybackLatencyMs() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -1253,10 +1393,11 @@ func (c *Config) GetCommsPlaybackLatencyMs() int {
 	return c.CommsPlaybackLatencyMs
 }
 
-// GetCommsCaptureLatencyMs returns the mic capture device buffer depth
-// suggested to PortAudio, in milliseconds. The actual depth granted by the
-// host API may be smaller; the broadcast stream open log records the granted
-// value at Debug level for verification.
+// GetCommsCaptureLatencyMs returns the capture-side ALSA ring headroom in
+// milliseconds. The capture period is fixed at one Opus frame (20 ms);
+// this value only selects the ring depth in periods (ceil(ms/20), clamped
+// into [3, 16]), so values of 60 or below are equivalent. The broadcast
+// stream-open log records the derived period and ring depth.
 func (c *Config) GetCommsCaptureLatencyMs() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -1265,17 +1406,72 @@ func (c *Config) GetCommsCaptureLatencyMs() int {
 }
 
 // GetCommsCaptureFramesPerBuffer returns the frame count per capture
-// callback suggested to PortAudio. A value of 0 means
-// paFramesPerBufferUnspecified — the host API picks a frame count aligned
-// with the native ALSA period. Any positive value is passed through
-// verbatim. The default is 960 (20 ms @ 48 kHz mono), which matches the
-// Opus encoder frame size so each callback produces exactly one RTP
-// packet.
+// callback handed to malgo. A value of 0 means audiopool.FrameSize
+// (960 = 20 ms @ 48 kHz mono), matching the Opus encoder frame so each
+// callback produces exactly one RTP packet; a negative value lets
+// miniaudio pick a period aligned with the native ALSA period; any
+// positive value is passed through verbatim.
 func (c *Config) GetCommsCaptureFramesPerBuffer() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	return c.CommsCaptureFramesPerBuffer
+}
+
+// GetCommsAudioSpeakerVolume returns the persisted hardware speaker volume
+// percent, or DefaultCommsAudioSpeakerVolume (100) when
+// comms.audio.speakerVolume is not set.
+func (c *Config) GetCommsAudioSpeakerVolume() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsAudioSpeakerVolume
+}
+
+// GetCommsAudioMicVolume returns the persisted hardware mic capture volume
+// percent, or DefaultCommsAudioMicVolume (100) when comms.audio.micVolume
+// is not set.
+func (c *Config) GetCommsAudioMicVolume() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsAudioMicVolume
+}
+
+// GetCommsAudioAGC returns the persisted Auto Gain Control state and
+// whether comms.audio.agc is set at all.
+func (c *Config) GetCommsAudioAGC() (enabled, set bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsAudioAGC, c.CommsAudioAGCSet
+}
+
+// GetCommsAudioSpeakerControl returns the raw ALSA element-name override
+// for the playback volume control, or "" to use the built-in candidates.
+func (c *Config) GetCommsAudioSpeakerControl() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsAudioSpeakerControl
+}
+
+// GetCommsAudioMicControl returns the raw ALSA element-name override for
+// the capture volume control, or "" to use the built-in candidates.
+func (c *Config) GetCommsAudioMicControl() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsAudioMicControl
+}
+
+// GetCommsAudioAGCControl returns the raw ALSA element-name override for
+// the AGC switch, or "" to use the built-in candidates.
+func (c *Config) GetCommsAudioAGCControl() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.CommsAudioAGCControl
 }
 
 // GetAuthEnable returns whether HTTP authentication is enabled.
@@ -1373,4 +1569,21 @@ func (c *Config) GetTerminalShell() string {
 	defer c.mu.RUnlock()
 
 	return c.TerminalShell
+}
+
+// parseDurationOrDefault parses a Go duration string, returning def when
+// the value is empty, unparsable, or negative. "0" is an explicit,
+// accepted zero. The config package has no logger, so a bad value is
+// defaulted silently; the config tests pin that.
+func parseDurationOrDefault(raw string, def time.Duration) time.Duration {
+	if raw == "" {
+		return def
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return def
+	}
+
+	return d
 }

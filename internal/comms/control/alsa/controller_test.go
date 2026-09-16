@@ -27,6 +27,7 @@ type fakeCtl struct {
 	rangeMaxEr error
 	valueErr   error
 	setErr     error
+	isBool     bool
 
 	setCalls []struct {
 		channel uint
@@ -98,6 +99,13 @@ func (c *fakeCtl) RangeMax() (int, error) {
 	return c.rangeMax, c.rangeMaxEr
 }
 
+func (c *fakeCtl) IsBool() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.isBool
+}
+
 func (c *fakeCtl) snapshotValues() []int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -139,6 +147,15 @@ func (m *fakeMixer) Close() error {
 	m.closeCalls++
 
 	return m.closeErr
+}
+
+func (m *fakeMixer) ControlNames() []string {
+	names := make([]string, 0, len(m.ctls))
+	for name := range m.ctls {
+		names = append(names, name)
+	}
+
+	return names
 }
 
 // fakeOpener returns an Opener that hands out the same mixer for every card,
@@ -357,4 +374,18 @@ func TestController_MultiChannel_AdjustsAll(t *testing.T) {
 
 	assert.Equal(t, []int{6, 11, 16}, ctl.snapshotValues(), "every channel should bump")
 	assert.Equal(t, 3, ctl.setCallCount())
+}
+
+func TestController_CandidateFallback_UsesSpeakerPlaybackVolume(t *testing.T) {
+	withCard(t, "0")
+
+	ctl := newFakeCtl([]int{10}, 0, 38)
+	mx := &fakeMixer{ctls: map[string]alsa.Ctl{"Speaker Playback Volume": ctl}}
+	op := &fakeOpener{mixer: mx}
+
+	c := &alsa.Controller{Log: zerolog.Nop(), Open: op.opener()}
+	c.Handle(context.Background(), control.VolumeUpPressed)
+
+	assert.Equal(t, []int{11}, ctl.snapshotValues(),
+		"button path must fall through candidate list when Master is absent")
 }

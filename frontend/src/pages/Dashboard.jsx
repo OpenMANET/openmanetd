@@ -91,6 +91,29 @@ function formatMbps(bps) {
   return `${mbps.toFixed(1)} Mbps`;
 }
 
+// LinkRate.Phy enum labels (openmanet.service.v1.LinkRate.Phy); 0 is
+// "unspecified" and renders nothing.
+const PHY_LABELS = { 1: 'Legacy', 2: 'HT', 3: 'VHT', 4: 'HE', 5: 'EHT' };
+
+function formatLinkRate(rate) {
+  if (!rate || !rate.bitrateKbps) return '—';
+  return formatMbps(rate.bitrateKbps * 1000);
+}
+
+// "mesh1 · HE40 · MCS7 · 2SS"; unknown parts are omitted.
+function formatLinkRateDetail(rate, iface) {
+  if (!rate) return '';
+  const parts = [];
+  if (iface) parts.push(iface);
+  const phy = PHY_LABELS[rate.phy] || '';
+  if (phy && rate.widthMhz > 0) parts.push(`${phy}${rate.widthMhz}`);
+  else if (phy) parts.push(phy);
+  else if (rate.widthMhz > 0) parts.push(`${rate.widthMhz} MHz`);
+  if (rate.mcs >= 0) parts.push(`MCS${rate.mcs}`);
+  if (rate.nss > 0) parts.push(`${rate.nss}SS`);
+  return parts.join(' · ');
+}
+
 function formatLast(tsMs, nowMs) {
   if (!tsMs) return '—';
   const diff = Math.max(0, nowMs - tsMs);
@@ -208,6 +231,8 @@ function buildPeerRows(topology, neighbors, historyRef, nowMs) {
     const throughput = n.throughput ?? 0;
     const tq = tqByMac.get(mac) ?? 0;
     const hopCount = hopsByMac.get(mac) ?? 1;
+    const tx = n.tx ?? null;
+    const txIface = n.iface || '';
 
     const existing = groups.get(hostname);
     if (!existing) {
@@ -218,6 +243,8 @@ function buildPeerRows(topology, neighbors, historyRef, nowMs) {
         hops: hopCount || 1,
         tq,
         throughput,
+        tx,
+        txIface,
         rssi: signal,
         sig: sigBars(signal),
         lastMs: lastSeenMs,
@@ -234,14 +261,23 @@ function buildPeerRows(topology, neighbors, historyRef, nowMs) {
       existing.mac = n.mac || existing.mac;
     }
     if (throughput > existing.throughput) existing.throughput = throughput;
+    // Rate follows the fastest radio, independent of which one won RSSI.
+    if (tx && (!existing.tx || (tx.bitrateKbps ?? 0) > (existing.tx.bitrateKbps ?? 0))) {
+      existing.tx = tx;
+      existing.txIface = txIface;
+    }
     if (tq > existing.tq) existing.tq = tq;
     if (hopCount && hopCount < existing.hops) existing.hops = hopCount;
     if (lastSeenMs > existing.lastMs) existing.lastMs = lastSeenMs;
   }
 
-  return [...groups.values()].sort(
-    (a, b) => a.hops - b.hops || (b.throughput - a.throughput),
-  );
+  return [...groups.values()]
+    .map((row) => ({
+      ...row,
+      txRate: formatLinkRate(row.tx),
+      txDetail: formatLinkRateDetail(row.tx, row.txIface),
+    }))
+    .sort((a, b) => a.hops - b.hops || (b.throughput - a.throughput));
 }
 
 // ── Alerts ─────────────────────────────────────────────────────────────────
@@ -618,12 +654,12 @@ export default function DashboardPage() {
               <thead>
                 <tr>
                   <th>Node</th><th>MAC</th><th>Hops</th><th>Throughput</th>
-                  <th>RSSI</th><th>Signal</th><th>Last</th>
+                  <th>TX Rate</th><th>RSSI</th><th>Signal</th><th>Last</th>
                 </tr>
               </thead>
               <tbody>
                 {peerRows.length === 0 && (
-                  <tr><td colSpan={7} className="mono">No neighbors reporting</td></tr>
+                  <tr><td colSpan={8} className="mono">No neighbors reporting</td></tr>
                 )}
                 {peerRows.map((p) => (
                   <tr key={p.key}>
@@ -631,6 +667,10 @@ export default function DashboardPage() {
                     <td className="mono">{p.mac || '—'}</td>
                     <td>{p.hops}</td>
                     <td>{formatMbps(p.throughput)}</td>
+                    <td>
+                      {p.txRate}
+                      {p.txDetail && <div className="mono">{p.txDetail}</div>}
+                    </td>
                     <td>{p.rssi ? `${p.rssi}` : '—'}</td>
                     <td>
                       <div className="sig-bars">
@@ -693,6 +733,7 @@ export default function DashboardPage() {
             </div>
             <div className="dashboard-resources-kv">
               <div className="kv"><span className="k">Uptime</span><span className="v accent">{formatUptime(data?.systemResources?.uptime)}</span></div>
+              <div className="kv"><span className="k">Model</span><span className="v">{data?.deviceInfo?.model || '—'}</span></div>
               <div className="kv"><span className="k">Kernel</span><span className="v">{data?.deviceInfo?.kernel || '—'}</span></div>
               <div className="kv"><span className="k">Firmware</span><span className="v">{data?.deviceInfo?.firmware || '—'}</span></div>
               <div className="kv"><span className="k">Arch</span><span className="v">{data?.deviceInfo?.architecture || '—'}</span></div>

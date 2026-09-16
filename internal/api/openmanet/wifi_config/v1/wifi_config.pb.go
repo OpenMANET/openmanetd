@@ -153,6 +153,11 @@ const (
 	WifiEncryption_WIFI_ENCRYPTION_PSK_MIXED   WifiEncryption = 4
 	WifiEncryption_WIFI_ENCRYPTION_NONE        WifiEncryption = 5
 	WifiEncryption_WIFI_ENCRYPTION_OWE         WifiEncryption = 6
+	// WPA2/WPA3 transition mode: OpenWrt maps sae-mixed to
+	// auth_type=psk-sae (WPA2-PSK and WPA3-SAE both accepted). This is
+	// the "WPA2/WPA3 mixed" the LuCI mesh wizard offers; psk-mixed is
+	// WPA1+WPA2 and must not be labelled as WPA3.
+	WifiEncryption_WIFI_ENCRYPTION_SAE_MIXED WifiEncryption = 7
 )
 
 // Enum value maps for WifiEncryption.
@@ -165,6 +170,7 @@ var (
 		4: "WIFI_ENCRYPTION_PSK_MIXED",
 		5: "WIFI_ENCRYPTION_NONE",
 		6: "WIFI_ENCRYPTION_OWE",
+		7: "WIFI_ENCRYPTION_SAE_MIXED",
 	}
 	WifiEncryption_value = map[string]int32{
 		"WIFI_ENCRYPTION_UNSPECIFIED": 0,
@@ -174,6 +180,7 @@ var (
 		"WIFI_ENCRYPTION_PSK_MIXED":   4,
 		"WIFI_ENCRYPTION_NONE":        5,
 		"WIFI_ENCRYPTION_OWE":         6,
+		"WIFI_ENCRYPTION_SAE_MIXED":   7,
 	}
 )
 
@@ -539,9 +546,17 @@ type RadioSettings struct {
 	// Whether the radio is disabled.
 	Disabled *bool `protobuf:"varint,9,opt,name=disabled,proto3,oneof" json:"disabled,omitempty"`
 	// Operating mode. UNSPECIFIED means "do not change" on updates.
-	Mode          WifiMode `protobuf:"varint,10,opt,name=mode,proto3,enum=openmanet.wifi_config.v1.WifiMode" json:"mode,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Mode WifiMode `protobuf:"varint,10,opt,name=mode,proto3,enum=openmanet.wifi_config.v1.WifiMode" json:"mode,omitempty"`
+	// Peer admission floor in dBm for a mesh-mode iface: wpa_supplicant
+	// refuses to peer with a station heard below it (UCI
+	// mesh_rssi_threshold). The daemon writes -80 for the 2.4 GHz
+	// secondary link at setup; -85 admits weaker peers in open terrain,
+	// -70 drops marginal ones in dense sites. Unset on an update leaves
+	// the UCI option alone; unset on a read means the option is absent or
+	// the iface is not mesh.
+	MeshRssiThreshold *int32 `protobuf:"varint,11,opt,name=mesh_rssi_threshold,json=meshRssiThreshold,proto3,oneof" json:"mesh_rssi_threshold,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RadioSettings) Reset() {
@@ -642,6 +657,13 @@ func (x *RadioSettings) GetMode() WifiMode {
 		return x.Mode
 	}
 	return WifiMode_WIFI_MODE_UNSPECIFIED
+}
+
+func (x *RadioSettings) GetMeshRssiThreshold() int32 {
+	if x != nil && x.MeshRssiThreshold != nil {
+		return *x.MeshRssiThreshold
+	}
+	return 0
 }
 
 // ConnectedClient represents an AP-connected wireless client.
@@ -843,7 +865,7 @@ const file_openmanet_wifi_config_v1_wifi_config_proto_rawDesc = "" +
 	"\n" +
 	"mesh_peers\x18\n" +
 	" \x01(\x05R\tmeshPeers\x12?\n" +
-	"\twifi_mode\x18\v \x01(\x0e2\".openmanet.wifi_config.v1.WifiModeR\bwifiMode\"\xd9\x04\n" +
+	"\twifi_mode\x18\v \x01(\x0e2\".openmanet.wifi_config.v1.WifiModeR\bwifiMode\"\xce\x05\n" +
 	"\rRadioSettings\x12;\n" +
 	"\x04ssid\x18\x01 \x01(\tB'\xbaH$r\"\x10\x01\x18 \x92\x02\topenmanet\x92\x02\x0fmy-wifi-networkR\x04ssid\x126\n" +
 	"\amesh_id\x18\x02 \x01(\tB\x18\xbaH\x15r\x13\x18 \x92\x02\x0eopenmanet-meshH\x00R\x06meshId\x88\x01\x01\x12(\n" +
@@ -859,13 +881,15 @@ const file_openmanet_wifi_config_v1_wifi_config_proto_rawDesc = "" +
 	"encryption\x12\x1f\n" +
 	"\bdisabled\x18\t \x01(\bH\x03R\bdisabled\x88\x01\x01\x126\n" +
 	"\x04mode\x18\n" +
-	" \x01(\x0e2\".openmanet.wifi_config.v1.WifiModeR\x04modeB\n" +
+	" \x01(\x0e2\".openmanet.wifi_config.v1.WifiModeR\x04mode\x12[\n" +
+	"\x13mesh_rssi_threshold\x18\v \x01(\x05B&\xbaH#\x1a!@\xb0\xff\xff\xff\xff\xff\xff\xff\xff\x01\x18\xba\xff\xff\xff\xff\xff\xff\xff\xff\x01(\xab\xff\xff\xff\xff\xff\xff\xff\xff\x01H\x04R\x11meshRssiThreshold\x88\x01\x01B\n" +
 	"\n" +
 	"\b_mesh_idB\v\n" +
 	"\t_passwordB\n" +
 	"\n" +
 	"\b_countryB\v\n" +
-	"\t_disabled\"\xe6\x01\n" +
+	"\t_disabledB\x16\n" +
+	"\x14_mesh_rssi_threshold\"\xe6\x01\n" +
 	"\x0fConnectedClient\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1f\n" +
 	"\vmac_address\x18\x02 \x01(\tR\n" +
@@ -897,7 +921,7 @@ const file_openmanet_wifi_config_v1_wifi_config_proto_rawDesc = "" +
 	"\xaa\xd1\xf9\xd6\x03\x04mesh\x12\x1c\n" +
 	"\rWIFI_MODE_STA\x10\x03\x1a\t\xaa\xd1\xf9\xd6\x03\x03sta\x12 \n" +
 	"\x0fWIFI_MODE_ADHOC\x10\x04\x1a\v\xaa\xd1\xf9\xd6\x03\x05adhoc\x12$\n" +
-	"\x11WIFI_MODE_MONITOR\x10\x05\x1a\r\xaa\xd1\xf9\xd6\x03\amonitor*\x99\x02\n" +
+	"\x11WIFI_MODE_MONITOR\x10\x05\x1a\r\xaa\xd1\xf9\xd6\x03\amonitor*\xc9\x02\n" +
 	"\x0eWifiEncryption\x12\x1f\n" +
 	"\x1bWIFI_ENCRYPTION_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x13WIFI_ENCRYPTION_SAE\x10\x01\x1a\t\xaa\xd1\xf9\xd6\x03\x03sae\x12$\n" +
@@ -907,7 +931,8 @@ const file_openmanet_wifi_config_v1_wifi_config_proto_rawDesc = "" +
 	"\x19WIFI_ENCRYPTION_PSK_MIXED\x10\x04\x1a\x0f\xaa\xd1\xf9\xd6\x03\tpsk-mixed\x12$\n" +
 	"\x14WIFI_ENCRYPTION_NONE\x10\x05\x1a\n" +
 	"\xaa\xd1\xf9\xd6\x03\x04none\x12\"\n" +
-	"\x13WIFI_ENCRYPTION_OWE\x10\x06\x1a\t\xaa\xd1\xf9\xd6\x03\x03owe*\xaa\x05\n" +
+	"\x13WIFI_ENCRYPTION_OWE\x10\x06\x1a\t\xaa\xd1\xf9\xd6\x03\x03owe\x12.\n" +
+	"\x19WIFI_ENCRYPTION_SAE_MIXED\x10\a\x1a\x0f\xaa\xd1\xf9\xd6\x03\tsae-mixed*\xaa\x05\n" +
 	"\n" +
 	"WifiHTMode\x12\x1c\n" +
 	"\x18WIFI_HT_MODE_UNSPECIFIED\x10\x00\x12!\n" +

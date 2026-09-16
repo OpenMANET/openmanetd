@@ -26,6 +26,7 @@ type startFunc func(ctx context.Context) error
 type CommsManager struct {
 	cfg     *config.Config
 	logger  zerolog.Logger
+	mixer   *alsa.Volume
 	buildFn func() *CommsConfig
 	startFn func(*CommsConfig) startFunc
 	cancel  context.CancelFunc
@@ -34,12 +35,15 @@ type CommsManager struct {
 	running bool
 }
 
-// NewCommsManager creates a new CommsManager. The manager is created at startup
-// regardless of whether comms is enabled, so the API handler always has it.
-func NewCommsManager(cfg *config.Config, logger zerolog.Logger) *CommsManager {
+// NewCommsManager creates a new CommsManager. The manager is created at
+// startup regardless of whether comms is enabled, so the API handler
+// always has it. mixer is the shared hardware mixer accessor (also used
+// by the CommsService audio-mixer RPCs); it may be nil in tests.
+func NewCommsManager(cfg *config.Config, logger zerolog.Logger, mixer *alsa.Volume) *CommsManager {
 	m := &CommsManager{
 		cfg:    cfg,
 		logger: logger,
+		mixer:  mixer,
 		startFn: func(cc *CommsConfig) startFunc {
 			return cc.Start
 		},
@@ -56,6 +60,7 @@ func (m *CommsManager) buildCommsConfig() *CommsConfig {
 		Enable:                   true, // manager only calls Start when enabling
 		Iface:                    m.cfg.GetMeshNetInterface(),
 		Debug:                    m.cfg.GetCommsDebug(),
+		GPIOSelectorEnable:       m.cfg.GetCommsGPIOSelectorEnable(),
 		Loopback:                 m.cfg.GetCommsLoopback(),
 		Trace:                    m.cfg.GetCommsTrace(),
 		ControlSource:            m.cfg.GetCommsControlSource(),
@@ -69,13 +74,61 @@ func (m *CommsManager) buildCommsConfig() *CommsConfig {
 		BluetoothOutputDevice:    m.cfg.GetCommsBluetoothPttBluetoothOutputDevice(),
 		EncoderComplexity:        m.cfg.GetCommsEncoderComplexity(),
 		PacketLossPerc:           m.cfg.GetCommsPacketLossPerc(),
+		DSCP:                     m.cfg.GetCommsDSCP(),
 		PlaybackLatencyMs:        m.cfg.GetCommsPlaybackLatencyMs(),
 		CaptureLatencyMs:         m.cfg.GetCommsCaptureLatencyMs(),
 		CaptureFramesPerBuffer:   m.cfg.GetCommsCaptureFramesPerBuffer(),
 		AuxHandler: &alsa.Controller{
 			Log: m.logger.With().Str("subsystem", "alsa-vol").Logger(),
 		},
+		AudioMixerStartup: m.mixerStartup(),
 	})
+}
+
+// mixerStartupUpdate translates persisted comms.audio values into an
+// alsa.Update. All three fields are policy, not passthrough — always
+// applied. Speaker and mic volume default to 100% when unset
+// (config.DefaultCommsAudioSpeakerVolume / DefaultCommsAudioMicVolume) so
+// hardware levels do not depend on the EEPROM image a unit was
+// provisioned with or on prior alsamixer state, and AGC defaults to
+// disabled when comms.audio.agc is unset, so the CM108B's automatic
+// capture gain never rides along silently on a fresh install or after a
+// USB replug resets the chip.
+func mixerStartupUpdate(cfg *config.Config) alsa.Update {
+	var u alsa.Update
+
+	if v := cfg.GetCommsAudioSpeakerVolume(); v >= 0 {
+		u.SpeakerPct = &v
+	}
+
+	if v := cfg.GetCommsAudioMicVolume(); v >= 0 {
+		u.MicPct = &v
+	}
+
+	// The set flag is deliberately ignored: unset reads as false, which is
+	// exactly the default this policy enforces.
+	agc, _ := cfg.GetCommsAudioAGC()
+	u.AGC = &agc
+
+	return u
+}
+
+// mixerStartup returns the startup mixer re-apply closure, or nil when no
+// hardware mixer is available. The config is re-read at invocation time
+// (not captured here) so API-persisted values written after Enable() —
+// including values set after the daemon started with no comms.audio key
+// at all — are still picked up by later recoveries such as a USB replug.
+func (m *CommsManager) mixerStartup() func() {
+	if m.mixer == nil {
+		return nil
+	}
+
+	cfg := m.cfg
+	mixer := m.mixer
+
+	return func() {
+		mixer.ApplyStartup(context.Background(), mixerStartupUpdate(cfg))
+	}
 }
 
 // Enable starts the comms subsystem. It is idempotent: if comms is already

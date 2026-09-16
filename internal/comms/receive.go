@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"time"
+
+	pionrtp "github.com/pion/rtp"
+	"github.com/rs/zerolog"
 
 	"github.com/openmanet/openmanetd/internal/comms/control"
 	"github.com/openmanet/openmanetd/internal/comms/rtp"
+	"github.com/openmanet/openmanetd/internal/config"
 )
 
 // maxConsecutivePLC caps the number of consecutive Packet-Loss-Concealment
@@ -26,6 +31,24 @@ const maxConsecutivePLC = 10
 // popOrConceal would hand back genuine silence even though playoutOneFrame
 // is still willing to PLC.
 const concealRecentWindow = 200 * time.Millisecond
+
+// webStatDefaultInterval is the webPlayoutLoop stat-reporting period.
+// Overridable per-config for tests via CommsConfig.webStatInterval.
+const webStatDefaultInterval = 2 * time.Second
+
+const (
+	// receiveErrStreakThreshold is the number of consecutive ReadFromUDP
+	// failures after which receiveLoop starts backing off between attempts.
+	// The first errors stay instant so the socket-swap path (a single
+	// net.ErrClosed while UpdateMulticastEndpoint closes the old socket to
+	// unblock the read) never pays the backoff.
+	receiveErrStreakThreshold = 3
+
+	// receiveErrBackoff bounds the retry rate on a persistently failing
+	// socket to ~100 attempts/s instead of a busy spin that would pin a
+	// core on the embedded targets.
+	receiveErrBackoff = 10 * time.Millisecond
+)
 
 // zeroInt16 fills an int16 slice with zeros. Used by the playout callback to
 // emit silence into the malgo int16 playback buffer.
@@ -124,14 +147,26 @@ func (cfg *CommsConfig) receiveLoop(ctx context.Context, pc *PortChannel, rt *Co
 		go cfg.webPlayoutLoop(ctx, pc, jitter, rt)
 	}
 
-	// cachedLocalIP caches the parsed form of rt.LocalIP so that the loopback
-	// filter can use a byte-level net.IP.Equal comparison instead of calling
-	// src.IP.String() (which allocates) on every received packet. The cached
-	// value is refreshed only when the string changes (i.e. on endpoint swap).
+	// cachedLocalIP caches the parsed form of rt.LocalIP so the loopback
+	// filter is a value comparison on every received packet. The cached
+	// value is refreshed only when the string changes (i.e. on endpoint
+	// swap). Stored unmapped so it compares equal to an unmapped source
+	// address regardless of 4-in-6 representation.
 	var (
 		cachedLocalIPStr string
-		cachedLocalIP    net.IP
+		cachedLocalIP    netip.Addr
 	)
+
+	// errStreak counts consecutive read failures. A handful of instant
+	// retries covers the legitimate transients (socket swap); beyond the
+	// threshold the loop backs off so a permanently dead socket cannot
+	// busy-spin this goroutine.
+	errStreak := 0
+
+	// pkt is reused across iterations so the parsed packet does not escape
+	// to the heap once per datagram (ParseIncomingInto overwrites every
+	// field; the payload is copied by the jitter push before buf is reused).
+	var pkt pionrtp.Packet
 
 	for {
 		select {
@@ -140,9 +175,11 @@ func (cfg *CommsConfig) receiveLoop(ctx context.Context, pc *PortChannel, rt *Co
 		default:
 		}
 
-		n, src, err := pc.Receiver.ReadFromUDP(buf)
+		n, src, err := pc.Receiver.ReadFromUDPAddrPort(buf)
 		if err == nil {
 			pc.RxPkts.Add(1)
+
+			errStreak = 0
 		}
 
 		if err != nil {
@@ -162,6 +199,15 @@ func (cfg *CommsConfig) receiveLoop(ctx context.Context, pc *PortChannel, rt *Co
 					cfg.Log.Error().Err(err).Msg("comms: recv error")
 				}
 
+				errStreak++
+				if errStreak >= receiveErrStreakThreshold {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(receiveErrBackoff):
+					}
+				}
+
 				continue
 			}
 		}
@@ -169,11 +215,23 @@ func (cfg *CommsConfig) receiveLoop(ctx context.Context, pc *PortChannel, rt *Co
 		if p := rt.LocalIP.Load(); p != nil {
 			if s := *p; s != cachedLocalIPStr {
 				cachedLocalIPStr = s
-				cachedLocalIP = net.ParseIP(s)
+
+				// A parse failure leaves the zero Addr, which compares
+				// unequal to every source — the own-IP filter simply
+				// stays inert until a valid LocalIP is published.
+				addr, parseErr := netip.ParseAddr(s)
+				if parseErr != nil {
+					addr = netip.Addr{}
+				}
+
+				cachedLocalIP = addr.Unmap()
 			}
 		}
 
-		loopbackDrop := !cfg.Loopback && (src.IP.IsLoopback() || src.IP.Equal(cachedLocalIP))
+		// Unmap so a 4-in-6 source (::ffff:a.b.c.d) matches both the
+		// loopback check and the cached v4 local address.
+		srcAddr := src.Addr().Unmap()
+		loopbackDrop := !cfg.Loopback && (srcAddr.IsLoopback() || srcAddr == cachedLocalIP)
 
 		if loopbackDrop {
 			pc.RxLoopback.Add(1)
@@ -185,9 +243,17 @@ func (cfg *CommsConfig) receiveLoop(ctx context.Context, pc *PortChannel, rt *Co
 			continue
 		}
 
+		// Muted port: the packet is discarded regardless of content, so
+		// skip the RTP unmarshal (and its parse-error accounting)
+		// entirely. RxPkts and RxLoopback above still count while muted;
+		// MarkRemoteRx below must not run for muted ports (unchanged —
+		// it already sat below this check before the hoist).
+		if !pc.ReceiveEnabled.Load() {
+			continue
+		}
+
 		// Parse using pion/rtp for proper header validation.
-		pkt, parseErr := rtp.ParseIncoming(buf[:n])
-		if parseErr != nil {
+		if parseErr := rtp.ParseIncomingInto(buf[:n], &pkt); parseErr != nil {
 			pc.RxParseErrs.Add(1)
 			cfg.Log.Debug().Err(parseErr).Int("bytes", n).Msg("comms: dropping non-RTP datagram")
 
@@ -202,11 +268,6 @@ func (cfg *CommsConfig) receiveLoop(ctx context.Context, pc *PortChannel, rt *Co
 				Uint32("ssrc", pkt.Header.SSRC).
 				Int("payload_bytes", len(pkt.Payload)).
 				Msg("comms: RTP packet received")
-		}
-
-		// Skip payload delivery when receive is disabled at runtime.
-		if !pc.ReceiveEnabled.Load() {
-			continue
 		}
 
 		// Record the arrival time for half-duplex enforcement and prime the
@@ -271,7 +332,7 @@ func (cfg *CommsConfig) playoutOneFrame(pc *PortChannel, rt *CommsRuntime, jitte
 		return
 	}
 
-	if jitter == nil {
+	if jitter == nil || pc.Decoder == nil {
 		zeroInt16(out)
 
 		return
@@ -279,14 +340,14 @@ func (cfg *CommsConfig) playoutOneFrame(pc *PortChannel, rt *CommsRuntime, jitte
 
 	payload, conceal := jitter.PopOrConceal(concealRecentWindow)
 	if payload != nil {
-		n, err := rt.Decoder.DecodeS16(payload, out)
+		n, err := pc.Decoder.DecodeS16(payload, out)
 		jitter.ReleasePayload(payload)
 
 		if err != nil {
 			cfg.Log.Debug().Err(err).Msg("comms: opus decode error; falling back to PLC")
 
 			// Try PLC into the same buffer.
-			n, err = rt.Decoder.DecodeS16(nil, out)
+			n, err = pc.Decoder.DecodeS16(nil, out)
 			if err != nil || n != len(out) {
 				zeroInt16(out)
 				pc.PlaybackUnderruns.Add(1)
@@ -321,7 +382,7 @@ func (cfg *CommsConfig) playoutOneFrame(pc *PortChannel, rt *CommsRuntime, jitte
 				cfg.Log.Trace().Int("consecutive_plc", pc.ConsecutivePLC).Msg("comms: jitter buffer gap → PLC")
 			}
 
-			n, err := rt.Decoder.DecodeS16(nil, out)
+			n, err := pc.Decoder.DecodeS16(nil, out)
 			if err != nil || n != len(out) {
 				zeroInt16(out)
 			}
@@ -352,6 +413,18 @@ func (cfg *CommsConfig) playoutOneFrame(pc *PortChannel, rt *CommsRuntime, jitte
 func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jitter *rtp.JitterBuffer, rt *CommsRuntime) { //nolint:gocognit
 	notify := jitter.EnableNotify()
 
+	// webChannel tags every frame handed to the bridge with this port's
+	// 1-based talk group channel so the RPC layer (and ultimately the
+	// browser) can attribute RX audio to the right talk group. Resolved
+	// once: the port never changes for the life of the loop. A port
+	// outside the talk group plan tags 0 (unknown); consumers fall back
+	// to channel 1. TalkGroupChannel caps channels at 32, so the byte
+	// conversion cannot truncate.
+	var webChannel byte
+	if ch, chErr := config.TalkGroupChannel(pc.cfg.Port); chErr == nil {
+		webChannel = byte(ch)
+	}
+
 	const safetyPoll = 100 * time.Millisecond
 
 	ticker := time.NewTicker(safetyPoll)
@@ -366,7 +439,12 @@ func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jit
 	// they localize where RX frames are being lost on the server side.
 	var popped, poppedSkipped int64
 
-	statTicker := time.NewTicker(2 * time.Second)
+	statInterval := webStatDefaultInterval
+	if cfg.webStatInterval > 0 {
+		statInterval = cfg.webStatInterval
+	}
+
+	statTicker := time.NewTicker(statInterval)
 	defer statTicker.Stop()
 
 	var (
@@ -407,9 +485,21 @@ func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jit
 
 			popped++
 
-			cp := make([]byte, len(payload))
-			copy(cp, payload)
-			rt.WebBridge.PushRxFrame(cp)
+			// No browser stream attached: still pop (the cursor must
+			// advance and the pooled payload must recycle) but skip the
+			// copy and the bridge hand-off entirely. This is web mode's
+			// common idle state — an unattended node receiving traffic.
+			if !rt.WebBridge.HasConsumer() {
+				rt.WebBridge.RxGatedNoConsumer.Add(1)
+				jitter.ReleasePayload(payload)
+
+				continue
+			}
+
+			// PushRxFrame copies into a bridge-pooled buffer, so the
+			// jitter payload can be released immediately — the whole
+			// hand-off is allocation-free.
+			rt.WebBridge.PushRxFrame(webChannel, payload)
 			jitter.ReleasePayload(payload)
 		}
 	}
@@ -434,15 +524,6 @@ func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jit
 			rxParseErrs := pc.RxParseErrs.Load()
 			rxPushed := pc.RxPushed.Load()
 			rxPushRejected := pc.RxPushRejected.Load()
-
-			// kernel_drops is the per-socket drop counter from /proc/net/udp.
-			// readUDPSocketDrops returns -1 with no error when no row matches
-			// (e.g. on a non-Linux test host) — treat that as zero so the
-			// delta arithmetic stays sane.
-			kernelDrops, _ := readUDPSocketDrops(pc.cfg.Port)
-			if kernelDrops < 0 {
-				kernelDrops = 0
-			}
 
 			gap1 := jitter.GapRuns1.Load()
 			gap2to5 := jitter.GapRuns2to5.Load()
@@ -470,12 +551,31 @@ func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jit
 			dRxParseErrs := rxParseErrs - lastRxParseErrs
 			dRxPushed := rxPushed - lastRxPushed
 			dRxPushRejected := rxPushRejected - lastRxPushRejected
-			dKernelDrops := kernelDrops - lastKernelDrops
 
-			// Suppress idle ports: only emit a line when this port had any
-			// RX activity in the last window. Eliminates the 5-port spam
-			// where 4 inactive ports each printed an all-zero line.
-			if dRxPkts > 0 || dPopped > 0 || dPoppedSkipped > 0 || dKernelDrops > 0 {
+			// The /proc/net/udp kernel-drop scan and the stat line are
+			// debug-only telemetry, so both are gated: on RX activity in
+			// this window (per in-process counters — an idle port skips
+			// everything, eliminating the 5-port all-zero spam), and on
+			// Debug logging actually being enabled (the log line is the
+			// scan's only consumer, so scanning with Debug off is pure
+			// waste). The one signal this can miss: a port whose ONLY
+			// activity is kernel-side drops with zero successful reads —
+			// that means the receive goroutine is stalled outright, which
+			// surfaces far louder elsewhere (PLC, jitter underruns).
+			active := dRxPkts > 0 || dPopped > 0 || dPoppedSkipped > 0
+			if active && cfg.Log.GetLevel() <= zerolog.DebugLevel {
+				// kernel_drops is the per-socket drop counter from
+				// /proc/net/udp. readUDPDrops returns -1 with no error
+				// when no row matches (e.g. on a non-Linux test host) —
+				// treat that as zero so the delta arithmetic stays sane.
+				kernelDrops, _ := cfg.readUDPDrops(pc.cfg.Port)
+				if kernelDrops < 0 {
+					kernelDrops = 0
+				}
+
+				dKernelDrops := kernelDrops - lastKernelDrops
+				lastKernelDrops = kernelDrops
+
 				cfg.Log.Debug().
 					Int("port", pc.cfg.Port).
 					Int64("pkt_rx", dRxPkts).
@@ -512,7 +612,6 @@ func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jit
 			lastRxParseErrs = rxParseErrs
 			lastRxPushed = rxPushed
 			lastRxPushRejected = rxPushRejected
-			lastKernelDrops = kernelDrops
 			lastGap1 = gap1
 			lastGap2to5 = gap2to5
 			lastGap6to10 = gap6to10
@@ -522,6 +621,3 @@ func (cfg *CommsConfig) webPlayoutLoop(ctx context.Context, pc *PortChannel, jit
 		}
 	}
 }
-
-// Ensure net is used (ReadFromUDP returns *net.UDPAddr).
-var _ *net.UDPAddr

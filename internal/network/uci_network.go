@@ -7,6 +7,8 @@ import (
 	"net"
 	"os/exec"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/digineo/go-uci/v2"
@@ -37,10 +39,11 @@ type UCINetwork struct {
 	IPV6Assignment string `uci:"option ip6assign"`
 	IPV6IfaceID    string `uci:"option ip6ifaceid"`
 	IPV6Class      string `uci:"list ip6class"`
-	// MulticastMode is the batman-adv batadv proto option that controls
-	// multicast forceflood behavior. "1" enables forceflood (broadcast
-	// every multicast frame), "0" uses batman-adv's optimized multicast
-	// delivery. Only meaningful on `proto batadv` interfaces.
+	// MulticastMode is the batman-adv `multicast_mode` option on a
+	// `proto batadv` interface. The kernel defines it as the negation of
+	// forceflood: "0" classic-floods every multicast frame (forceflood on),
+	// "1" enables the IGMP/MLD-snooping optimisations (forceflood off).
+	// See MulticastModeForForceflood.
 	MulticastMode string `uci:"option multicast_mode"`
 }
 
@@ -59,6 +62,7 @@ type UCIDevice struct {
 	Table            string   `uci:"option table"`
 	IgmpSnooping     string   `uci:"option igmp_snooping"`
 	MulticastQuerier string   `uci:"option multicast_querier"`
+	MTU              string   `uci:"option mtu"`
 	Ports            []string `uci:"list ports"`
 }
 
@@ -298,7 +302,7 @@ func SetNetworkConfigWithReader(section string, config *UCINetwork, reader Confi
 	}
 
 	if config.MulticastMode != "" {
-		if err := reader.SetType(networkConfigName, section, "multicast_mode", uci.TypeOption, config.MulticastMode); err != nil {
+		if err := reader.SetType(networkConfigName, section, optionMulticastMode, uci.TypeOption, config.MulticastMode); err != nil {
 			return fmt.Errorf("failed to set multicast_mode: %w", err)
 		}
 	}
@@ -801,26 +805,18 @@ func GetDeviceByName(name string) (*UCIDevice, error) {
 }
 
 // GetDeviceByNameWithReader loads and returns the UCI device configuration by name using the provided reader.
-// It searches through all anonymous device sections to find one with the matching name option.
+// It searches every device section for one whose name option matches.
 func GetDeviceByNameWithReader(name string, reader ConfigReader) (*UCIDevice, error) {
-	// Get all device sections (they are anonymous)
-	sections, err := reader.GetSections(networkConfigName, networkDeviceType)
+	section, err := findDeviceByName(reader, name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get device sections: %w", err)
+		return nil, err
 	}
 
-	// Search for the device with the matching name
-	for _, section := range sections {
-		if values, ok := reader.Get(networkConfigName, section, "name"); ok && len(values) > 0 {
-			if values[0] == name {
-				// Found the device, load all its options
-				return loadDeviceFromSection(section, reader)
-			}
-		}
+	if section == "" {
+		return nil, fmt.Errorf("device %s not found", name)
 	}
 
-	// Device not found
-	return nil, fmt.Errorf("device %s not found", name)
+	return loadDeviceFromSection(section, reader)
 }
 
 // loadDeviceFromSection loads a device configuration from a specific UCI section.
@@ -877,6 +873,10 @@ func loadDeviceFromSection(section string, reader ConfigReader) (*UCIDevice, err
 
 	if values, ok := reader.Get(networkConfigName, section, "multicast_querier"); ok && len(values) > 0 {
 		device.MulticastQuerier = values[0]
+	}
+
+	if values, ok := reader.Get(networkConfigName, section, "mtu"); ok && len(values) > 0 {
+		device.MTU = values[0]
 	}
 
 	return device, nil
@@ -1025,6 +1025,12 @@ func SetDeviceConfigWithReader(name string, device *UCIDevice, reader ConfigRead
 	if device.MulticastQuerier != "" {
 		if err := reader.SetType(networkConfigName, section, "multicast_querier", uci.TypeOption, device.MulticastQuerier); err != nil {
 			return fmt.Errorf("failed to set device multicast_querier: %w", err)
+		}
+	}
+
+	if device.MTU != "" {
+		if err := reader.SetType(networkConfigName, section, "mtu", uci.TypeOption, device.MTU); err != nil {
+			return fmt.Errorf("failed to set device mtu: %w", err)
 		}
 	}
 
@@ -1219,20 +1225,31 @@ const (
 
 	bridgeTypeBridge string = "bridge"
 
+	// wizardDeviceSectionPrefix names the `config device` sections the
+	// setup wizard creates for physical ports that only need to carry
+	// an mtu. UnsetDeviceMTU removes them on the next reset.
+	wizardDeviceSectionPrefix string = "wizard_device_"
+
+	// minDeviceMTU is netifd's floor for `option mtu`; smaller values
+	// are ignored and the kernel default stays.
+	minDeviceMTU int = 68
+
 	batadvProto       string = "batadv"
 	batadvHardifProto string = "batadv_hardif"
 
 	// UCI option keys repeated across the network/dhcp/vxlan/wireless
 	// configs. Centralized so goconst is happy and so any rename is a
 	// single edit.
-	optionProto      string = "proto"
-	optionNetmask    string = "netmask"
-	optionIP6Assign  string = "ip6assign"
-	optionIP6IfaceID string = "ip6ifaceid"
+	optionProto         string = "proto"
+	optionNetmask       string = "netmask"
+	optionIP6Assign     string = "ip6assign"
+	optionIP6IfaceID    string = "ip6ifaceid"
+	optionMulticastMode string = "multicast_mode"
 )
 
 // batmanDeviceOptions enumerates every batman-adv option set on a
-// `proto batadv` interface by SetupBatmanDeviceOnNetwork. Mirrors the
+// `proto batadv` interface by SetupBatmanDeviceOnNetwork, other than
+// gw_mode and multicast_mode which are caller-supplied. Mirrors the
 // LuCI uci.js setupBatmanDeviceOnNetwork() exactly.
 var batmanDeviceOptions = []struct{ k, v string }{ //nolint:gochecknoglobals // package-level constant
 	{optionProto, batadvProto},
@@ -1245,19 +1262,60 @@ var batmanDeviceOptions = []struct{ k, v string }{ //nolint:gochecknoglobals // 
 	{"fragmentation", "1"},
 	{"orig_interval", "1000"},
 	{"distributed_arp_table", "1"},
-	{"multicast_mode", "1"},
 	{"network_coding", "1"},
 	{"isolation_mark", "0x00000000/0x00000000"},
+}
+
+// Values of the batman-adv `multicast_mode` UCI option on a `proto batadv`
+// interface. The kernel exports this switch as the negation of forceflood
+// (BATADV_ATTR_MULTICAST_FORCEFLOOD_ENABLED = !multicast_mode,
+// net/batman-adv/netlink.c): "0" makes every node classic-flood every
+// multicast frame; "1" enables the IGMP/MLD-snooping optimisations so a
+// group only reaches nodes that announced membership. OpenWrt's batadv
+// proto handler passes the value straight to
+// `batctl meshif <dev> multicast_mode`.
+const (
+	MulticastModeForceflood = "0"
+	MulticastModeOptimised  = "1"
+)
+
+// MulticastModeForForceflood maps the batman.multicastForceflood config
+// flag onto the multicast_mode UCI value. It is the single source of truth
+// for both writers — the runtime daemon (mgmt.configureBatmanForceflood)
+// and the setup wizard (SetupService.runBatmanAdv) — so they cannot
+// disagree, and the only place the inversion is spelled out.
+func MulticastModeForForceflood(forceflood bool) string {
+	if forceflood {
+		return MulticastModeForceflood
+	}
+
+	return MulticastModeOptimised
+}
+
+// MulticastModeWithReader returns the batman-adv multicast_mode option
+// currently persisted on the given interface's network section, or "" when
+// the option is unset. Unlike GetUCINetworkByNameWithReader it reads a
+// single option and cannot fail, so callers doing a change-only reconcile
+// have no error to handle. See MulticastModeForForceflood for the value's
+// meaning.
+func MulticastModeWithReader(reader ConfigReader, iface string) string {
+	if values, ok := reader.Get(networkConfigName, iface, optionMulticastMode); ok && len(values) > 0 {
+		return values[0]
+	}
+
+	return ""
 }
 
 // SetupBatmanDeviceOnNetwork creates (or updates) the batman-adv
 // device interface on the network config, mirroring LuCI's
 // setupBatmanDeviceOnNetwork() exactly. Use empty deviceName to
 // default to BatmanDeviceName ("bat0"); empty gwMode defaults to
-// "client".
+// "client"; empty multicastMode defaults to MulticastModeForceflood ("0",
+// classic flooding — the shipped default and both LuCI fixture
+// captures).
 //
 // Does not commit.
-func SetupBatmanDeviceOnNetwork(reader ConfigReader, gwMode, deviceName string) error {
+func SetupBatmanDeviceOnNetwork(reader ConfigReader, gwMode, deviceName, multicastMode string) error {
 	if deviceName == "" {
 		deviceName = BatmanDeviceName
 	}
@@ -1266,10 +1324,33 @@ func SetupBatmanDeviceOnNetwork(reader ConfigReader, gwMode, deviceName string) 
 		gwMode = "client"
 	}
 
+	if multicastMode == "" {
+		multicastMode = MulticastModeForceflood
+	}
+
 	if !batmanInterfaceExists(reader, deviceName) {
 		if err := reader.AddSection(networkConfigName, deviceName, networkInterfaceType); err != nil {
 			return fmt.Errorf("creating batman device %s: %w", deviceName, err)
 		}
+	}
+
+	// gw_mode and multicast_mode are caller-supplied and written
+	// before the batmanDeviceOptions loop below, not after. Since that
+	// loop runs second, last-write-wins means a hardcoded gw_mode or
+	// multicast_mode reintroduced into batmanDeviceOptions would win
+	// over the caller-supplied value rather than being silently
+	// shadowed by it. That is what makes
+	// TestCompat_MulticastModeMatchesForcefloodConfig sensitive to the
+	// regression (root cause #3: multicast_mode hardcoded to "1"): the
+	// wrong value actually reaches bat0 and the test catches it.
+	// Writing these values after the loop instead would mask the same
+	// regression, so keep this order.
+	if err := reader.SetType(networkConfigName, deviceName, "gw_mode", uci.TypeOption, gwMode); err != nil {
+		return fmt.Errorf("setting %s.%s.gw_mode: %w", networkConfigName, deviceName, err)
+	}
+
+	if err := reader.SetType(networkConfigName, deviceName, optionMulticastMode, uci.TypeOption, multicastMode); err != nil {
+		return fmt.Errorf("setting %s.%s.multicast_mode: %w", networkConfigName, deviceName, err)
 	}
 
 	for _, kv := range batmanDeviceOptions {
@@ -1277,10 +1358,6 @@ func SetupBatmanDeviceOnNetwork(reader ConfigReader, gwMode, deviceName string) 
 			return fmt.Errorf("setting %s.%s.%s: %w",
 				networkConfigName, deviceName, kv.k, err)
 		}
-	}
-
-	if err := reader.SetType(networkConfigName, deviceName, "gw_mode", uci.TypeOption, gwMode); err != nil {
-		return fmt.Errorf("setting %s.%s.gw_mode: %w", networkConfigName, deviceName, err)
 	}
 
 	return nil
@@ -1335,6 +1412,43 @@ func SetupBatmanInterfaceOnDevice(reader ConfigReader, deviceName string) error 
 	}
 
 	return nil
+}
+
+// BatmanDeviceExists reports whether network.<name> exists as a
+// batman-adv device (proto=batadv). Radio handlers use it to refuse a
+// mesh binding on a node that never ran setup.
+func BatmanDeviceExists(reader ConfigReader, name string) bool {
+	if !batmanInterfaceExists(reader, name) {
+		return false
+	}
+
+	proto, ok := reader.Get(networkConfigName, name, optionProto)
+
+	return ok && len(proto) > 0 && proto[0] == batadvProto
+}
+
+// EnsureBatmanHardifInterface creates network.<ifaceName> as a
+// batadv_hardif on deviceName when it does not exist and reports
+// whether it did so. An existing section is left untouched, whatever
+// its options. Does not commit.
+func EnsureBatmanHardifInterface(reader ConfigReader, ifaceName, deviceName string) (bool, error) {
+	if batmanInterfaceExists(reader, ifaceName) {
+		return false, nil
+	}
+
+	if err := reader.AddSection(networkConfigName, ifaceName, networkInterfaceType); err != nil {
+		return false, fmt.Errorf("creating %s: %w", ifaceName, err)
+	}
+
+	if err := reader.SetType(networkConfigName, ifaceName, optionProto, uci.TypeOption, batadvHardifProto); err != nil {
+		return false, fmt.Errorf("setting %s.proto: %w", ifaceName, err)
+	}
+
+	if err := reader.SetType(networkConfigName, ifaceName, "master", uci.TypeOption, deviceName); err != nil {
+		return false, fmt.Errorf("setting %s.master: %w", ifaceName, err)
+	}
+
+	return true, nil
 }
 
 // RemoveAllBatadvInterfaces deletes every network interface whose
@@ -1633,6 +1747,139 @@ func CreateBridgeDevice(reader ConfigReader, name string, ports []string, macadd
 	return section, nil
 }
 
+// findDeviceByName returns the section name of the `config device`
+// whose `name` option equals name, regardless of its type, or "" when
+// none exists. Vendor board configs ship such sections for physical
+// ports (`config device` / `option name 'eth0'` / `option macaddr`),
+// and netifd keeps one settings block per device name — a second
+// section for the same name would drop the vendor's options.
+func findDeviceByName(reader ConfigReader, name string) (string, error) {
+	sections, err := reader.GetSections(networkConfigName, networkDeviceType)
+	if err != nil {
+		return "", fmt.Errorf("listing network devices: %w", err)
+	}
+
+	for _, s := range sections {
+		got, _ := reader.Get(networkConfigName, s, "name")
+		if len(got) > 0 && got[0] == name {
+			return s, nil
+		}
+	}
+
+	return "", nil
+}
+
+// SetDeviceMTUWithReader stages `option mtu` on the `config device`
+// section whose `name` is name, creating the named section
+// wizard_device_<name> (with `option name`) when none exists. netifd
+// applies the option to the device on the next reload, so the value
+// outlives the daemon's netlink pass. Does not commit — the setup
+// wizard commits every tainted config in one go at its commit phase.
+// Returns the section written. Values below netifd's minimum (68) are
+// rejected so a typo can never stage an mtu netifd would ignore.
+func SetDeviceMTUWithReader(reader ConfigReader, name string, mtu int) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("device name cannot be empty")
+	}
+
+	if mtu < minDeviceMTU {
+		return "", fmt.Errorf("mtu %d is below netifd's minimum of %d", mtu, minDeviceMTU)
+	}
+
+	section, err := findDeviceByName(reader, name)
+	if err != nil {
+		return "", err
+	}
+
+	if section == "" {
+		section = wizardDeviceSectionPrefix + sanitizeUCIName(name)
+
+		if addErr := reader.AddSection(networkConfigName, section, networkDeviceType); addErr != nil {
+			return "", fmt.Errorf("creating device section %s: %w", section, addErr)
+		}
+
+		if nameErr := reader.SetType(networkConfigName, section, "name", uci.TypeOption, name); nameErr != nil {
+			return "", fmt.Errorf("setting name on %s: %w", section, nameErr)
+		}
+	}
+
+	if setErr := reader.SetType(networkConfigName, section, "mtu", uci.TypeOption, strconv.Itoa(mtu)); setErr != nil {
+		return "", fmt.Errorf("setting mtu on %s: %w", section, setErr)
+	}
+
+	return section, nil
+}
+
+// UnsetDeviceMTU removes `option mtu` from the `config device`
+// sections the wizard's transport-mtu pass manages — those whose
+// `name` is in deviceNames (br-ahwlan and the detected ethernet ports)
+// — and deletes the wizard-owned port sections (wizard_device_*) that
+// exist only to carry one. The setup wizard runs it in its reset phase
+// so a re-run whose uplink port changed leaves no stale mtu behind;
+// the base-network phase then stages the current values. Does not
+// commit.
+//
+// Scoping to deviceNames is deliberate: an earlier build stripped mtu
+// from every device section, which wiped an mtu a vendor board config
+// or an operator had set on an unrelated device (br-lan, a wan bridge,
+// a non-ethernet port the wizard never touches). Only the wizard's own
+// devices are cleared now. A wizard_device_* section is always
+// wizard-owned, so the delete pass removes every one regardless of
+// name.
+//
+// Two passes: go-uci renders anonymous sections as @device[N] with N
+// counted over every device section, named ones included, so deleting
+// a wizard_device_* section shifts the refs of the anonymous sections
+// after it. The strip pass therefore runs first over a list that stays
+// valid, and the delete pass re-lists and touches named sections only.
+func UnsetDeviceMTU(reader ConfigReader, deviceNames []string) error {
+	managed := make(map[string]struct{}, len(deviceNames))
+	for _, n := range deviceNames {
+		managed[n] = struct{}{}
+	}
+
+	sections, err := reader.GetSections(networkConfigName, networkDeviceType)
+	if err != nil {
+		return fmt.Errorf("listing network devices: %w", err)
+	}
+
+	for _, s := range sections {
+		if strings.HasPrefix(s, wizardDeviceSectionPrefix) {
+			continue
+		}
+
+		name, _ := reader.Get(networkConfigName, s, "name")
+		if len(name) == 0 {
+			continue
+		}
+
+		if _, ok := managed[name[0]]; !ok {
+			continue
+		}
+
+		if delErr := reader.Del(networkConfigName, s, "mtu"); delErr != nil {
+			return fmt.Errorf("unsetting mtu on %s: %w", s, delErr)
+		}
+	}
+
+	sections, err = reader.GetSections(networkConfigName, networkDeviceType)
+	if err != nil {
+		return fmt.Errorf("listing network devices: %w", err)
+	}
+
+	for _, s := range sections {
+		if !strings.HasPrefix(s, wizardDeviceSectionPrefix) {
+			continue
+		}
+
+		if delErr := reader.DelSection(networkConfigName, s); delErr != nil {
+			return fmt.Errorf("deleting %s: %w", s, delErr)
+		}
+	}
+
+	return nil
+}
+
 // AppendBridgePort adds `port` to the bridge section's `ports` list,
 // preserving any existing ports. Idempotent: if the port is already
 // present, no write happens. The setup wizard's batman-adv phase uses
@@ -1716,4 +1963,38 @@ func EnsureWan6Interface(reader ConfigReader) error {
 	}
 
 	return reader.SetType(networkConfigName, section, optionProto, uci.TypeOption, "dhcpv6")
+}
+
+// EnsureWanInterface creates the `wan` interface section with
+// `proto=dhcp` if it does not already exist, mirroring
+// EnsureWan6Interface. The wizard uses this on gate-with-ethernet
+// scenarios where the uplink port is bound to wan rather than lan.
+//
+// Does not commit.
+func EnsureWanInterface(reader ConfigReader) error {
+	const section = "wan"
+
+	if !batmanInterfaceExists(reader, section) {
+		if err := reader.AddSection(networkConfigName, section, networkInterfaceType); err != nil {
+			return fmt.Errorf("creating wan: %w", err)
+		}
+	}
+
+	return reader.SetType(networkConfigName, section, optionProto, uci.TypeOption, "dhcp")
+}
+
+// SetInterfaceDeviceWithReader binds a network interface section to a
+// physical device (network.<section>.device). The wizard uses this to
+// re-attach the uplink port after the reset phase strips every
+// interface's device option. Does not commit.
+func SetInterfaceDeviceWithReader(reader ConfigReader, section, device string) error {
+	if section == "" || device == "" {
+		return fmt.Errorf("section and device are required")
+	}
+
+	if err := reader.SetType(networkConfigName, section, networkDeviceType, uci.TypeOption, device); err != nil {
+		return fmt.Errorf("setting %s.%s.device: %w", networkConfigName, section, err)
+	}
+
+	return nil
 }

@@ -147,3 +147,25 @@ func CommsSupported() bool {
 		return false
 	}
 }
+
+// GPIOSelectorSupported returns true if the current board wires the
+// 5-position talk group selector to host GPIO lines.
+//
+// The following board models support the GPIO selector:
+//   - BCM2711_RAVEN_USB
+//
+// Returns false if the board configuration cannot be retrieved or for
+// every other board model.
+func GPIOSelectorSupported() bool {
+	boardConfigInfo, err := newBoardConfigInfoFn()
+	if err != nil {
+		return false
+	}
+
+	switch boardConfigInfo.Model.ID {
+	case BCM2711_RAVEN_USB:
+		return true
+	default:
+		return false
+	}
+}

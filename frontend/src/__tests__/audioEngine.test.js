@@ -15,12 +15,25 @@ function createMockGainNode() {
   };
 }
 
+function createMockCompressorNode() {
+  return {
+    threshold: { value: 0 },
+    knee: { value: 0 },
+    ratio: { value: 0 },
+    attack: { value: 0 },
+    release: { value: 0 },
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  };
+}
+
 function createMockAudioContext() {
   const gainNode = createMockGainNode();
   return {
     sampleRate: 48000,
     destination: {},
     createGain: vi.fn(() => createMockGainNode()),
+    createDynamicsCompressor: vi.fn(() => createMockCompressorNode()),
     createScriptProcessor: vi.fn(() => ({
       connect: vi.fn(),
       disconnect: vi.fn(),
@@ -208,9 +221,82 @@ describe('TestAudioEngineVolume', () => {
     expect(gainCall.gain.value).toBe(0.5);
   });
 
+  it('setVolume above 100 amplifies past unity', async () => {
+    await engine.initAudio(vi.fn());
+    const gainCall = mockCtx.createGain.mock.results[0].value;
+    engine.setVolume(150);
+    expect(gainCall.gain.value).toBe(1.5);
+  });
+
   it('setMicGain stores gain value', () => {
     // setMicGain doesn't need initAudio
     expect(() => engine.setMicGain(60)).not.toThrow();
+  });
+});
+
+describe('TestAudioEngineRxLimiter', () => {
+  it('initAudio routes speaker gain through a limiter to destination', async () => {
+    await engine.initAudio(vi.fn());
+    expect(mockCtx.createDynamicsCompressor).toHaveBeenCalledTimes(1);
+
+    const gainCall = mockCtx.createGain.mock.results[0].value;
+    const limiter = mockCtx.createDynamicsCompressor.mock.results[0].value;
+    expect(gainCall.connect).toHaveBeenCalledWith(limiter);
+    expect(limiter.connect).toHaveBeenCalledWith(mockCtx.destination);
+  });
+
+  it('falls back to a direct connection when the API is missing', async () => {
+    delete mockCtx.createDynamicsCompressor;
+    await engine.initAudio(vi.fn());
+    const gainCall = mockCtx.createGain.mock.results[0].value;
+    expect(gainCall.connect).toHaveBeenCalledWith(mockCtx.destination);
+  });
+});
+
+describe('TestAudioEngineTxChain', () => {
+  it('startMic wires source through gain and limiter into the processor', async () => {
+    await engine.initAudio(vi.fn());
+    await engine.startMic(vi.fn(), vi.fn());
+
+    const source = mockCtx.createMediaStreamSource.mock.results[0].value;
+    // createGain order: rx gain (init), tx gain, mic silent gain.
+    const txGain = mockCtx.createGain.mock.results[1].value;
+    // createDynamicsCompressor order: rx limiter (init), tx limiter.
+    const txLimiter = mockCtx.createDynamicsCompressor.mock.results[1].value;
+    const procResults = mockCtx.createScriptProcessor.mock.results;
+    const micProcessor = procResults[procResults.length - 1].value;
+
+    expect(source.connect).toHaveBeenCalledWith(txGain);
+    expect(txGain.connect).toHaveBeenCalledWith(txLimiter);
+    expect(txLimiter.connect).toHaveBeenCalledWith(micProcessor);
+  });
+
+  it('setMicGain drives the live tx gain node past unity', async () => {
+    await engine.initAudio(vi.fn());
+    await engine.startMic(vi.fn(), vi.fn());
+
+    const txGain = mockCtx.createGain.mock.results[1].value;
+    engine.setMicGain(150);
+    expect(txGain.gain.value).toBe(1.5);
+  });
+
+  it('onaudioprocess forwards samples without a second gain multiply', async () => {
+    await engine.initAudio(vi.fn());
+    const onMicLevel = vi.fn();
+    engine.setMicGain(50); // 0.5 — applied by the graph node, not the copy loop
+    await engine.startMic(vi.fn(), onMicLevel);
+
+    const procResults = mockCtx.createScriptProcessor.mock.results;
+    const micProcessor = procResults[procResults.length - 1].value;
+
+    const input = new Float32Array(4).fill(0.5);
+    micProcessor.onaudioprocess({
+      inputBuffer: { getChannelData: () => input },
+    });
+
+    expect(onMicLevel).toHaveBeenCalledTimes(1);
+    const seen = onMicLevel.mock.calls[0][0];
+    expect(seen[0]).toBeCloseTo(0.5); // not 0.25: gain lives in the graph now
   });
 });
 

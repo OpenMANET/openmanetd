@@ -2,6 +2,7 @@ package comms
 
 import (
 	"math"
+	"net"
 	"testing"
 	"time"
 
@@ -247,11 +248,53 @@ func BenchmarkParseIncomingRTP(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	// Mirror the receiveLoop hot path: one Packet reused across parses.
+	var pkt pionrtp.Packet
+
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
-		if _, err := rtp.ParseIncoming(raw); err != nil {
+		if err := rtp.ParseIncomingInto(raw, &pkt); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkReceiverRead measures the per-packet cost of the receive socket
+// read exactly as receiveLoop performs it: through the PacketReader interface
+// with a SwappableReceiver wrapping a real *net.UDPConn on loopback. The
+// sender write inside the loop is the same single sendto(2) both before and
+// after any read-path change, so alloc deltas isolate the read side.
+func BenchmarkReceiverRead(b *testing.B) {
+	recvConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Cleanup(func() { _ = recvConn.Close() })
+
+	sendConn, err := net.DialUDP("udp4", nil, recvConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Cleanup(func() { _ = sendConn.Close() })
+
+	var r rtp.PacketReader = rtp.NewSwappableReceiver(recvConn)
+
+	buf := make([]byte, 1500)
+	msg := make([]byte, 160) // typical Opus 20ms frame + RTP header
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := sendConn.Write(msg); err != nil {
+			b.Fatal(err)
+		}
+
+		if _, _, err := r.ReadFromUDPAddrPort(buf); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -298,9 +341,8 @@ func BenchmarkPlayoutOneFrame_Mock(b *testing.B) {
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
 
-	rt := &CommsRuntime{
-		Decoder: &mockDecoder{returnN: audiopool.FrameSize},
-	}
+	pc.Decoder = &mockDecoder{returnN: audiopool.FrameSize}
+	rt := &CommsRuntime{}
 
 	jb := rtp.NewJitterBuffer(1, rtp.MaxDepth)
 	payload := make([]byte, 100)
@@ -349,8 +391,9 @@ func BenchmarkPlayoutOneFrame_Real(b *testing.B) {
 	pc := &PortChannel{cfg: McastPortConfig{Send: true, Receive: true}}
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
+	pc.Decoder = dec
 
-	rt := &CommsRuntime{Decoder: dec}
+	rt := &CommsRuntime{}
 
 	jb := rtp.NewJitterBuffer(1, rtp.MaxDepth)
 	out := make([]int16, audiopool.FrameSize)
@@ -403,8 +446,9 @@ func BenchmarkPlayoutOneFrame_PLC(b *testing.B) {
 	pc := &PortChannel{cfg: McastPortConfig{Send: true, Receive: true}}
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
+	pc.Decoder = dec
 
-	rt := &CommsRuntime{Decoder: dec}
+	rt := &CommsRuntime{}
 
 	// Prime the jitter buffer with a single push+pop so started=true and
 	// lastPush is recent; subsequent playoutOneFrame calls will hit conceal.

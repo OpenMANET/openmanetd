@@ -4,17 +4,20 @@ package handlers_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 	"connectrpc.com/validate"
+	"github.com/digineo/go-uci/v2"
 	"github.com/mdlayher/wifi"
 	blosproto "github.com/openmanet/openmanetd/internal/api/openmanet/blos/v1"
 	blosconnect "github.com/openmanet/openmanetd/internal/api/openmanet/blos/v1/blosv1connect"
@@ -22,6 +25,7 @@ import (
 	commsconnect "github.com/openmanet/openmanetd/internal/api/openmanet/comms/v1/commsv1connect"
 	logsv1 "github.com/openmanet/openmanetd/internal/api/openmanet/logs/v1"
 	logsconnect "github.com/openmanet/openmanetd/internal/api/openmanet/logs/v1/logsv1connect"
+	meshjoinconnect "github.com/openmanet/openmanetd/internal/api/openmanet/mesh_join/v1/mesh_joinv1connect"
 	meshtopoconnect "github.com/openmanet/openmanetd/internal/api/openmanet/mesh_topology/v1/mesh_topologyv1connect"
 	niv1 "github.com/openmanet/openmanetd/internal/api/openmanet/network_interface/v1"
 	niconnect "github.com/openmanet/openmanetd/internal/api/openmanet/network_interface/v1/network_interfacev1connect"
@@ -32,9 +36,13 @@ import (
 	wificonfigv1 "github.com/openmanet/openmanetd/internal/api/openmanet/wifi_config/v1"
 	batmanadv "github.com/openmanet/openmanetd/internal/batman-adv"
 	"github.com/openmanet/openmanetd/internal/blos"
+	"github.com/openmanet/openmanetd/internal/comms"
+	"github.com/openmanet/openmanetd/internal/comms/control/alsa"
+	"github.com/openmanet/openmanetd/internal/comms/webaudio"
 	"github.com/openmanet/openmanetd/internal/config"
 	"github.com/openmanet/openmanetd/internal/gpsd"
 	"github.com/openmanet/openmanetd/internal/logs"
+	"github.com/openmanet/openmanetd/internal/meshjoin"
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/openmanet/openmanetd/internal/openmanet/server/handlers"
 	"github.com/rs/zerolog"
@@ -102,6 +110,15 @@ func newTestServer(t *testing.T) *httptest.Server {
 	mux.Handle(commsconnect.NewCommsServiceHandler(&handlers.CommsService{
 		Cfg: &config.Config{CommsEnable: false},
 		Log: zerolog.Nop(),
+		Mixer: &fakeAudioMixer{state: alsa.State{
+			Available:      true,
+			SpeakerPct:     70,
+			MicPct:         55,
+			AGCPresent:     true,
+			SpeakerControl: "Master",
+			MicControl:     "Mic Capture Volume",
+			AGCControl:     "Auto Gain Control",
+		}},
 	}, handlerOpt))
 
 	mux.Handle(blosconnect.NewBLOSServiceHandler(&handlers.BLOSService{
@@ -220,6 +237,11 @@ func TestIntegration_ListMeshNeighbors(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.GetNeighbors(), 1)
 	assert.Equal(t, "aa:bb:cc:dd:ee:ff", resp.GetNeighbors()[0].GetHardwareAddress())
+
+	n := resp.GetNeighbors()[0]
+	assert.Equal(t, "mesh0", n.GetInterface())
+	assert.Equal(t, int32(54), n.GetTx().GetBitrateKbps(), "no rate attrs on the fixture: kbit/s from the plain bitrate")
+	assert.Equal(t, serviceproto.LinkRate_PHY_UNSPECIFIED, n.GetTx().GetPhy())
 }
 
 // ── MeshTopologyService ───────────────────────────────────────────────────────
@@ -386,6 +408,67 @@ func TestIntegration_SetReceiveTalkGroup_NotRunning(t *testing.T) {
 	}
 }
 
+func TestIntegration_SelectTalkGroup_ValidationAndPrecondition(t *testing.T) {
+	srv := newTestServer(t)
+	client := commsconnect.NewCommsServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	// 0 fails buf.validate before reaching the handler.
+	_, err := client.SelectTalkGroup(context.Background(),
+		&commsv1.SelectTalkGroupRequest{Talkgroup: 0})
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInvalidArgument, connectErr.Code())
+
+	// Valid number, but comms is not enabled in newTestServer's wired config.
+	_, err = client.SelectTalkGroup(context.Background(),
+		&commsv1.SelectTalkGroupRequest{Talkgroup: 2})
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+}
+
+func TestIntegration_SelectTalkGroup_NotRunning(t *testing.T) {
+	srv := newTestServerEnabled(t)
+	client := commsconnect.NewCommsServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	// Comms is enabled but the runtime is not started, so SelectTalkGroup
+	// resolves a nil *comms.Service and returns FailedPrecondition.
+	_, err := client.SelectTalkGroup(context.Background(),
+		&commsv1.SelectTalkGroupRequest{Talkgroup: 2})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+}
+
+func TestIntegration_StreamTalkGroupEvents_NotRunning(t *testing.T) {
+	srv := newTestServerEnabled(t)
+	client := commsconnect.NewCommsServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	stream, err := client.StreamTalkGroupEvents(context.Background(), &emptypb.Empty{})
+	// connect-go may return the error on the initial call or defer it to the
+	// first Receive, depending on the protocol.
+	if err != nil {
+		var connectErr *connect.Error
+		if assert.ErrorAs(t, err, &connectErr) {
+			assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+		}
+
+		return
+	}
+
+	ok := stream.Receive()
+	assert.False(t, ok)
+	require.Error(t, stream.Err())
+
+	var connectErr *connect.Error
+	if assert.ErrorAs(t, stream.Err(), &connectErr) {
+		assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+	}
+
+	require.NoError(t, stream.Close())
+}
+
 // ── Validation (interceptor enforcement over HTTP) ────────────────────────────
 
 func TestIntegration_Validation_GetNode_EmptyHostname(t *testing.T) {
@@ -529,6 +612,28 @@ func TestIntegration_Validation_SetReceiveTalkGroup_ValidTalkgroup(t *testing.T)
 	}
 }
 
+// ── AudioMixer ────────────────────────────────────────────────────────────
+
+func TestIntegration_AudioMixer_GetAndValidation(t *testing.T) {
+	srv := newTestServer(t)
+	client := commsconnect.NewCommsServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	resp, err := client.GetAudioMixer(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	assert.True(t, resp.GetState().GetAvailable())
+	assert.Equal(t, int32(70), resp.GetState().GetSpeakerVolume())
+
+	bad := int32(101)
+	_, err = client.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{
+		SpeakerVolume: &bad,
+	})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInvalidArgument, connectErr.Code(), "validate interceptor must reject out-of-range volume")
+}
+
 // ── SendPTTEvent / StreamAudio (via unified CommsService) ─────────────────
 
 // ── SendPTTEvent / StreamAudio ────────────────────────────────────────────
@@ -549,6 +654,68 @@ func TestIntegration_SendPTTEvent_WebNotActive(t *testing.T) {
 		assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
 		assert.Contains(t, connectErr.Message(), "web control source not active")
 	}
+}
+
+// TestIntegration_StreamAudioRx_CarriesTalkgroup pins the talk group
+// attribution contract on the web RX stream: a frame pushed into the web
+// audio bridge tagged with channel 3 must reach the RPC client with
+// Talkgroup=3, so the frontend bridge can label the WebSocket frame with
+// the real talk group instead of hardcoding channel 1.
+func TestIntegration_StreamAudioRx_CarriesTalkgroup(t *testing.T) {
+	bridge := webaudio.NewBridge(zerolog.Nop(), nil)
+	svc := &comms.Service{Rt: &comms.CommsRuntime{WebBridge: bridge}}
+
+	mux := http.NewServeMux()
+	mux.Handle(commsconnect.NewCommsServiceHandler(&handlers.CommsService{
+		Cfg:     &config.Config{CommsEnable: true},
+		Log:     zerolog.Nop(),
+		Service: func() *comms.Service { return svc },
+	}, connect.WithInterceptors(validate.NewInterceptor())))
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client := commsconnect.NewCommsServiceClient(
+		http.DefaultClient,
+		srv.URL,
+		connect.WithGRPCWeb(),
+	)
+
+	// Bound the whole stream so a regression hangs for seconds, not the
+	// package's 10-minute test timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	// Continuously push tagged frames before opening the stream: the
+	// connect client does not return until the handler's first Send
+	// flushes, and the handler's consumer attach flushes concurrently
+	// pushed frames (a documented one-frame race), so a steady producer
+	// is the only race-free way to guarantee the stream sees a frame.
+	prodCtx, prodCancel := context.WithCancel(context.Background())
+	t.Cleanup(prodCancel)
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-prodCtx.Done():
+				return
+			case <-ticker.C:
+				bridge.PushRxFrame(3, []byte{0xAA, 0xBB})
+			}
+		}
+	}()
+
+	stream, err := client.StreamAudioRx(ctx, &commsv1.StreamAudioRxRequest{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stream.Close() })
+
+	require.True(t, stream.Receive(), "expected an RX frame, got stream end: %v", stream.Err())
+	msg := stream.Msg()
+	assert.Equal(t, int32(3), msg.GetTalkgroup())
+	assert.Equal(t, []byte{0xAA, 0xBB}, msg.GetOpusData())
 }
 
 func TestIntegration_StreamAudioRx_WebNotActive(t *testing.T) {
@@ -1107,6 +1274,19 @@ func TestIntegration_Validation_GetLogs_MaxLinesOutOfRange(t *testing.T) {
 func newSetupTestServer(t *testing.T, yamlContent string) *httptest.Server {
 	t.Helper()
 
+	srv, _ := newSetupTestServerWithReader(t, yamlContent)
+
+	return srv
+}
+
+// newSetupTestServerWithReader is newSetupTestServer but also returns
+// the UCI reader the handler writes to, so a test can assert the
+// staged values after ApplySetup and seed pre-apply state. The
+// snapshotter is reader-backed so a forced rollback really restores
+// the tree.
+func newSetupTestServerWithReader(t *testing.T, yamlContent string) (*httptest.Server, *fakeConfigReader) {
+	t.Helper()
+
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.yml")
 	require.NoError(t, os.WriteFile(cfgPath, []byte(yamlContent), 0o644))
@@ -1117,35 +1297,28 @@ func newSetupTestServer(t *testing.T, yamlContent string) *httptest.Server {
 
 	cfg := config.NewWithoutWatch(v)
 
-	reader := &fakeConfigReader{
-		data: map[string]map[string]map[string][]string{
-			"wireless": {
-				"radio0": {"type": {"mac80211"}, "band": {"2g"}, "channel": {"1"}},
-				"radio1": {"type": {"morse"}, "band": {"s1g"}, "channel": {"42"}},
-			},
-			"system": {
-				"@system[0]": {"hostname": {"BCM2711-97d6"}},
-			},
-		},
-		sectionTypes: map[string]map[string]string{
-			"wireless": {"radio0": "wifi-device", "radio1": "wifi-device"},
-			"system":   {"@system[0]": "system"},
-		},
-	}
+	reader := newFullSetupReader()
+	iw, ws := backhaulCapableProviders()
 
 	mux := http.NewServeMux()
 
 	mux.Handle(setupconnect.NewSetupServiceHandler(&handlers.SetupService{
-		Cfg:        cfg,
-		Log:        zerolog.Nop(),
-		UCI:        reader,
-		Interfaces: &fakeInterfaceProvider{},
+		Cfg:            cfg,
+		Log:            zerolog.Nop(),
+		UCI:            reader,
+		Snapshotter:    &fakeSnapshotter{reader: reader},
+		HostnameSetter: &fakeHostnameSetter{},
+		PasswordSetter: &fakePasswordSetter{},
+		Reloader:       newFakeReloader(len(handlers.ReloadServicesForTest())),
+		Interfaces:     &fakeInterfaceProvider{},
+		Iwinfo:         iw,
+		WirelessStatus: ws,
 	}, connect.WithInterceptors(validate.NewInterceptor())))
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	return srv
+	return srv, reader
 }
 
 func TestIntegration_GetSetupStatus_DefaultsDisabled(t *testing.T) {
@@ -1206,6 +1379,59 @@ func TestIntegration_ApplySetup_RejectsWhenAlreadyComplete(t *testing.T) {
 	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
 }
 
+func TestIntegration_ApplySetup_RejectsMeshPointNone(t *testing.T) {
+	srv := newSetupTestServer(t, "setup:\n  enabled: true\n")
+	client := setupconnect.NewSetupServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	prof := integrationMinimalProfile()
+	prof.DeviceMode = &setupv1.MeshNodeProfile_MeshpointMode{
+		MeshpointMode: setupv1.MeshPointMode_MESH_POINT_MODE_NONE,
+	}
+
+	stream, err := client.ApplySetup(context.Background(), &setupv1.ApplySetupRequest{Profile: prof})
+	require.NoError(t, err)
+
+	// Drain STARTED / FAILED / TERMINAL; the rejection is the stream error.
+	received := 0
+	for stream.Receive() {
+		received++
+	}
+
+	assert.GreaterOrEqual(t, received, 3)
+
+	err = stream.Err()
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInvalidArgument, connectErr.Code())
+	assert.Contains(t, connectErr.Message(), "meshpoint_mode NONE")
+}
+
+func TestIntegration_ApplySetup_RejectsOpenMesh(t *testing.T) {
+	srv := newSetupTestServer(t, "setup:\n  enabled: true\n")
+	client := setupconnect.NewSetupServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	prof := integrationMinimalProfile()
+	prof.Mesh.Encryption = wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_NONE
+	prof.Mesh.Passphrase = ""
+
+	stream, err := client.ApplySetup(context.Background(), &setupv1.ApplySetupRequest{Profile: prof})
+	require.NoError(t, err)
+
+	for stream.Receive() {
+		t.Logf("phase %s %s", stream.Msg().GetPhase(), stream.Msg().GetStatus())
+	}
+
+	err = stream.Err()
+	require.Error(t, err, "the validate interceptor must reject an open mesh before any phase runs")
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInvalidArgument, connectErr.Code())
+	assert.Contains(t, connectErr.Message(), "encryption")
+}
+
 // integrationMinimalProfile returns a fully-valid MeshNodeProfile for
 // integration tests of the SetupService.
 func integrationMinimalProfile() *setupv1.MeshNodeProfile {
@@ -1225,4 +1451,153 @@ func integrationMinimalProfile() *setupv1.MeshNodeProfile {
 			Channel:      42,
 		},
 	}
+}
+
+func TestIntegration_ApplySetup_MeshBackhaul(t *testing.T) {
+	srv, reader := newSetupTestServerWithReader(t, "setup:\n  enabled: true\n")
+	client := setupconnect.NewSetupServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	prof := integrationMinimalProfile()
+	prof.Aps = []*setupv1.RadioApProfile{{
+		RadioName:  "radio0",
+		Encryption: wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_SAE,
+		MeshBackhaul: &setupv1.MeshBackhaulProfile{
+			MeshId:     "backhaul-2g",
+			Passphrase: "backhaulpass",
+		},
+	}}
+
+	stream, err := client.ApplySetup(context.Background(), &setupv1.ApplySetupRequest{Profile: prof})
+	require.NoError(t, err)
+
+	sawValidateDone := false
+
+	for stream.Receive() {
+		msg := stream.Msg()
+		if msg.GetPhase() == setupv1.ApplySetupResponse_PHASE_VALIDATE &&
+			msg.GetStatus() == setupv1.ApplySetupResponse_STATUS_DONE {
+			sawValidateDone = true
+		}
+	}
+
+	require.NoError(t, stream.Err(), "a backhaul on a capable radio must apply end to end")
+	assert.True(t, sawValidateDone, "validation must accept the backhaul entry")
+
+	// The link section carries the daemon's secondary-mesh tuning
+	// through the real ConnectRPC + interceptor + commit path.
+	tr := &uciTree{reader: reader}
+	section := network.MeshLink{Radio: "radio0", Network: network.BatmanSecondaryIface}.Section()
+
+	for _, p := range network.SecondaryMeshPolicyOptions() {
+		assert.Equal(t, p.Value, tr.getOne("wireless", section, p.Option), p.Option)
+	}
+
+	assert.Equal(t, network.SecondaryMeshChannel2G, tr.getOne("wireless", "radio0", "channel"))
+	assert.Equal(t, network.SecondaryMeshHTMode2G, tr.getOne("wireless", "radio0", "htmode"),
+		"a zero-width backhaul profile must land the daemon's default width")
+}
+
+// TestIntegration_ApplySetup_WritesLuciAndOpenmanetdFlags drives the
+// full ConnectRPC + validate-interceptor + streaming + commit path and
+// asserts the wizard's LuCI and openmanetd bookkeeping lands on the
+// tree: luci.wizard.used=1, the first-boot landing homepage cleared,
+// and the two reservation flags staged (ledger F2/F3 "done when").
+func TestIntegration_ApplySetup_WritesLuciAndOpenmanetdFlags(t *testing.T) {
+	srv, reader := newSetupTestServerWithReader(t, "setup:\n  enabled: true\n")
+
+	// Seed the first-boot LuCI homepage so the wizard has one to clear.
+	require.NoError(t, reader.AddSection("luci", "main", "core"))
+	require.NoError(t, reader.SetType("luci", "main", "homepage", uci.TypeOption, "admin/morse/landing"))
+
+	client := setupconnect.NewSetupServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	stream, err := client.ApplySetup(context.Background(),
+		&setupv1.ApplySetupRequest{Profile: integrationMinimalProfile()})
+	require.NoError(t, err)
+
+	for stream.Receive() {
+	}
+
+	require.NoError(t, stream.Err(), "a minimal extender profile must apply end to end")
+
+	tr := &uciTree{reader: reader}
+	assert.Equal(t, "1", tr.getOne("luci", "wizard", "used"),
+		"the wizard must mark itself used so LuCI stops steering into its own flow")
+	assert.Empty(t, tr.getOne("luci", "main", "homepage"),
+		"the first-boot landing homepage must be cleared")
+	assert.Equal(t, "0", tr.getOne("openmanetd", "config", "dhcpconfigured"),
+		"dhcpconfigured must be staged to 0 so the reservation worker claims a mesh address")
+	assert.Equal(t, "0", tr.getOne("openmanetd", "config", "batmesh1configured"),
+		"batmesh1configured must be 0 when no backhaul was chosen")
+}
+
+// TestIntegration_ApplySetup_RollbackRestoresFlags forces a commit
+// failure late in the pipeline and asserts the pre-apply luci and
+// openmanetd values are restored — the wizard must never leave the
+// reservation flags or LuCI bookkeeping half-written after a rollback
+// (ledger F2/F3 "done when": values asserted after a forced rollback).
+func TestIntegration_ApplySetup_RollbackRestoresFlags(t *testing.T) {
+	srv, reader := newSetupTestServerWithReader(t, "setup:\n  enabled: true\n")
+
+	// Pre-apply state a successful run would change: a stale
+	// dhcpconfigured=1 the wizard sets to 0, and the first-boot LuCI
+	// landing homepage the wizard deletes. luci.wizard.used is left
+	// unset so the re-apply guard admits the run.
+	require.NoError(t, reader.AddSection("openmanetd", "config", "openmanet"))
+	require.NoError(t, reader.SetType("openmanetd", "config", "dhcpconfigured", uci.TypeOption, "1"))
+	require.NoError(t, reader.AddSection("luci", "main", "core"))
+	require.NoError(t, reader.SetType("luci", "main", "homepage", uci.TypeOption, "admin/morse/landing"))
+
+	// Make the phase-12 commit fail so the mutation pipeline rolls back.
+	reader.commitError = errors.New("commit boom")
+
+	client := setupconnect.NewSetupServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	stream, err := client.ApplySetup(context.Background(),
+		&setupv1.ApplySetupRequest{Profile: integrationMinimalProfile()})
+	require.NoError(t, err)
+
+	for stream.Receive() {
+	}
+
+	require.Error(t, stream.Err(), "a commit failure must surface as an RPC error")
+
+	tr := &uciTree{reader: reader}
+	assert.Equal(t, "1", tr.getOne("openmanetd", "config", "dhcpconfigured"),
+		"rollback must restore the pre-apply dhcpconfigured=1, not leave the wizard's 0")
+	assert.Equal(t, "admin/morse/landing", tr.getOne("luci", "main", "homepage"),
+		"rollback must restore the deleted landing homepage")
+	assert.Empty(t, tr.getOne("luci", "wizard", "used"),
+		"rollback must undo the wizard's luci.wizard.used=1 write")
+}
+
+// newMeshJoinTestServer serves only MeshJoinService over the seeded
+// wireless tree from mesh_join_test.go.
+func newMeshJoinTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.Handle(meshjoinconnect.NewMeshJoinServiceHandler(&handlers.MeshJoinService{
+		Log:          zerolog.Nop(),
+		ConfigReader: newMeshJoinReader(),
+		Hostname:     func() (string, error) { return "alpha", nil },
+	}, connect.WithInterceptors(validate.NewInterceptor())))
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+func TestIntegration_GetMeshJoinQR(t *testing.T) {
+	srv := newMeshJoinTestServer(t)
+	client := meshjoinconnect.NewMeshJoinServiceClient(http.DefaultClient, srv.URL, connect.WithGRPCWeb())
+
+	resp, err := client.GetMeshJoinQR(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "field-mesh", resp.GetPayload().GetHalow().GetMeshId())
+	assert.Equal(t, "field-mesh-2g", resp.GetPayload().GetBackhaul().GetMeshId())
+	assert.True(t, strings.HasPrefix(resp.GetPayloadText(), meshjoin.Prefix))
+	assert.True(t, strings.HasPrefix(resp.GetSvg(), "<svg "))
 }

@@ -153,23 +153,28 @@ func buildAPIProxies(apiAddr string, log zerolog.Logger) (rpcProxy, authProxy ht
 		IdleConnTimeout: 90 * time.Second,
 	}
 
+	// Rewrite (not the deprecated Director) drops any inbound
+	// X-Forwarded-* headers before we run, so a browser cannot spoof
+	// the client address; SetXForwarded then stamps the real one.
+	rewrite := func(pr *httputil.ProxyRequest, stripPrefix string) {
+		pr.SetXForwarded()
+		pr.Out.URL.Scheme = apiURL.Scheme
+		pr.Out.URL.Host = apiURL.Host
+		pr.Out.Host = apiURL.Host
+
+		if stripPrefix != "" {
+			pr.Out.URL.Path = strings.TrimPrefix(pr.Out.URL.Path, stripPrefix)
+		}
+	}
+
 	rpcProxy = &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL.Scheme = apiURL.Scheme
-			r.URL.Host = apiURL.Host
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/rpc")
-			r.Host = apiURL.Host
-		},
+		Rewrite:       func(pr *httputil.ProxyRequest) { rewrite(pr, "/rpc") },
 		Transport:     transport,
 		FlushInterval: -1,
 	}
 
 	authProxy = &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL.Scheme = apiURL.Scheme
-			r.URL.Host = apiURL.Host
-			r.Host = apiURL.Host
-		},
+		Rewrite:   func(pr *httputil.ProxyRequest) { rewrite(pr, "") },
 		Transport: transport,
 	}
 

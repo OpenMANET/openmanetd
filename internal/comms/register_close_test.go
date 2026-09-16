@@ -2,7 +2,7 @@ package comms
 
 import (
 	"errors"
-	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -211,7 +211,7 @@ type errClosingReader struct {
 	closed   bool
 }
 
-func (r *errClosingReader) ReadFromUDP(_ []byte) (int, *net.UDPAddr, error) {
+func (r *errClosingReader) ReadFromUDPAddrPort(_ []byte) (int, netip.AddrPort, error) {
 	select {} //nolint:staticcheck
 }
 

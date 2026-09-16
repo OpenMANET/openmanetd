@@ -10,6 +10,7 @@ import (
 	_ "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -21,6 +22,111 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// TalkGroupEventKind distinguishes exclusive selections from single
+// direction toggles. Values mirror the daemon's internal talkgroup.Kind.
+type TalkGroupEventKind int32
+
+const (
+	TalkGroupEventKind_TALK_GROUP_EVENT_KIND_UNSPECIFIED TalkGroupEventKind = 0
+	TalkGroupEventKind_TALK_GROUP_EVENT_KIND_SELECTED    TalkGroupEventKind = 1
+	TalkGroupEventKind_TALK_GROUP_EVENT_KIND_DIRECTION   TalkGroupEventKind = 2
+)
+
+// Enum value maps for TalkGroupEventKind.
+var (
+	TalkGroupEventKind_name = map[int32]string{
+		0: "TALK_GROUP_EVENT_KIND_UNSPECIFIED",
+		1: "TALK_GROUP_EVENT_KIND_SELECTED",
+		2: "TALK_GROUP_EVENT_KIND_DIRECTION",
+	}
+	TalkGroupEventKind_value = map[string]int32{
+		"TALK_GROUP_EVENT_KIND_UNSPECIFIED": 0,
+		"TALK_GROUP_EVENT_KIND_SELECTED":    1,
+		"TALK_GROUP_EVENT_KIND_DIRECTION":   2,
+	}
+)
+
+func (x TalkGroupEventKind) Enum() *TalkGroupEventKind {
+	p := new(TalkGroupEventKind)
+	*p = x
+	return p
+}
+
+func (x TalkGroupEventKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TalkGroupEventKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_openmanet_comms_v1_talkgroup_proto_enumTypes[0].Descriptor()
+}
+
+func (TalkGroupEventKind) Type() protoreflect.EnumType {
+	return &file_openmanet_comms_v1_talkgroup_proto_enumTypes[0]
+}
+
+func (x TalkGroupEventKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TalkGroupEventKind.Descriptor instead.
+func (TalkGroupEventKind) EnumDescriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP(), []int{0}
+}
+
+// TalkGroupEventSource identifies which control surface produced the
+// change. Values mirror the daemon's internal talkgroup.Source.
+type TalkGroupEventSource int32
+
+const (
+	TalkGroupEventSource_TALK_GROUP_EVENT_SOURCE_UNSPECIFIED TalkGroupEventSource = 0
+	TalkGroupEventSource_TALK_GROUP_EVENT_SOURCE_RPC         TalkGroupEventSource = 1
+	TalkGroupEventSource_TALK_GROUP_EVENT_SOURCE_GPIO        TalkGroupEventSource = 2
+	TalkGroupEventSource_TALK_GROUP_EVENT_SOURCE_INIT        TalkGroupEventSource = 3
+)
+
+// Enum value maps for TalkGroupEventSource.
+var (
+	TalkGroupEventSource_name = map[int32]string{
+		0: "TALK_GROUP_EVENT_SOURCE_UNSPECIFIED",
+		1: "TALK_GROUP_EVENT_SOURCE_RPC",
+		2: "TALK_GROUP_EVENT_SOURCE_GPIO",
+		3: "TALK_GROUP_EVENT_SOURCE_INIT",
+	}
+	TalkGroupEventSource_value = map[string]int32{
+		"TALK_GROUP_EVENT_SOURCE_UNSPECIFIED": 0,
+		"TALK_GROUP_EVENT_SOURCE_RPC":         1,
+		"TALK_GROUP_EVENT_SOURCE_GPIO":        2,
+		"TALK_GROUP_EVENT_SOURCE_INIT":        3,
+	}
+)
+
+func (x TalkGroupEventSource) Enum() *TalkGroupEventSource {
+	p := new(TalkGroupEventSource)
+	*p = x
+	return p
+}
+
+func (x TalkGroupEventSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TalkGroupEventSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_openmanet_comms_v1_talkgroup_proto_enumTypes[1].Descriptor()
+}
+
+func (TalkGroupEventSource) Type() protoreflect.EnumType {
+	return &file_openmanet_comms_v1_talkgroup_proto_enumTypes[1]
+}
+
+func (x TalkGroupEventSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TalkGroupEventSource.Descriptor instead.
+func (TalkGroupEventSource) EnumDescriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP(), []int{1}
+}
 
 // TalkGroupState is a read-only snapshot of the runtime send/receive direction
 // toggles for a single configured talkgroup port.
@@ -336,11 +442,257 @@ func (x *SetReceiveTalkGroupResponse) GetMessage() string {
 	return ""
 }
 
+// SelectTalkGroupRequest names the talk group to make exclusively active.
+type SelectTalkGroupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The 1-based channel number of the talk group to select.
+	Talkgroup     int32 `protobuf:"varint,1,opt,name=talkgroup,proto3" json:"talkgroup,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SelectTalkGroupRequest) Reset() {
+	*x = SelectTalkGroupRequest{}
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SelectTalkGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SelectTalkGroupRequest) ProtoMessage() {}
+
+func (x *SelectTalkGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SelectTalkGroupRequest.ProtoReflect.Descriptor instead.
+func (*SelectTalkGroupRequest) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *SelectTalkGroupRequest) GetTalkgroup() int32 {
+	if x != nil {
+		return x.Talkgroup
+	}
+	return 0
+}
+
+// SelectTalkGroupResponse reports the outcome of a SelectTalkGroup call.
+type SelectTalkGroupResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Indicates whether the selection was applied.
+	Success bool `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	// Optional message providing additional information.
+	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SelectTalkGroupResponse) Reset() {
+	*x = SelectTalkGroupResponse{}
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SelectTalkGroupResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SelectTalkGroupResponse) ProtoMessage() {}
+
+func (x *SelectTalkGroupResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SelectTalkGroupResponse.ProtoReflect.Descriptor instead.
+func (*SelectTalkGroupResponse) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *SelectTalkGroupResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *SelectTalkGroupResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+// TalkGroupEvent is a single talk group state-change observation.
+type TalkGroupEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// What changed.
+	Kind TalkGroupEventKind `protobuf:"varint,1,opt,name=kind,proto3,enum=openmanet.comms.v1.TalkGroupEventKind" json:"kind,omitempty"`
+	// The 1-based talk group the event is about.
+	Talkgroup int32 `protobuf:"varint,2,opt,name=talkgroup,proto3" json:"talkgroup,omitempty"`
+	// The previously active talk group (KIND_SELECTED only, 0 if none).
+	PrevTalkgroup int32 `protobuf:"varint,3,opt,name=prev_talkgroup,json=prevTalkgroup,proto3" json:"prev_talkgroup,omitempty"`
+	// Resulting send state for this talk group.
+	SendEnabled bool `protobuf:"varint,4,opt,name=send_enabled,json=sendEnabled,proto3" json:"send_enabled,omitempty"`
+	// Resulting receive state for this talk group.
+	ReceiveEnabled bool `protobuf:"varint,5,opt,name=receive_enabled,json=receiveEnabled,proto3" json:"receive_enabled,omitempty"`
+	// Which control surface produced the change.
+	Source TalkGroupEventSource `protobuf:"varint,6,opt,name=source,proto3,enum=openmanet.comms.v1.TalkGroupEventSource" json:"source,omitempty"`
+	// When the change was applied.
+	At            *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=at,proto3" json:"at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TalkGroupEvent) Reset() {
+	*x = TalkGroupEvent{}
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TalkGroupEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TalkGroupEvent) ProtoMessage() {}
+
+func (x *TalkGroupEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TalkGroupEvent.ProtoReflect.Descriptor instead.
+func (*TalkGroupEvent) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *TalkGroupEvent) GetKind() TalkGroupEventKind {
+	if x != nil {
+		return x.Kind
+	}
+	return TalkGroupEventKind_TALK_GROUP_EVENT_KIND_UNSPECIFIED
+}
+
+func (x *TalkGroupEvent) GetTalkgroup() int32 {
+	if x != nil {
+		return x.Talkgroup
+	}
+	return 0
+}
+
+func (x *TalkGroupEvent) GetPrevTalkgroup() int32 {
+	if x != nil {
+		return x.PrevTalkgroup
+	}
+	return 0
+}
+
+func (x *TalkGroupEvent) GetSendEnabled() bool {
+	if x != nil {
+		return x.SendEnabled
+	}
+	return false
+}
+
+func (x *TalkGroupEvent) GetReceiveEnabled() bool {
+	if x != nil {
+		return x.ReceiveEnabled
+	}
+	return false
+}
+
+func (x *TalkGroupEvent) GetSource() TalkGroupEventSource {
+	if x != nil {
+		return x.Source
+	}
+	return TalkGroupEventSource_TALK_GROUP_EVENT_SOURCE_UNSPECIFIED
+}
+
+func (x *TalkGroupEvent) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+// StreamTalkGroupEventsResponse wraps one event per stream message.
+type StreamTalkGroupEventsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Event         *TalkGroupEvent        `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamTalkGroupEventsResponse) Reset() {
+	*x = StreamTalkGroupEventsResponse{}
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamTalkGroupEventsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamTalkGroupEventsResponse) ProtoMessage() {}
+
+func (x *StreamTalkGroupEventsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_talkgroup_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamTalkGroupEventsResponse.ProtoReflect.Descriptor instead.
+func (*StreamTalkGroupEventsResponse) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *StreamTalkGroupEventsResponse) GetEvent() *TalkGroupEvent {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
 var File_openmanet_comms_v1_talkgroup_proto protoreflect.FileDescriptor
 
 const file_openmanet_comms_v1_talkgroup_proto_rawDesc = "" +
 	"\n" +
-	"\"openmanet/comms/v1/talkgroup.proto\x12\x12openmanet.comms.v1\x1a\x1bbuf/validate/validate.proto\"\xd1\x01\n" +
+	"\"openmanet/comms/v1/talkgroup.proto\x12\x12openmanet.comms.v1\x1a\x1bbuf/validate/validate.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd1\x01\n" +
 	"\x0eTalkGroupState\x12\x1c\n" +
 	"\ttalkgroup\x18\x01 \x01(\x05R\ttalkgroup\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x12\n" +
@@ -359,7 +711,31 @@ const file_openmanet_comms_v1_talkgroup_proto_rawDesc = "" +
 	"\aenabled\x18\x02 \x01(\bR\aenabled\"Q\n" +
 	"\x1bSetReceiveTalkGroupResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessageB\xdb\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"A\n" +
+	"\x16SelectTalkGroupRequest\x12'\n" +
+	"\ttalkgroup\x18\x01 \x01(\x05B\t\xbaH\x06\x1a\x04\x18 (\x01R\ttalkgroup\"M\n" +
+	"\x17SelectTalkGroupResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xcb\x02\n" +
+	"\x0eTalkGroupEvent\x12:\n" +
+	"\x04kind\x18\x01 \x01(\x0e2&.openmanet.comms.v1.TalkGroupEventKindR\x04kind\x12\x1c\n" +
+	"\ttalkgroup\x18\x02 \x01(\x05R\ttalkgroup\x12%\n" +
+	"\x0eprev_talkgroup\x18\x03 \x01(\x05R\rprevTalkgroup\x12!\n" +
+	"\fsend_enabled\x18\x04 \x01(\bR\vsendEnabled\x12'\n" +
+	"\x0freceive_enabled\x18\x05 \x01(\bR\x0ereceiveEnabled\x12@\n" +
+	"\x06source\x18\x06 \x01(\x0e2(.openmanet.comms.v1.TalkGroupEventSourceR\x06source\x12*\n" +
+	"\x02at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\x02at\"Y\n" +
+	"\x1dStreamTalkGroupEventsResponse\x128\n" +
+	"\x05event\x18\x01 \x01(\v2\".openmanet.comms.v1.TalkGroupEventR\x05event*\x84\x01\n" +
+	"\x12TalkGroupEventKind\x12%\n" +
+	"!TALK_GROUP_EVENT_KIND_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eTALK_GROUP_EVENT_KIND_SELECTED\x10\x01\x12#\n" +
+	"\x1fTALK_GROUP_EVENT_KIND_DIRECTION\x10\x02*\xa4\x01\n" +
+	"\x14TalkGroupEventSource\x12'\n" +
+	"#TALK_GROUP_EVENT_SOURCE_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bTALK_GROUP_EVENT_SOURCE_RPC\x10\x01\x12 \n" +
+	"\x1cTALK_GROUP_EVENT_SOURCE_GPIO\x10\x02\x12 \n" +
+	"\x1cTALK_GROUP_EVENT_SOURCE_INIT\x10\x03B\xdb\x01\n" +
 	"\x16com.openmanet.comms.v1B\x0eTalkgroupProtoP\x01ZGgithub.com/openmanet/openmanetd/internal/api/openmanet/comms/v1;commsv1\xa2\x02\x03OCX\xaa\x02\x12Openmanet.Comms.V1\xca\x02\x12Openmanet\\Comms\\V1\xe2\x02\x1eOpenmanet\\Comms\\V1\\GPBMetadata\xea\x02\x14Openmanet::Comms::V1b\x06proto3"
 
 var (
@@ -374,20 +750,32 @@ func file_openmanet_comms_v1_talkgroup_proto_rawDescGZIP() []byte {
 	return file_openmanet_comms_v1_talkgroup_proto_rawDescData
 }
 
-var file_openmanet_comms_v1_talkgroup_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_openmanet_comms_v1_talkgroup_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_openmanet_comms_v1_talkgroup_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_openmanet_comms_v1_talkgroup_proto_goTypes = []any{
-	(*TalkGroupState)(nil),              // 0: openmanet.comms.v1.TalkGroupState
-	(*SetSendTalkGroupRequest)(nil),     // 1: openmanet.comms.v1.SetSendTalkGroupRequest
-	(*SetSendTalkGroupResponse)(nil),    // 2: openmanet.comms.v1.SetSendTalkGroupResponse
-	(*SetReceiveTalkGroupRequest)(nil),  // 3: openmanet.comms.v1.SetReceiveTalkGroupRequest
-	(*SetReceiveTalkGroupResponse)(nil), // 4: openmanet.comms.v1.SetReceiveTalkGroupResponse
+	(TalkGroupEventKind)(0),               // 0: openmanet.comms.v1.TalkGroupEventKind
+	(TalkGroupEventSource)(0),             // 1: openmanet.comms.v1.TalkGroupEventSource
+	(*TalkGroupState)(nil),                // 2: openmanet.comms.v1.TalkGroupState
+	(*SetSendTalkGroupRequest)(nil),       // 3: openmanet.comms.v1.SetSendTalkGroupRequest
+	(*SetSendTalkGroupResponse)(nil),      // 4: openmanet.comms.v1.SetSendTalkGroupResponse
+	(*SetReceiveTalkGroupRequest)(nil),    // 5: openmanet.comms.v1.SetReceiveTalkGroupRequest
+	(*SetReceiveTalkGroupResponse)(nil),   // 6: openmanet.comms.v1.SetReceiveTalkGroupResponse
+	(*SelectTalkGroupRequest)(nil),        // 7: openmanet.comms.v1.SelectTalkGroupRequest
+	(*SelectTalkGroupResponse)(nil),       // 8: openmanet.comms.v1.SelectTalkGroupResponse
+	(*TalkGroupEvent)(nil),                // 9: openmanet.comms.v1.TalkGroupEvent
+	(*StreamTalkGroupEventsResponse)(nil), // 10: openmanet.comms.v1.StreamTalkGroupEventsResponse
+	(*timestamppb.Timestamp)(nil),         // 11: google.protobuf.Timestamp
 }
 var file_openmanet_comms_v1_talkgroup_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: openmanet.comms.v1.TalkGroupEvent.kind:type_name -> openmanet.comms.v1.TalkGroupEventKind
+	1,  // 1: openmanet.comms.v1.TalkGroupEvent.source:type_name -> openmanet.comms.v1.TalkGroupEventSource
+	11, // 2: openmanet.comms.v1.TalkGroupEvent.at:type_name -> google.protobuf.Timestamp
+	9,  // 3: openmanet.comms.v1.StreamTalkGroupEventsResponse.event:type_name -> openmanet.comms.v1.TalkGroupEvent
+	4,  // [4:4] is the sub-list for method output_type
+	4,  // [4:4] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_openmanet_comms_v1_talkgroup_proto_init() }
@@ -400,13 +788,14 @@ func file_openmanet_comms_v1_talkgroup_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openmanet_comms_v1_talkgroup_proto_rawDesc), len(file_openmanet_comms_v1_talkgroup_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   5,
+			NumEnums:      2,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_openmanet_comms_v1_talkgroup_proto_goTypes,
 		DependencyIndexes: file_openmanet_comms_v1_talkgroup_proto_depIdxs,
+		EnumInfos:         file_openmanet_comms_v1_talkgroup_proto_enumTypes,
 		MessageInfos:      file_openmanet_comms_v1_talkgroup_proto_msgTypes,
 	}.Build()
 	File_openmanet_comms_v1_talkgroup_proto = out.File

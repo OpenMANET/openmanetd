@@ -13,6 +13,14 @@ type BridgeSnapshot struct {
 	// rx_push_in as a ratio; sustained values above ~1% indicate the
 	// web client is not draining received audio fast enough.
 	RxPushDrop int64 `json:"rx_push_drop"`
+	// RxGatedNoConsumer is the monotonic count of frames the playout
+	// drain discarded without offering to the bridge because no RPC
+	// stream was attached. Rising while consumers is 0 is normal idle
+	// web mode, not loss.
+	RxGatedNoConsumer int64 `json:"rx_gated_no_consumer"`
+	// Consumers is the number of RPC streams currently attached to the
+	// RX side (a gauge, not a monotonic counter).
+	Consumers int32 `json:"consumers"`
 }
 
 // Snapshot copies the current counter values into dst using atomic loads.
@@ -24,4 +32,6 @@ func (b *Bridge) Snapshot(dst *BridgeSnapshot) {
 
 	dst.RxPushIn = b.RxPushIn.Load()
 	dst.RxPushDrop = b.RxPushDrop.Load()
+	dst.RxGatedNoConsumer = b.RxGatedNoConsumer.Load()
+	dst.Consumers = b.consumers.Load()
 }

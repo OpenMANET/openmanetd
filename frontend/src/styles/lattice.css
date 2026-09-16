@@ -31,6 +31,8 @@
   /* Accent + status */
   --accent: #00e5ff;
   --accent-2: #00b8cc;
+  --accent-glow-weak: rgba(0, 229, 255, 0.05);
+  --accent-glow-mid:  rgba(0, 229, 255, 0.08);
   --ok: #00e676;
   --warn: #ffb300;
   --crit: #ff3b4d;
@@ -257,6 +259,40 @@ html, body {
 .lat-toggle.on .thumb { left: 22px; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .lat-toggle.on .label { color: var(--accent); }
 
+/* ------------------------------------------------------------------- seg */
+
+/* Segmented radiogroup: a row of mutually exclusive uppercase mono
+   buttons. Mark the container role="radiogroup" and each button
+   role="radio" + aria-checked; the .active class carries the visual
+   state. Wraps on narrow viewports so three options fit at 360px. */
+.lat-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.lat-seg button {
+  flex: 1 1 96px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 0 12px;
+  min-height: 36px;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.lat-seg button:hover { background: var(--accent-glow-weak); color: var(--text); }
+.lat-seg button.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-glow-mid);
+}
+.lat-seg button:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent); }
+
 /* ------------------------------------------------------------------ check */
 
 /* Compact native checkbox + uppercase mono label, color-shifted for
@@ -432,6 +468,26 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
   resize: vertical;
 }
 
+/* ------------------------------------------------------------------ qr */
+
+/* A QR code must be dark modules on a light ground for phone cameras, so
+   this is the one primitive that inverts the page palette: the ground is
+   --text and the modules (fill="currentColor") are --bg. The padding is
+   the quiet zone on top of the one the SVG already carries. */
+.lat-qr {
+  display: block;
+  width: min(100%, 260px);
+  aspect-ratio: 1;
+  background: var(--text);
+  color: var(--bg);
+  padding: 8px;
+}
+.lat-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .lat-field { display: flex; flex-direction: column; gap: 4px; }
 .lat-field label {
   font-size: 9px;
@@ -473,6 +529,7 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
 .kv .v.warn { color: var(--warn); }
 .kv .v.crit { color: var(--crit); }
 .kv .v.accent { color: var(--accent); }
+.kv .v.muted { color: var(--muted); }
 
 /* ------------------------------------------------------------------ metrics */
 

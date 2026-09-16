@@ -215,3 +215,67 @@ func TestInitAudioIO_FailureLogIncludesALSACard(t *testing.T) {
 	assert.Nil(t, cleanup)
 	assert.Contains(t, buf.String(), `"alsa_card":"1"`)
 }
+
+func TestTryAudioRecovery_InvokesMixerStartupOnSuccess(t *testing.T) {
+	calls := 0
+	cfg := &CommsConfig{
+		Log: zerolog.Nop(),
+		startHardwareAudioFn: func(*CommsRuntime) (func(), error) {
+			return func() {}, nil
+		},
+		AudioMixerStartup: func() { calls++ },
+	}
+
+	rt := &CommsRuntime{}
+	ok := cfg.tryAudioRecovery(rt, 1)
+
+	require.True(t, ok)
+	assert.Equal(t, 1, calls, "successful recovery must re-apply mixer levels (USB replug resets the card)")
+}
+
+func TestTryAudioRecovery_SkipsMixerStartupOnFailure(t *testing.T) {
+	calls := 0
+	cfg := &CommsConfig{
+		Log: zerolog.Nop(),
+		startHardwareAudioFn: func(*CommsRuntime) (func(), error) {
+			return nil, errors.New("no device")
+		},
+		detectALSACardFn:  func() {},
+		AudioMixerStartup: func() { calls++ },
+	}
+
+	rt := &CommsRuntime{}
+	ok := cfg.tryAudioRecovery(rt, 1)
+
+	require.False(t, ok)
+	assert.Equal(t, 0, calls)
+}
+
+func TestApplyMixerStartup_NilSafe(t *testing.T) {
+	cfg := &CommsConfig{Log: zerolog.Nop()}
+	cfg.applyMixerStartup() // must not panic
+}
+
+func TestStartGPIOSelector_SkipsWhenUnsupported(t *testing.T) {
+	svc := newSelectTestService(t, 2)
+	svc.Cfg.GPIOSelectorEnable = true
+	svc.Cfg.gpioSelectorSupportedFn = func() bool { return false }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	svc.Cfg.startGPIOSelector(ctx, svc)
+	assert.Nil(t, svc.Rt.GPIOSel)
+}
+
+func TestStartGPIOSelector_SkipsWhenDisabled(t *testing.T) {
+	svc := newSelectTestService(t, 2)
+	svc.Cfg.GPIOSelectorEnable = false
+	svc.Cfg.gpioSelectorSupportedFn = func() bool { return true }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	svc.Cfg.startGPIOSelector(ctx, svc)
+	assert.Nil(t, svc.Rt.GPIOSel)
+}

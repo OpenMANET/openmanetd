@@ -18,6 +18,7 @@ type UCISystem struct {
 	Hostname       string `uci:"option hostname"`
 	Timezone       string `uci:"option timezone"`
 	DefaultWifiKey string `uci:"option default_wifi_key"`
+	Zonename       string `uci:"option zonename"`
 }
 
 // UCISystemConfigReader wraps go-uci with the same shape as the other
@@ -109,6 +110,10 @@ func GetSystemConfigWithReader(reader ConfigReader) (*UCISystem, error) {
 		cfg.DefaultWifiKey = v[0]
 	}
 
+	if v, ok := reader.Get(systemConfigName, section, "zonename"); ok && len(v) > 0 {
+		cfg.Zonename = v[0]
+	}
+
 	return cfg, nil
 }
 
@@ -157,6 +162,32 @@ func StageSystemHostnameWithReader(hostname string, reader ConfigReader) error {
 
 	if err := reader.SetType(systemConfigName, section, "hostname", uci.TypeOption, hostname); err != nil {
 		return fmt.Errorf("setting %s.%s.hostname: %w", systemConfigName, section, err)
+	}
+
+	return nil
+}
+
+// StageSystemTimezoneWithReader stages zonename (IANA name) and
+// timezone (POSIX TZ string) on the first system section WITHOUT
+// committing — same stage-only discipline as
+// StageSystemHostnameWithReader; phase 12's single Commit() makes
+// the wizard's writes durable atomically.
+func StageSystemTimezoneWithReader(zonename, posixTZ string, reader ConfigReader) error {
+	if zonename == "" || posixTZ == "" {
+		return fmt.Errorf("zonename and posixTZ are required")
+	}
+
+	section, err := firstSystemSection(reader)
+	if err != nil {
+		return err
+	}
+
+	if err := reader.SetType(systemConfigName, section, "zonename", uci.TypeOption, zonename); err != nil {
+		return fmt.Errorf("setting %s.%s.zonename: %w", systemConfigName, section, err)
+	}
+
+	if err := reader.SetType(systemConfigName, section, "timezone", uci.TypeOption, posixTZ); err != nil {
+		return fmt.Errorf("setting %s.%s.timezone: %w", systemConfigName, section, err)
 	}
 
 	return nil

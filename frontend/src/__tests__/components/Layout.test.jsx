@@ -2,14 +2,27 @@
 // Layout.test.jsx — Tests for responsive app shell layout
 // =============================================================================
 
-import { vi, describe, it, expect, afterEach } from 'vitest';
+import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Layout from '../../Layout.jsx';
+import { resumeSetup } from '../../services/setupDismiss.js';
 
 vi.mock('../../contexts/useAuth.js', () => ({
   useAuth: () => ({ logout: vi.fn() }),
 }));
+
+const dismissState = { dismissed: false };
+
+vi.mock('../../services/setupDismiss.js', () => ({
+  isSetupDismissed: () => dismissState.dismissed,
+  resumeSetup: vi.fn(),
+}));
+
+beforeEach(() => {
+  dismissState.dismissed = false;
+  resumeSetup.mockClear();
+});
 
 afterEach(() => {
   cleanup();
@@ -121,6 +134,42 @@ describe('TestLayoutResize', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('TestLayoutSetupDismissBanner', () => {
+  it('renders the banner on desktop when setup is dismissed', () => {
+    dismissState.dismissed = true;
+    const { container } = renderLayout(1024);
+    expect(container.querySelector('.setup-dismiss-banner')).toBeTruthy();
+    expect(screen.getByText(/device not configured/i)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /resume setup/i })).toBeTruthy();
+  });
+
+  it('clicking Resume setup calls resumeSetup', () => {
+    dismissState.dismissed = true;
+    renderLayout(1024);
+    fireEvent.click(screen.getByRole('link', { name: /resume setup/i }));
+    expect(resumeSetup).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the banner on mobile when setup is dismissed', () => {
+    dismissState.dismissed = true;
+    const { container } = renderLayout(500);
+    expect(container.querySelector('.setup-dismiss-banner')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /resume setup/i })).toBeTruthy();
+  });
+
+  it('omits the banner on desktop when setup is not dismissed', () => {
+    dismissState.dismissed = false;
+    const { container } = renderLayout(1024);
+    expect(container.querySelector('.setup-dismiss-banner')).toBeNull();
+  });
+
+  it('omits the banner on mobile when setup is not dismissed', () => {
+    dismissState.dismissed = false;
+    const { container } = renderLayout(500);
+    expect(container.querySelector('.setup-dismiss-banner')).toBeNull();
   });
 });
 

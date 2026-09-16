@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/digineo/go-uci/v2"
 	setupv1 "github.com/openmanet/openmanetd/internal/api/openmanet/setup/v1"
+	wificonfigv1 "github.com/openmanet/openmanetd/internal/api/openmanet/wifi_config/v1"
+	"github.com/openmanet/openmanetd/internal/config"
 	"github.com/openmanet/openmanetd/internal/network"
+	"github.com/openmanet/openmanetd/internal/tzinfo"
+	"golang.org/x/sys/unix"
 )
 
 // runMutationPhases threads phases 3-12 in order, returning the phase
@@ -38,6 +43,10 @@ func (s *SetupService) runMutationPhases(
 
 	if err := s.runHostname(ctx, stream, profile); err != nil {
 		return setupv1.ApplySetupResponse_PHASE_HOSTNAME, err
+	}
+
+	if err := s.runSetTimezone(ctx, stream, profile); err != nil {
+		return setupv1.ApplySetupResponse_PHASE_SET_TIMEZONE, err
 	}
 
 	if err := s.runBaseNetwork(ctx, stream, profile); err != nil {
@@ -104,9 +113,11 @@ func (s *SetupService) runSnapshot(ctx context.Context, stream applySetupStream)
 
 // ── Phase 3: reset wireless ──────────────────────────────────────────────────
 
-// runResetWireless whitelists every wifi-device + wifi-iface to the
-// wizard's standard field set, then disables every wifi-iface. The
-// wizard re-enables only the interfaces it intends to keep.
+// runResetWireless whitelists every wifi-device to the wizard's
+// standard field set, deletes any non-mesh wifi-iface sitting on a
+// type=morse (HaLow) radio, whitelists the surviving wifi-ifaces, then
+// disables every wifi-iface. The wizard re-enables only the interfaces
+// it intends to keep.
 func (s *SetupService) runResetWireless(_ context.Context, stream applySetupStream) error {
 	return s.runPhase(stream, setupv1.ApplySetupResponse_PHASE_RESET_WIRELESS,
 		"resetting wireless config", func() error {
@@ -120,6 +131,20 @@ func (s *SetupService) runResetWireless(_ context.Context, stream applySetupStre
 					network.WizardWifiDeviceWhitelist); werr != nil {
 					return werr
 				}
+			}
+
+			// A HaLow radio only ever carries mesh-mode ifaces. Drop
+			// any AP/STA section an older wizard build (the
+			// meshap_<radio> overlay) or a hand edit left on one before
+			// the mesh phase writes default_<radio> fresh.
+			removed, err := network.RemoveNonMeshIfacesOnMorseDevices(s.UCI)
+			if err != nil {
+				return err
+			}
+
+			if len(removed) > 0 {
+				s.Log.Info().Strs("sections", removed).
+					Msg("Removed non-mesh wifi-iface sections from HaLow radios")
 			}
 
 			ifaces, err := s.UCI.GetSections("wireless", "wifi-iface")
@@ -143,22 +168,13 @@ func (s *SetupService) runResetWireless(_ context.Context, stream applySetupStre
 // runResetNetwork wipes leftover firewall rules, disables existing
 // forwardings, clears mtu_fix/masq from zones, ignores existing dhcp
 // pools, whitelists the surviving dnsmasq instance to the wizard's
-// standard option set, removes bridge + batadv interfaces, and marks address
-// reservation incomplete so the management worker assigns a fresh persistent
-// address after the wizard finishes.
-// Mirrors the LuCI resetUciNetworkTopology() block.
+// standard option set, removes bridge + batadv interfaces, and strips
+// the transport mtu the previous run staged on device sections.
+// Mirrors the LuCI resetUciNetworkTopology() block; the mtu strip is
+// ours (LuCI never writes one).
 func (s *SetupService) runResetNetwork(_ context.Context, stream applySetupStream) error {
 	return s.runPhase(stream, setupv1.ApplySetupResponse_PHASE_RESET_NETWORK,
 		"resetting network topology", func() error {
-			// A prior wizard run has already set this flag to 1. The base
-			// network phase below deliberately assigns a temporary 10.41.254.x
-			// address, so a rerun must request a fresh peer-aware reservation.
-			// Stage the write in the shared wizard tree; phase 12 commits it
-			// atomically with the rest of the configuration.
-			if err := network.StageDHCPUnconfiguredWithReader(s.UCI); err != nil {
-				return fmt.Errorf("clearing address reservation state: %w", err)
-			}
-
 			if err := network.RemoveAllRules(s.UCI); err != nil {
 				return err
 			}
@@ -180,6 +196,10 @@ func (s *SetupService) runResetNetwork(_ context.Context, stream applySetupStrea
 			}
 
 			if err := network.RemoveAllBridgeDevices(s.UCI); err != nil {
+				return err
+			}
+
+			if err := network.UnsetDeviceMTU(s.UCI, s.transportMTUDeviceNames()); err != nil {
 				return err
 			}
 
@@ -300,6 +320,91 @@ func (s *SetupService) runHostname(ctx context.Context, stream applySetupStream,
 		})
 }
 
+// ── Phase: set timezone (enum 16, runs between hostname and base network) ────
+
+const clockDriftThreshold = 10 * time.Second
+
+// runSetTimezone stages system.zonename + the POSIX timezone and
+// best-effort-syncs the device clock from the browser's wall clock.
+// Stage-only: phase 12 commits. Empty timezone keeps the device's
+// current zone (the operator cleared the pre-filled select).
+func (s *SetupService) runSetTimezone(_ context.Context, stream applySetupStream, profile *setupv1.MeshNodeProfile) error {
+	return s.runPhase(stream, setupv1.ApplySetupResponse_PHASE_SET_TIMEZONE,
+		"writing system timezone", func() error {
+			tz := profile.GetTimezone()
+			if tz == "" {
+				return nil
+			}
+
+			posix, ok := tzinfo.PosixTZ(tz)
+			if !ok {
+				// Validate already rejected unknown zones; reaching
+				// here means the table changed mid-flight.
+				return fmt.Errorf("unknown timezone %q", tz)
+			}
+
+			if err := network.StageSystemTimezoneWithReader(tz, posix, s.UCI); err != nil {
+				return err
+			}
+
+			s.syncClock(profile)
+
+			return nil
+		})
+}
+
+// syncClock corrects the device clock from client_time when drift
+// exceeds the threshold. Best-effort: failures log at Warn and never
+// fail the phase — a wrong clock is an annoyance, a failed wizard
+// run is not.
+func (s *SetupService) syncClock(profile *setupv1.MeshNodeProfile) {
+	ct := profile.GetClientTime()
+	if ct == nil {
+		return
+	}
+
+	target := ct.AsTime()
+
+	drift := s.timeNow().Sub(target)
+	if drift < 0 {
+		drift = -drift
+	}
+
+	if drift <= clockDriftThreshold {
+		return
+	}
+
+	if err := s.setTime(target); err != nil {
+		s.Log.Warn().Err(err).Dur("drift", drift).
+			Msg("failed to sync device clock from browser time")
+
+		return
+	}
+
+	s.Log.Info().Dur("drift", drift).Msg("device clock synced from browser time")
+}
+
+func (s *SetupService) setTime(t time.Time) error {
+	if s.SetTimeFn != nil {
+		return s.SetTimeFn(t)
+	}
+
+	tv := unix.NsecToTimeval(t.UnixNano())
+	if err := unix.Settimeofday(&tv); err != nil {
+		return fmt.Errorf("settimeofday: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SetupService) timeNow() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+
+	return time.Now()
+}
+
 // ── Phase 6: base network ifaces ─────────────────────────────────────────────
 
 // runBaseNetwork lays down the network-side L3 + L2 plumbing the
@@ -311,15 +416,22 @@ func (s *SetupService) runHostname(ctx context.Context, stream applySetupStream,
 //     get a randomized ipaddr in the mesh subnet via RandomMeshIP;
 //     mesh-gate scenarios omit ipaddr because openmanetd's gateway
 //     code assigns the address at runtime.
+//   - Registers `umdns.@umdns[0].network` with `lan` and `ahwlan` so
+//     mDNS advertises the device on both interfaces — without this,
+//     the terminal event's promised `https://<hostname>.local` never
+//     resolves even on a correctly-configured device.
 //   - Creates the `config device 'br-ahwlan'` bridge with type=bridge,
 //     a randomly-generated F2:-prefixed MAC, and the scenario's
 //     ethernet-port allocation as ports. The batman-adv phase appends
 //     `bat0` to the port list afterwards.
 //   - For mesh-gate-with-ethernet-router scenarios, flips
-//     `network.lan.proto` to `dhcp` so the upstream router DHCP-
-//     assigns the WAN address.
+//     `network.lan.proto` to `dhcp`, rebinds the resolved uplink port
+//     to `network.lan.device` (phase 4's reset stripped it), and
+//     ensures `network.wan6` exists with `proto=dhcpv6` — so the
+//     upstream router DHCP-assigns the WAN address.
 //   - For mesh-gate-with-ethernet-router_firewall scenarios, ensures
-//     the `network.wan6` interface exists with `proto=dhcpv6`.
+//     `network.wan` and `network.wan6` exist and rebinds the resolved
+//     uplink port to both their `device` options.
 //   - Always sets `network.lan.dns=1.1.1.1` (mirrors LuCI's
 //     setupBatmanInterfaceOnDevice).
 //
@@ -349,6 +461,13 @@ func (s *SetupService) runBaseNetwork(_ context.Context, stream applySetupStream
 				return fmt.Errorf("setupAhwlanInterface: %w", err)
 			}
 
+			const umdnsLanNetwork = "lan"
+
+			if err := network.StageUmdnsNetworksWithReader(s.UCI,
+				[]string{umdnsLanNetwork, "ahwlan"}); err != nil {
+				return fmt.Errorf("stage umdns networks: %w", err)
+			}
+
 			ports := s.ethernetPortsForAhwlan(profile, scenario)
 
 			if _, err := network.CreateBridgeDevice(s.UCI, "br-ahwlan",
@@ -356,47 +475,80 @@ func (s *SetupService) runBaseNetwork(_ context.Context, stream applySetupStream
 				return fmt.Errorf("createBridgeDevice br-ahwlan: %w", err)
 			}
 
+			if err := s.stageTransportMTU(ports); err != nil {
+				return err
+			}
+
 			// network.lan.dns is set unconditionally (LuCI parity).
 			if err := network.SetInterfaceDNSWithReader(s.UCI, "lan", "1.1.1.1"); err != nil {
 				return fmt.Errorf("set lan.dns: %w", err)
 			}
 
-			// Per-scenario interface protocol writes.
-			switch scenario {
-			case scenarioMeshGateRouterEth:
-				if err := network.SetInterfaceProtoWithReader(s.UCI, "lan", "dhcp"); err != nil {
-					return fmt.Errorf("set lan.proto: %w", err)
-				}
-			case scenarioMeshGateRouterFirewallEth:
-				if err := network.EnsureWan6Interface(s.UCI); err != nil {
-					return fmt.Errorf("ensureWan6: %w", err)
-				}
-			case scenarioMeshGateRouterWifiSta:
-				// STA radio uses lan as its backing network so the wifi
-				// uplink driver brings the iface up via DHCP.
-				if err := network.SetInterfaceProtoWithReader(s.UCI, "lan", "dhcp"); err != nil {
-					return fmt.Errorf("set lan.proto for wifi-sta: %w", err)
-				}
-			case scenarioMeshPointExtender, scenarioMeshPointNone, scenarioUnknown:
-				// Mesh-point scenarios leave lan as-is (typically
-				// proto=static from the factory image). The unknown
-				// case shouldn't reach here — classifyScenario already
-				// returned an error.
-			}
-
-			return nil
+			return s.applyScenarioUplinkBinding(scenario, profile)
 		})
+}
+
+// applyScenarioUplinkBinding performs the per-scenario interface
+// protocol and device writes that bind the resolved uplink port
+// (resolveUplinkPort) to whichever interface carries the gate's
+// upstream connection, since phase 4's reset strips `device` from
+// every interface.
+func (s *SetupService) applyScenarioUplinkBinding(scenario scenarioKind, profile *setupv1.MeshNodeProfile) error {
+	switch scenario {
+	case scenarioMeshGateRouterEth:
+		if err := network.SetInterfaceProtoWithReader(s.UCI, "lan", "dhcp"); err != nil {
+			return fmt.Errorf("set lan.proto: %w", err)
+		}
+
+		if err := network.SetInterfaceDeviceWithReader(s.UCI, "lan", s.resolveUplinkPort(profile)); err != nil {
+			return fmt.Errorf("bind uplink to lan: %w", err)
+		}
+
+		if err := network.EnsureWan6Interface(s.UCI); err != nil {
+			return fmt.Errorf("ensureWan6: %w", err)
+		}
+	case scenarioMeshGateRouterFirewallEth:
+		if err := network.EnsureWanInterface(s.UCI); err != nil {
+			return fmt.Errorf("ensureWan: %w", err)
+		}
+
+		if err := network.EnsureWan6Interface(s.UCI); err != nil {
+			return fmt.Errorf("ensureWan6: %w", err)
+		}
+
+		port := s.resolveUplinkPort(profile)
+		if err := network.SetInterfaceDeviceWithReader(s.UCI, "wan", port); err != nil {
+			return fmt.Errorf("bind uplink to wan: %w", err)
+		}
+
+		if err := network.SetInterfaceDeviceWithReader(s.UCI, "wan6", port); err != nil {
+			return fmt.Errorf("bind uplink to wan6: %w", err)
+		}
+	case scenarioMeshGateRouterWifiSta:
+		// STA radio uses lan as its backing network so the wifi
+		// uplink driver brings the iface up via DHCP.
+		if err := network.SetInterfaceProtoWithReader(s.UCI, "lan", "dhcp"); err != nil {
+			return fmt.Errorf("set lan.proto for wifi-sta: %w", err)
+		}
+	case scenarioMeshPointExtender, scenarioMeshPointNone, scenarioUnknown:
+		// Mesh-point scenarios leave lan as-is (typically
+		// proto=static from the factory image). The unknown case
+		// shouldn't reach here — classifyScenario already returned
+		// an error.
+	}
+
+	return nil
 }
 
 // ethernetPortsForAhwlan returns the ethernet port list that should
 // become br-ahwlan's `ports`. Heuristic per scenario:
 //
-//   - Mesh-gate with ethernet router/router_firewall + a chosen uplink
-//     port: every detected ethernet port EXCEPT the chosen uplink. The
-//     uplink stays attached to lan (router) or wan (router_firewall).
-//   - Mesh-gate with ethernet but no chosen port: empty ahwlan ports;
-//     the operator likely wants to use wifi-AP only on the management
-//     side.
+//   - Mesh-gate with ethernet router/router_firewall: every detected
+//     ethernet port EXCEPT the resolved uplink port (see
+//     resolveUplinkPort — the profile's choice, else the first
+//     detected port, else the platform default). The uplink stays
+//     attached to lan (router) or wan (router_firewall); it is always
+//     excluded from br-ahwlan since it is always bound elsewhere.
 //   - Mesh-gate with wifi-sta uplink, mesh-point extender, mesh-point
 //     none: every detected ethernet port goes to ahwlan.
 //
@@ -411,11 +563,7 @@ func (s *SetupService) ethernetPortsForAhwlan(profile *setupv1.MeshNodeProfile, 
 
 	switch scenario {
 	case scenarioMeshGateRouterEth, scenarioMeshGateRouterFirewallEth:
-		uplink := profile.GetUplink().GetEthernetPort()
-
-		if uplink == "" {
-			return all
-		}
+		uplink := s.resolveUplinkPort(profile)
 
 		out := make([]string, 0, len(all))
 
@@ -434,6 +582,68 @@ func (s *SetupService) ethernetPortsForAhwlan(profile *setupv1.MeshNodeProfile, 
 	}
 
 	return all
+}
+
+// stageTransportMTU persists the transport mtu for br-ahwlan and every
+// ethernet port bridged into it: 1500 minus the batman-adv overhead, so
+// wired frames fit through bat0 (the same values the daemon applies to
+// br-ahwlan, eth0 and eth1 through netlink at boot, internal/mgmt
+// setTransportInterfaceMTU). netifd applies `option mtu` on device
+// sections, so the values now survive a network reload instead of
+// waiting for the next daemon start. bat0 derives its mtu from its
+// hardifs and the mesh wlan ifaces are named at runtime, so both stay
+// with the daemon. The uplink port is not mesh transport and is left
+// alone. LuCI writes no mtu at all — this is a deliberate divergence
+// (wizard-parity ledger M3 / P6).
+func (s *SetupService) stageTransportMTU(ethernetPorts []string) error {
+	if _, err := network.SetDeviceMTUWithReader(s.UCI, network.DefaultBridgeInterfaceName, network.DefaultBridgeMTU); err != nil {
+		return fmt.Errorf("stage %s mtu: %w", network.DefaultBridgeInterfaceName, err)
+	}
+
+	for _, port := range ethernetPorts {
+		if _, err := network.SetDeviceMTUWithReader(s.UCI, port, network.DefaultEthernetMTU); err != nil {
+			return fmt.Errorf("stage %s mtu: %w", port, err)
+		}
+	}
+
+	return nil
+}
+
+// transportMTUDeviceNames returns the device names whose `option mtu`
+// the reset phase may strip: br-ahwlan plus every detected ethernet
+// port (falling back to the platform default when none are detected).
+// This is the superset stageTransportMTU could have written across any
+// scenario or uplink choice — the reset uses the full port list, not
+// the uplink-filtered ethernetPortsForAhwlan, so a re-run that changed
+// the uplink still clears the mtu the previous run left on what is now
+// the uplink port. It never names an unrelated device (br-lan, a wan
+// bridge), so UnsetDeviceMTU leaves those alone.
+func (s *SetupService) transportMTUDeviceNames() []string {
+	ports := s.collectEthernetPorts()
+	if len(ports) == 0 {
+		ports = []string{network.DefaultEthernetInterfaceName}
+	}
+
+	names := make([]string, 0, len(ports)+1)
+	names = append(names, network.DefaultBridgeInterfaceName)
+
+	return append(names, ports...)
+}
+
+// resolveUplinkPort returns the ethernet port carrying the gate's
+// upstream connection: the profile's choice when set, else the first
+// detected port (Uplink.ethernet_port proto contract: "Empty falls
+// back to the first ethernet port"), else the platform default.
+func (s *SetupService) resolveUplinkPort(profile *setupv1.MeshNodeProfile) string {
+	if p := profile.GetUplink().GetEthernetPort(); p != "" {
+		return p
+	}
+
+	if all := s.collectEthernetPorts(); len(all) > 0 {
+		return all[0]
+	}
+
+	return network.DefaultEthernetInterfaceName
 }
 
 // rng returns the seeded random source the wizard uses for bridge
@@ -478,6 +688,18 @@ func (s *SetupService) cfgMeshSubnetBaseIP() string {
 }
 
 // ── Phase 7: wireless mesh + device knobs ────────────────────────────────────
+
+// meshEncryption maps the profile enum to the UCI value, defaulting
+// to SAE: 802.11s mesh in this system is always SAE, and skipping
+// the write on UNSPECIFIED would inherit whatever encryption
+// survived the reset phase.
+func meshEncryption(e wificonfigv1.WifiEncryption) string {
+	if v := ProtoToWifiEncryption(e); v != "" {
+		return v
+	}
+
+	return "sae"
+}
 
 // runWirelessMesh writes the morse wifi-device's hardcoded mcast and
 // PS knobs, the user-supplied mesh interface settings (mesh_id, key,
@@ -539,7 +761,7 @@ func (s *SetupService) runWirelessMesh(_ context.Context, stream applySetupStrea
 				{wifiOptionNetwork, "batmesh0"},
 				{"mesh_id", mesh.GetMeshId()},
 				{wifiOptionKey, mesh.GetPassphrase()},
-				{wifiOptionEncryption, ProtoToWifiEncryption(mesh.GetEncryption())},
+				{wifiOptionEncryption, meshEncryption(mesh.GetEncryption())},
 				{"beacon_int", "1000"},
 			}
 
@@ -563,51 +785,13 @@ func (s *SetupService) runWirelessMesh(_ context.Context, stream applySetupStrea
 				return fmt.Errorf("clearing mesh iface disabled: %w", err)
 			}
 
-			// Emit the LuCI mesh-AP overlay section. The wizard does
-			// not surface a UI toggle for this — the iface is
-			// always written with disabled=1 and default ssid/key
-			// so an operator can later enable it from the settings
-			// page without having to create the section by hand.
-			// Mirrors LuCI's renderPages() behavior; see plan
-			// "Per-scenario topology mutations" for the rationale.
-			return s.writeMeshAPOverlay(profile, mesh.GetRadioName())
+			// No AP overlay beside the mesh iface: a type=morse
+			// wifi-device only ever carries mesh-mode ifaces. LuCI
+			// creates a meshap_<radio> section during its wizard and
+			// deletes it at save (removeExtraWifiIfaces); the reset
+			// phase removes any such leftover here instead.
+			return nil
 		})
-}
-
-// writeMeshAPOverlay emits the `meshap_<radio>` wifi-iface section,
-// always disabled, with default SSID = profile hostname and a random
-// 8-char key drawn from LuCI's wizard charset. The section gives
-// operators a one-click "enable a mesh-AP for client devices that
-// can't see the mesh directly" toggle in the settings UI without
-// requiring them to create a section from scratch.
-func (s *SetupService) writeMeshAPOverlay(profile *setupv1.MeshNodeProfile, meshRadio string) error {
-	ifaceName := "meshap_" + meshRadio
-
-	if err := s.UCI.AddSection("wireless", ifaceName, "wifi-iface"); err != nil {
-		s.Log.Debug().Err(err).Str("section", ifaceName).Msg("AddSection meshap (ignored)")
-	}
-
-	writes := []optionWrite{
-		{wifiOptionDevice, meshRadio},
-		{wifiOptionMode, "ap"},
-		{wifiOptionNetwork, wifiNetworkAhwlan},
-		{wifiOptionEncryption, wifiEncryptionSAE},
-		{wifiOptionSSID, profile.GetHostname()},
-		{wifiOptionKey, network.RandomWifiKey(s.rng())},
-		{"disabled", "1"},
-	}
-
-	for _, w := range writes {
-		if w.value == "" {
-			continue
-		}
-
-		if err := s.UCI.SetType("wireless", ifaceName, w.option, uci.TypeOption, w.value); err != nil {
-			return fmt.Errorf("setting meshap iface %s.%s: %w", ifaceName, w.option, err)
-		}
-	}
-
-	return nil
 }
 
 // optionWrite is a small struct used by phase helpers that batch
@@ -661,6 +845,10 @@ func bandwidthToHTMode(mhz uint32) string {
 //     without having to re-create the section.
 //   - The STA iface gets `network=lan` so DHCP from the upstream is
 //     written into the lan subnet (matches LuCI scenario 3d).
+//   - A radio the operator chose as mesh backhaul keeps its AP section
+//     present but disabled (writeAPIface with enabled=false) and gets
+//     the secondary batman-adv link written beside it under
+//     network.MeshLink's section name.
 //
 // Uses raw SetType calls (rather than network.SetWirelessIfaceConfig)
 // so writes stay staged in the in-memory tree until phase 12 commits.
@@ -669,6 +857,14 @@ func (s *SetupService) runPerRadioAPSta(_ context.Context, stream applySetupStre
 		"configuring per-radio AP/STA", func() error {
 			for _, ap := range profile.GetAps() {
 				if err := s.writeAPIface(ap); err != nil {
+					return err
+				}
+
+				if ap.GetMeshBackhaul() == nil {
+					continue
+				}
+
+				if err := s.writeMeshBackhaulIface(ap); err != nil {
 					return err
 				}
 			}
@@ -719,6 +915,12 @@ func (s *SetupService) writeAPIface(ap *setupv1.RadioApProfile) error {
 		// up stale credentials.
 		if err := s.UCI.SetType("wireless", ifaceName, "disabled", uci.TypeOption, "1"); err != nil {
 			return fmt.Errorf("setting AP iface %s.disabled: %w", ifaceName, err)
+		}
+
+		for _, opt := range []string{"ssid", wifiOptionKey, wifiOptionEncryption} {
+			if err := s.UCI.Del("wireless", ifaceName, opt); err != nil {
+				return fmt.Errorf("clearing stale %s on %s: %w", opt, ifaceName, err)
+			}
 		}
 
 		return nil
@@ -786,6 +988,87 @@ func (s *SetupService) writeSTAIface(w *setupv1.WifiStaProfile) error {
 	return nil
 }
 
+// writeMeshBackhaulIface stages the secondary batman-adv mesh link on
+// the radio the operator chose in place of an AP. Section name and
+// option set come from network.MeshLink, so the wizard writes exactly
+// what the daemon's boot-time fallback (mgmt.setupBatMesh1Interface)
+// would — with the operator's own mesh ID and passphrase instead of
+// borrowed HaLow credentials — and the section can never collide with
+// default_<radio>. The link carries the secondary-mesh tuning from
+// network.MeshLink.IfaceConfig. The radio moves to the operator's channel/width/
+// country when the profile carries them, else to the link's fixed
+// defaults (channel 8, HE40, country untouched).
+// Raw SetType calls only; phase 12 commits.
+func (s *SetupService) writeMeshBackhaulIface(ap *setupv1.RadioApProfile) error {
+	link := network.MeshLink{
+		Radio:         ap.GetRadioName(),
+		Network:       network.BatmanSecondaryIface,
+		MeshID:        ap.GetMeshBackhaul().GetMeshId(),
+		Key:           ap.GetMeshBackhaul().GetPassphrase(),
+		RSSIThreshold: network.SecondaryMeshRSSIThreshold,
+	}
+	section := link.Section()
+	cfg := link.IfaceConfig()
+
+	if err := s.UCI.AddSection("wireless", section, "wifi-iface"); err != nil {
+		s.Log.Debug().Err(err).Str("section", section).Msg("AddSection (ignored)")
+	}
+
+	ifaceWrites := []optionWrite{
+		{wifiOptionDevice, cfg.Device},
+		{wifiOptionNetwork, cfg.Network},
+		{wifiOptionMode, cfg.Mode},
+		{wifiOptionMeshID, cfg.MeshID},
+		{wifiOptionKey, cfg.Key},
+		{wifiOptionMeshFwding, cfg.MeshFwding},
+		{wifiOptionMeshRSSI, cfg.MeshRSSIThreshold},
+		{wifiOptionEncryption, cfg.Encryption},
+		{wifiOptionMcastRate, cfg.McastRate},
+		{wifiOptionMeshNolearn, cfg.MeshNolearn},
+		{wifiOptionMeshRetryTimeout, cfg.MeshRetryTimeout},
+		{wifiOptionMeshConfirmTimeout, cfg.MeshConfirmTimeout},
+		{wifiOptionMeshHoldingTimeout, cfg.MeshHoldingTimeout},
+	}
+
+	for _, ow := range ifaceWrites {
+		if err := s.UCI.SetType("wireless", section, ow.option, uci.TypeOption, ow.value); err != nil {
+			return fmt.Errorf("setting mesh backhaul iface %s.%s: %w", section, ow.option, err)
+		}
+	}
+
+	if err := s.UCI.Del("wireless", section, wifiOptionDisabled); err != nil {
+		return fmt.Errorf("clearing mesh backhaul iface %s.disabled: %w", section, err)
+	}
+
+	bh := ap.GetMeshBackhaul()
+
+	channel := network.SecondaryMeshChannel2G
+	if bh.GetChannel() > 0 {
+		channel = strconv.FormatUint(uint64(bh.GetChannel()), 10)
+	}
+
+	radioWrites := []optionWrite{
+		{wifiOptionChannel, channel},
+		{wifiOptionHTMode, network.SecondaryMeshHTMode(bh.GetBandwidthMhz())},
+	}
+
+	if cc := bh.GetCountryCode(); cc != "" {
+		radioWrites = append(radioWrites, optionWrite{"country", cc})
+	}
+
+	for _, ow := range radioWrites {
+		if err := s.UCI.SetType("wireless", link.Radio, ow.option, uci.TypeOption, ow.value); err != nil {
+			return fmt.Errorf("setting mesh backhaul radio %s.%s: %w", link.Radio, ow.option, err)
+		}
+	}
+
+	if err := s.UCI.Del("wireless", link.Radio, wifiOptionDisabled); err != nil {
+		return fmt.Errorf("clearing mesh backhaul radio %s.disabled: %w", link.Radio, err)
+	}
+
+	return nil
+}
+
 // ── Phase 9: scenario topology ───────────────────────────────────────────────
 
 // runScenarioTopology dispatches to one of the five canonical scenario
@@ -832,14 +1115,24 @@ const (
 // section writes. Centralized so goconst is satisfied and so a rename
 // is a single edit.
 const (
-	wifiOptionDevice     = "device"
-	wifiOptionMode       = "mode"
-	wifiOptionNetwork    = "network"
-	wifiOptionKey        = "key"
-	wifiOptionEncryption = "encryption"
-	wifiOptionSSID       = "ssid"
-	wifiEncryptionSAE    = "sae"
-	wifiNetworkAhwlan    = "ahwlan"
+	wifiOptionDevice             = "device"
+	wifiOptionMode               = "mode"
+	wifiOptionNetwork            = "network"
+	wifiOptionKey                = "key"
+	wifiOptionEncryption         = "encryption"
+	wifiOptionSSID               = "ssid"
+	wifiOptionMeshID             = "mesh_id"
+	wifiOptionMeshFwding         = "mesh_fwding"
+	wifiOptionMeshRSSI           = "mesh_rssi_threshold"
+	wifiOptionMcastRate          = "mcast_rate"
+	wifiOptionMeshNolearn        = "mesh_nolearn"
+	wifiOptionMeshRetryTimeout   = "mesh_retry_timeout"
+	wifiOptionMeshConfirmTimeout = "mesh_confirm_timeout"
+	wifiOptionMeshHoldingTimeout = "mesh_holding_timeout"
+	wifiOptionChannel            = "channel"
+	wifiOptionHTMode             = "htmode"
+	wifiOptionDisabled           = "disabled"
+	wifiNetworkAhwlan            = "ahwlan"
 )
 
 // classifyScenario folds (role × device_mode × uplink_type) into one
@@ -903,15 +1196,16 @@ func (s *SetupService) scenarioMeshGateRouter(profile *setupv1.MeshNodeProfile, 
 	// router_firewall scenarios route through wan and add wan6 (created
 	// in phase 6) for IPv6 transit. Without wan6 in the wan zone's
 	// network list, the implicit-REJECT default zone applies and IPv6
-	// packets on wan6 are dropped. Mirrors the LuCI fixture's wan zone
-	// shape.
+	// packets on wan6 are dropped. This is Go-only: LuCI never creates
+	// wan6 (router_firewall is unreachable on its read-only radio), so
+	// no capture pins it — the shape is bench-derived (ledger V5/V12).
 	if upstreamZone == "wan" {
 		if err := network.AppendZoneNetwork(s.UCI, "wan", "wan6"); err != nil {
 			return fmt.Errorf("adding wan6 to wan zone: %w", err)
 		}
 	}
 
-	if _, err := network.GetOrCreateForwarding(s.UCI, "ahwlan", upstreamZone, "mmrouter"); err != nil {
+	if _, err := network.GetOrCreateForwarding(s.UCI, "ahwlan", upstreamZone, "mmrouter", true); err != nil {
 		return fmt.Errorf("creating mmrouter forwarding: %w", err)
 	}
 
@@ -940,12 +1234,14 @@ func (s *SetupService) scenarioMeshGateRouter(profile *setupv1.MeshNodeProfile, 
 }
 
 // scenarioMeshPointExtender sets up a mesh point that bridges the
-// mesh onto its ethernet/AP clients. Forwarding direction matches
-// LuCI's branch 4a (lan → ahwlan, named "mmextender"). Writes:
+// mesh onto its ethernet/AP clients. The capture shows a single
+// ahwlan → lan forwarding, named "mmextender", and no masq on either
+// zone: the extender is not a NAT boundary, it just lets mesh peers
+// reach the extender's local clients. Writes:
 //
 //   - ahwlan firewall zone with mtu_fix=1
 //   - lan firewall zone with mtu_fix=1
-//   - mmextender forwarding lan → ahwlan
+//   - mmextender forwarding ahwlan → lan (no masq on either zone)
 //   - 13 default WAN firewall rules
 //   - DHCP pool + dnsmasq for ahwlan
 //   - network.wizard bookkeeping
@@ -966,7 +1262,7 @@ func (s *SetupService) scenarioMeshPointExtender(profile *setupv1.MeshNodeProfil
 		return fmt.Errorf("setting ahwlan mtu_fix: %w", err)
 	}
 
-	if _, err := network.GetOrCreateForwarding(s.UCI, "lan", "ahwlan", "mmextender"); err != nil {
+	if _, err := network.GetOrCreateForwarding(s.UCI, "ahwlan", "lan", "mmextender", false); err != nil {
 		return fmt.Errorf("creating mmextender forwarding: %w", err)
 	}
 
@@ -1035,64 +1331,40 @@ func (s *SetupService) scenarioMeshPointNone(profile *setupv1.MeshNodeProfile) e
 	return s.writeWizardBookkeeping(profile)
 }
 
-// setupLanDhcpNoUplink creates a DHCP pool + dnsmasq instance bound
-// to the lan interface, with `dhcp_option=['3','6']` set so dnsmasq
-// doesn't advertise itself as a router or DNS server. Used by the
+// setupLanDhcpNoUplink creates a DHCP pool bound to the lan
+// interface, with `dhcp_option=['3','6']` set so dnsmasq doesn't
+// advertise itself as a router or DNS server. Used by the
 // mesh-point-none scenario where the device is downstream of a peer
 // mesh-gate that owns the upstream gateway/DNS.
+//
+// A dedicated per-network dnsmasq section is deliberately NOT
+// created: OpenWrt launches one dnsmasq process per section and the
+// two race for port 53 — the loser exits and takes its bound pool
+// down with it. Both LuCI captures show exactly one dnsmasq and an
+// instance-less pool.
 func (s *SetupService) setupLanDhcpNoUplink() error {
-	const (
-		networkID   = "lan"
-		dnsmasqName = "lan_dns"
-	)
-
-	if err := s.UCI.AddSection("dhcp", dnsmasqName, "dnsmasq"); err != nil {
-		s.Log.Debug().Err(err).Msg("AddSection lan dnsmasq (ignored if exists)")
-	}
-
-	if err := network.SetupDnsmasqInstance(s.UCI, dnsmasqName, networkID); err != nil {
-		return fmt.Errorf("setupDnsmasqInstance lan: %w", err)
-	}
-
-	pool, err := network.GetOrCreateDhcpPool(s.UCI, dnsmasqName, networkID, s.rng())
-	if err != nil {
-		return fmt.Errorf("getOrCreateDhcpPool lan: %w", err)
-	}
+	const networkID = "lan"
 
 	// dhcp_option=['3','6'] suppresses both the default-route option
 	// (3) and the DNS-server option (6), so clients on the LAN don't
 	// try to route their default gateway through this device.
-	if err := s.UCI.SetType("dhcp", pool, "dhcp_option", uci.TypeList, "3", "6"); err != nil {
-		return fmt.Errorf("setting lan dhcp_option: %w", err)
+	extraOptions := map[string][]string{"dhcp_option": {"3", "6"}}
+
+	if _, err := network.GetOrCreateDhcpPool(s.UCI, networkID, extraOptions, s.rng()); err != nil {
+		return fmt.Errorf("getOrCreateDhcpPool lan: %w", err)
 	}
 
 	return nil
 }
 
-// setupAhwlanDhcp creates a DHCP pool + dnsmasq instance bound to
-// the ahwlan interface. Without this, clients on the management
-// network never get an IP and the device is unreachable to anyone
-// not statically configured. The dnsmasq survivor is whitelisted to
-// the wizard's standard option set in the reset phase, then this
-// helper layers the per-network options on top.
+// setupAhwlanDhcp creates the ahwlan DHCP pool on the surviving
+// global dnsmasq instance. A dedicated per-network dnsmasq section
+// is deliberately NOT created: OpenWrt launches one dnsmasq process
+// per section and the two race for port 53 — the loser exits and
+// takes its bound pool down with it. Both LuCI captures show exactly
+// one dnsmasq and an instance-less pool.
 func (s *SetupService) setupAhwlanDhcp() error {
-	const (
-		networkID   = "ahwlan"
-		dnsmasqName = "ahwlan_dns"
-	)
-
-	// Create a per-network dnsmasq instance so the global anonymous
-	// dnsmasq stays as a fallback. This mirrors LuCI's behavior of
-	// creating a named dnsmasq when the wizard provides DHCP.
-	if err := s.UCI.AddSection("dhcp", dnsmasqName, "dnsmasq"); err != nil {
-		s.Log.Debug().Err(err).Msg("AddSection dnsmasq (ignored if exists)")
-	}
-
-	if err := network.SetupDnsmasqInstance(s.UCI, dnsmasqName, networkID); err != nil {
-		return fmt.Errorf("setupDnsmasqInstance: %w", err)
-	}
-
-	if _, err := network.GetOrCreateDhcpPool(s.UCI, dnsmasqName, networkID, s.rng()); err != nil {
+	if _, err := network.GetOrCreateDhcpPool(s.UCI, "ahwlan", nil, s.rng()); err != nil {
 		return fmt.Errorf("getOrCreateDhcpPool: %w", err)
 	}
 
@@ -1100,19 +1372,23 @@ func (s *SetupService) setupAhwlanDhcp() error {
 }
 
 // writeWizardBookkeeping records the user's selections in the
-// `network.wizard` section so the settings UI can show them later.
+// `config wizard 'wizard'` section of /etc/config/network so the
+// settings UI and detectAlreadyConfigured can read them later.
 // Mirrors the LuCI wizard's `network.wizard.{device_mode_meshgate,
-// device_mode_meshpoint, uplink}` writes.
+// device_mode_meshpoint, uplink}` writes. The section type must not
+// be `interface`: netifd instantiates every type=interface section
+// as a network interface, and a proto-less `wizard` interface is
+// noise in ifstatus and logs.
 func (s *SetupService) writeWizardBookkeeping(profile *setupv1.MeshNodeProfile) error {
 	const (
 		networkConfig = "network"
 		wizardSection = "wizard"
+		wizardType    = "wizard"
 	)
 
-	// Ensure the wizard interface section exists. AddSection on an
-	// already-existing named section may error on some readers;
-	// ignore — subsequent SetType calls work either way.
-	_ = s.UCI.AddSection(networkConfig, wizardSection, "interface")
+	// AddSection on an already-existing named section may error on
+	// some readers; ignore — subsequent SetType calls work either way.
+	_ = s.UCI.AddSection(networkConfig, wizardSection, wizardType)
 
 	if mp := ProtoToMeshPointMode(profile.GetMeshpointMode()); mp != "" {
 		if err := s.UCI.SetType(networkConfig, wizardSection, "device_mode_meshpoint",
@@ -1132,6 +1408,120 @@ func (s *SetupService) writeWizardBookkeeping(profile *setupv1.MeshNodeProfile) 
 		if err := s.UCI.SetType(networkConfig, wizardSection, "uplink",
 			uci.TypeOption, u); err != nil {
 			return err
+		}
+	}
+
+	if err := s.writeOpenmanetdFlags(profile); err != nil {
+		return err
+	}
+
+	return s.writeLuciBookkeeping()
+}
+
+// writeOpenmanetdFlags stages the wizard's half of the two-stage
+// addressing design and the batmesh1 handoff in /etc/config/openmanetd:
+//
+//	config openmanet 'config'
+//	    option dhcpconfigured '0'
+//	    option batmesh1configured '0'   (or '1')
+//
+// dhcpconfigured=0 makes AddressReservationWorker claim a mesh-unique
+// address + DHCP window after boot (it acts whenever the value is not
+// "1"). The wizard's ahwlan address is a throwaway 10.41.254.x
+// bootstrap, so the flag must be clear even when a previous run had
+// reserved. batmesh1configured is 1 when the operator chose a mesh
+// backhaul (phase 8 wrote the link; the daemon's fallback must not run)
+// and 0 otherwise so setupBatMesh1Interface may still add one on a
+// free radio.
+//
+// Stage-only on purpose: network.ClearDHCPConfiguredWithReader and
+// friends commit immediately, which would break the phase-12 atomic
+// commit and the snapshot/rollback contract.
+func (s *SetupService) writeOpenmanetdFlags(profile *setupv1.MeshNodeProfile) error {
+	const (
+		openmanetdConfig  = "openmanetd"
+		openmanetdSection = "config"
+		openmanetdType    = "openmanet"
+	)
+
+	// Shipped images carry the section; AddSection on an existing
+	// named section may error on some readers — ignore, SetType
+	// works either way.
+	_ = s.UCI.AddSection(openmanetdConfig, openmanetdSection, openmanetdType)
+
+	batmesh1 := "0"
+	if profileHasMeshBackhaul(profile) {
+		batmesh1 = "1"
+	}
+
+	flags := []optionWrite{
+		{"dhcpconfigured", "0"},
+		{"batmesh1configured", batmesh1},
+	}
+
+	for _, flag := range flags {
+		if err := s.UCI.SetType(openmanetdConfig, openmanetdSection, flag.option, uci.TypeOption, flag.value); err != nil {
+			return fmt.Errorf("stage openmanetd.config.%s: %w", flag.option, err)
+		}
+	}
+
+	return nil
+}
+
+// profileHasMeshBackhaul reports whether any radio in the profile was
+// chosen as the mesh backhaul.
+func profileHasMeshBackhaul(profile *setupv1.MeshNodeProfile) bool {
+	for _, ap := range profile.GetAps() {
+		if ap.GetMeshBackhaul() != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// LuCI bookkeeping the Go wizard mirrors from the LuCI mesh wizard's
+// save() (luci-app-morseconfig tools/morse/wizard.js): mark the wizard
+// used and clear the first-boot landing homepage so LuCI stops
+// steering operators into a flow that rewrites country, channel,
+// timezone and the root password on Apply.
+const (
+	luciConfig               = "luci"
+	luciWizardSection        = "wizard"
+	luciWizardType           = "wizard"
+	luciWizardUsedOption     = "used"
+	luciMainSection          = "main"
+	luciHomepageOption       = "homepage"
+	luciLandingHomepage      = "admin/morse/landing"
+	luciSelectWizardHomepage = "admin/selectwizard"
+)
+
+// writeLuciBookkeeping stages luci.wizard.used=1 and deletes
+// luci.main.homepage when it still points at one of LuCI's wizard
+// pages. Any other homepage is an operator choice and is left alone.
+// Safe on images without /etc/config/luci: go-uci creates the config
+// on AddSection and the snapshotter restores "no file" on rollback.
+//
+// Side effect operators must know: legacyLuciWizardUsed() now also
+// fires after a Go-wizard run, so re-running the wizard requires
+// clearing luci.wizard.used as well as setup.complete —
+// `openmanetd setup-reset` does both.
+func (s *SetupService) writeLuciBookkeeping() error {
+	_ = s.UCI.AddSection(luciConfig, luciWizardSection, luciWizardType)
+
+	if err := s.UCI.SetType(luciConfig, luciWizardSection, luciWizardUsedOption, uci.TypeOption, "1"); err != nil {
+		return fmt.Errorf("stage luci.wizard.used: %w", err)
+	}
+
+	v, ok := s.UCI.Get(luciConfig, luciMainSection, luciHomepageOption)
+	if !ok || len(v) == 0 {
+		return nil
+	}
+
+	switch strings.TrimSpace(v[0]) {
+	case luciLandingHomepage, luciSelectWizardHomepage:
+		if err := s.UCI.Del(luciConfig, luciMainSection, luciHomepageOption); err != nil {
+			return fmt.Errorf("delete luci.main.homepage: %w", err)
 		}
 	}
 
@@ -1163,8 +1553,22 @@ func (s *SetupService) runBatmanAdv(_ context.Context, stream applySetupStream, 
 		"configuring batman-adv", func() error {
 			gwMode := batmanGwModeForRole(profile.GetRole())
 
+			// multicast_mode is derived from the same config flag the
+			// runtime daemon's configureBatmanForcefloodWithDeps reads
+			// (batman.multicastForceflood) through the shared
+			// network.MulticastModeForForceflood mapping. The reset phase
+			// deletes bat0 entirely, so there is no prior value to
+			// preserve — this config read is the only source of truth. A
+			// nil Cfg (unit tests) behaves like the shipped default.
+			forceflood := config.DefaultBatmanMulticastForceflood
+			if s.Cfg != nil {
+				forceflood = s.Cfg.GetBatmanMulticastForceflood()
+			}
+
+			mm := network.MulticastModeForForceflood(forceflood)
+
 			if err := network.SetupBatmanDeviceOnNetwork(s.UCI, gwMode,
-				network.BatmanDeviceName); err != nil {
+				network.BatmanDeviceName, mm); err != nil {
 				return err
 			}
 
@@ -1205,12 +1609,18 @@ func batmanGwModeForRole(role setupv1.MeshRole) string {
 
 // ── Phase 11: mesh11sd announcements ─────────────────────────────────────────
 
-// runMesh11sd writes mesh_fwding=0 (batman-adv handles forwarding)
-// and mesh_gate_announcements per the user's role choice.
+// runMesh11sd writes mesh_fwding=0 and mesh_nolearn=1 (batman-adv
+// handles forwarding and path discovery, so the 802.11s driver must
+// neither forward nor learn paths) and mesh_gate_announcements per the
+// user's role choice.
 func (s *SetupService) runMesh11sd(_ context.Context, stream applySetupStream, profile *setupv1.MeshNodeProfile) error {
 	return s.runPhase(stream, setupv1.ApplySetupResponse_PHASE_MESH11SD,
 		"writing mesh11sd announcements", func() error {
 			if err := network.SetMeshFwding(s.UCI, "0"); err != nil {
+				return err
+			}
+
+			if err := network.SetMeshNolearn(s.UCI, "1"); err != nil {
 				return err
 			}
 

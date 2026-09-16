@@ -290,6 +290,18 @@ func isExpectedPrecondition(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "failed_precondition")
 }
 
+// wsChannel maps the talkgroup carried on a StreamAudioRx frame to the
+// WebSocket channel byte. Zero (a daemon that predates the talkgroup
+// field) and out-of-range values fall back to channel 1 so audio keeps
+// flowing to clients with the default channel enabled.
+func wsChannel(talkgroup int32) byte {
+	if talkgroup < 1 || talkgroup > 255 {
+		return 1
+	}
+
+	return byte(talkgroup)
+}
+
 // receiveAudioRX opens a streaming RPC to receive audio frames from the
 // openmanetd WebCommsService, encodes each frame into the WebSocket binary
 // protocol, and broadcasts them to subscribed clients via the Hub.
@@ -327,11 +339,13 @@ func (b *Bridge) receiveAudioRX(ctx context.Context) error {
 				Msg("audio RX progress")
 		}
 
-		// WebAudioFrame carries OpusData and Sequence. The WS binary
-		// protocol adds channel/SSRC/srcIP which are not in the protobuf;
-		// we use channel 1 and zero SSRC/srcIP as defaults.
+		// The WS binary protocol adds channel/SSRC/srcIP. The channel is
+		// the talkgroup the daemon received the frame on — the hub uses
+		// it to honor per-channel RX toggles and the UI uses it to
+		// attribute RX activity. SSRC/srcIP are not in the protobuf and
+		// remain zero.
 		msg := websocket.AudioRXMessage{
-			Channel:  1,
+			Channel:  wsChannel(frame.Talkgroup),
 			Seq:      uint16(frame.Sequence),
 			OpusData: frame.OpusData,
 		}

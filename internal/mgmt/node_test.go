@@ -170,7 +170,10 @@ CREATE TABLE IF NOT EXISTS mesh_nodes (
   updated_at     timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`
 
-func newNodeTestDB(t *testing.T) *models.Queries {
+// newNodeTestDBConn opens an in-memory SQLite database with the mesh_nodes
+// schema and returns both the raw connection (for seeding rows with
+// explicit timestamps) and the sqlc queries.
+func newNodeTestDBConn(t *testing.T) (*sql.DB, *models.Queries) {
 	t.Helper()
 
 	db, err := sql.Open("sqlite3", ":memory:")
@@ -184,7 +187,29 @@ func newNodeTestDB(t *testing.T) *models.Queries {
 		t.Fatalf("apply schema: %v", err)
 	}
 
-	return models.New(db)
+	return db, models.New(db)
+}
+
+func newNodeTestDB(t *testing.T) *models.Queries {
+	t.Helper()
+
+	_, q := newNodeTestDBConn(t)
+
+	return q
+}
+
+// seedNodeUpdatedAgo inserts a peer row whose updated_at is `ago` relative
+// to SQLite's clock, e.g. "-25 hours", in the same UTC text format
+// CURRENT_TIMESTAMP writes in production.
+func seedNodeUpdatedAgo(t *testing.T, db *sql.DB, mac, ip, ago string) {
+	t.Helper()
+
+	_, err := db.ExecContext(context.Background(),
+		`INSERT INTO mesh_nodes (mac_addr, hostname, ip_addr, uci_dhcp_start, uci_dhcp_limit, created_at, updated_at)
+		 VALUES (?, ?, ?, 100, 16, datetime('now', ?), datetime('now', ?))`,
+		mac, "peer-"+mac, ip, ago, ago,
+	)
+	require.NoError(t, err)
 }
 
 func TestRecordNodeData(t *testing.T) {
@@ -566,4 +591,84 @@ func TestReceiveNodeDataOnce_EmptyRecords(t *testing.T) {
 
 	err := ndw.receiveNodeDataOnce(client, func() (string, error) { return "host", nil })
 	require.NoError(t, err)
+}
+
+// ── expiry (ledger P5 step 4, D4) ────────────────────────────────────────────
+
+func TestReceiveNodeData_ExpiresStaleRows(t *testing.T) {
+	cfg := newTestManagementConfig()
+	cfg.NodeExpiry = 24 * time.Hour
+
+	db, q := newNodeTestDBConn(t)
+	cfg.DB = q
+
+	seedNodeUpdatedAgo(t, db, "aa:bb:cc:dd:ee:01", "10.41.0.1", "-25 hours")
+	seedNodeUpdatedAgo(t, db, "aa:bb:cc:dd:ee:02", "10.41.0.2", "-1 hours")
+
+	err := cfg.receiveNodeData(context.Background(), &fakeAlfredClient{}, func() (string, error) { return "my-host", nil })
+	require.NoError(t, err)
+
+	nodes, err := q.ListMeshNodes(context.Background())
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "aa:bb:cc:dd:ee:02", nodes[0].MacAddr, "the silent 25 h-old peer is dropped, the 1 h-old one kept")
+}
+
+func TestReceiveNodeData_HeardPeerSurvivesSweep(t *testing.T) {
+	cfg := newTestManagementConfig()
+	cfg.NodeExpiry = 24 * time.Hour
+
+	db, q := newNodeTestDBConn(t)
+	cfg.DB = q
+
+	seedNodeUpdatedAgo(t, db, "aa:bb:cc:dd:ee:01", "10.41.0.1", "-25 hours")
+
+	heard := &proto.Node{Mac: "aa:bb:cc:dd:ee:01", Hostname: "peer", Ipaddr: "10.41.0.1"}
+	data, err := heard.MarshalVT()
+	require.NoError(t, err)
+
+	client := &fakeAlfredClient{records: []alfred.Record{{Data: data}}}
+
+	err = cfg.receiveNodeData(context.Background(), client, func() (string, error) { return "my-host", nil })
+	require.NoError(t, err)
+
+	node, err := q.GetMeshNode(context.Background(), "aa:bb:cc:dd:ee:01")
+	require.NoError(t, err, "a peer heard this tick is refreshed before the sweep and survives")
+	assert.Equal(t, "10.41.0.1", node.IpAddr)
+}
+
+func TestReceiveNodeData_ExpiryDisabled(t *testing.T) {
+	cfg := newTestManagementConfig()
+	cfg.NodeExpiry = 0
+
+	db, q := newNodeTestDBConn(t)
+	cfg.DB = q
+
+	seedNodeUpdatedAgo(t, db, "aa:bb:cc:dd:ee:01", "10.41.0.1", "-400 days")
+
+	err := cfg.receiveNodeData(context.Background(), &fakeAlfredClient{}, func() (string, error) { return "my-host", nil })
+	require.NoError(t, err)
+
+	nodes, err := q.ListMeshNodes(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, nodes, 1, "nodeExpiry 0 keeps rows forever, as before P5")
+}
+
+func TestReceiveNodeData_RequestErrorSkipsExpiry(t *testing.T) {
+	cfg := newTestManagementConfig()
+	cfg.NodeExpiry = 24 * time.Hour
+
+	db, q := newNodeTestDBConn(t)
+	cfg.DB = q
+
+	seedNodeUpdatedAgo(t, db, "aa:bb:cc:dd:ee:01", "10.41.0.1", "-25 hours")
+
+	client := &fakeAlfredClient{requestErr: assert.AnError}
+
+	err := cfg.receiveNodeData(context.Background(), client, func() (string, error) { return "my-host", nil })
+	require.Error(t, err)
+
+	nodes, listErr := q.ListMeshNodes(context.Background())
+	require.NoError(t, listErr)
+	assert.Len(t, nodes, 1, "a failed Alfred Request must skip the sweep so no peer is expired during an outage")
 }

@@ -3,7 +3,7 @@ package comms
 import (
 	"context"
 	"errors"
-	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -292,7 +292,7 @@ func TestReceiveLoop_SkipsDeliveryWhenReceiveDisabled(t *testing.T) {
 
 	// Pre-load one valid RTP packet.
 	raw := makeRTPBytes(t, 0)
-	src := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 5004}
+	src := netip.MustParseAddrPort("1.2.3.4:5004")
 	reader := newMockReader(
 		mockPacket{data: raw, src: src},
 	)
@@ -305,9 +305,9 @@ func TestReceiveLoop_SkipsDeliveryWhenReceiveDisabled(t *testing.T) {
 	pc.ReceiveEnabled.Store(false) // ← disabled
 	pc.PlaybackBuffer = make(chan []int16, 8)
 
+	pc.Decoder = &mockDecoder{returnN: int(rtp.FrameSamples)}
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -370,9 +370,11 @@ func TestDrainPlaybackBuffer_MultiPort(t *testing.T) {
 	}
 }
 
-// TestBeginTransmission_BeepSentToAllPorts verifies that beginTransmission
-// queues the start-beep to every configured port's playback buffer.
-func TestBeginTransmission_BeepSentToAllPorts(t *testing.T) {
+// TestBeginTransmission_BeepSentToOnePort verifies the single-beep
+// contract: beginTransmission queues the start-beep to exactly one port —
+// the pre-P4 fan-out played N overlapping copies of the tone through dmix
+// into the same physical output device.
+func TestBeginTransmission_BeepSentToOnePort(t *testing.T) {
 	pc0 := &PortChannel{cfg: McastPortConfig{Send: true, Receive: true}}
 	pc0.SendEnabled.Store(true)
 	pc0.ReceiveEnabled.Store(true)
@@ -387,19 +389,18 @@ func TestBeginTransmission_BeepSentToAllPorts(t *testing.T) {
 		Ports:           []*PortChannel{pc0, pc1},
 		BeepBufferStart: []int16{100, 200},
 		BeepBufferStop:  []int16{300, 400},
-		Decoder:         &mockDecoder{},
 	}
 	rt.SetBroadcast(&mockStream{})
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
 	cfg.beginTransmission(rt)
 
-	if len(pc0.PlaybackBuffer) == 0 {
-		t.Error("port 0: expected start beep in playback buffer")
+	if len(pc0.PlaybackBuffer) != 1 {
+		t.Errorf("port 0: beeps queued = %d, want 1", len(pc0.PlaybackBuffer))
 	}
 
-	if len(pc1.PlaybackBuffer) == 0 {
-		t.Error("port 1: expected start beep in playback buffer")
+	if len(pc1.PlaybackBuffer) != 0 {
+		t.Errorf("port 1: beeps queued = %d, want 0 (single-beep contract)", len(pc1.PlaybackBuffer))
 	}
 }
 
@@ -434,13 +435,13 @@ func TestPlayoutOneFrame_ReceiveOnlyPortNotSuppressedDuringBroadcast(t *testing.
 	pc.SendEnabled.Store(false)
 	pc.ReceiveEnabled.Store(true)
 
+	pc.Decoder = &mockDecoder{fillValue: 42, returnN: audiopool.FrameSize}
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{fillValue: 42, returnN: audiopool.FrameSize},
+		Ports: []*PortChannel{pc},
 	}
 	rt.Broadcasting.Store(true) // simulate active broadcast on another port
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA, 0xBB}) // prebuffer=1: immediately ready
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}

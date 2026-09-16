@@ -2,14 +2,14 @@
 // @generated from file openmanet/service/v1/mesh.proto (package openmanet.service.v1, syntax proto3)
 /* eslint-disable */
 
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc, tsEnum } from "@bufbuild/protobuf/codegenv2";
 import { file_google_protobuf_empty } from "@bufbuild/protobuf/wkt";
 
 /**
  * Describes the file openmanet/service/v1/mesh.proto.
  */
 export const file_openmanet_service_v1_mesh = /*@__PURE__*/
-  fileDesc("Ch9vcGVubWFuZXQvc2VydmljZS92MS9tZXNoLnByb3RvEhRvcGVubWFuZXQuc2VydmljZS52MSKKAQoMTWVzaE5laWdoYm9yEhAKCG5laWdoYm9yGAEgASgJEhcKD3NpZ25hbF9zdHJlbmd0aBgCIAEoBRIYChBoYXJkd2FyZV9hZGRyZXNzGAMgASgJEg4KBnNpZ25hbBgEIAEoBRIRCglsYXN0X3NlZW4YBSABKAMSEgoKdGhyb3VnaHB1dBgGIAEoBSJSChlMaXN0TWVzaE5laWdoYm9yc1Jlc3BvbnNlEjUKCW5laWdoYm9ycxgBIAMoCzIiLm9wZW5tYW5ldC5zZXJ2aWNlLnYxLk1lc2hOZWlnaGJvcjJzChNNZXNoTmVpZ2hib3JTZXJ2aWNlElwKEUxpc3RNZXNoTmVpZ2hib3JzEhYuZ29vZ2xlLnByb3RvYnVmLkVtcHR5Gi8ub3Blbm1hbmV0LnNlcnZpY2UudjEuTGlzdE1lc2hOZWlnaGJvcnNSZXNwb25zZULkAQoYY29tLm9wZW5tYW5ldC5zZXJ2aWNlLnYxQglNZXNoUHJvdG9QAVpLZ2l0aHViLmNvbS9vcGVubWFuZXQvb3Blbm1hbmV0ZC9pbnRlcm5hbC9hcGkvb3Blbm1hbmV0L3NlcnZpY2UvdjE7c2VydmljZXYxogIDT1NYqgIUT3Blbm1hbmV0LlNlcnZpY2UuVjHKAhRPcGVubWFuZXRcU2VydmljZVxWMeICIE9wZW5tYW5ldFxTZXJ2aWNlXFYxXEdQQk1ldGFkYXRh6gIWT3Blbm1hbmV0OjpTZXJ2aWNlOjpWMWIGcHJvdG8z", [file_google_protobuf_empty]);
+  fileDesc("Ch9vcGVubWFuZXQvc2VydmljZS92MS9tZXNoLnByb3RvEhRvcGVubWFuZXQuc2VydmljZS52MSL1AQoMTWVzaE5laWdoYm9yEhAKCG5laWdoYm9yGAEgASgJEhcKD3NpZ25hbF9zdHJlbmd0aBgCIAEoBRIYChBoYXJkd2FyZV9hZGRyZXNzGAMgASgJEg4KBnNpZ25hbBgEIAEoBRIRCglsYXN0X3NlZW4YBSABKAMSEgoKdGhyb3VnaHB1dBgGIAEoBRIqCgJ0eBgHIAEoCzIeLm9wZW5tYW5ldC5zZXJ2aWNlLnYxLkxpbmtSYXRlEioKAnJ4GAggASgLMh4ub3Blbm1hbmV0LnNlcnZpY2UudjEuTGlua1JhdGUSEQoJaW50ZXJmYWNlGAkgASgJItwBCghMaW5rUmF0ZRIUCgxiaXRyYXRlX2ticHMYASABKAUSLwoDcGh5GAIgASgOMiIub3Blbm1hbmV0LnNlcnZpY2UudjEuTGlua1JhdGUuUGh5EhEKCXdpZHRoX21oehgDIAEoBRILCgNtY3MYBCABKAUSCwoDbnNzGAUgASgFIlwKA1BoeRITCg9QSFlfVU5TUEVDSUZJRUQQABIOCgpQSFlfTEVHQUNZEAESCgoGUEhZX0hUEAISCwoHUEhZX1ZIVBADEgoKBlBIWV9IRRAEEgsKB1BIWV9FSFQQBSJSChlMaXN0TWVzaE5laWdoYm9yc1Jlc3BvbnNlEjUKCW5laWdoYm9ycxgBIAMoCzIiLm9wZW5tYW5ldC5zZXJ2aWNlLnYxLk1lc2hOZWlnaGJvcjJzChNNZXNoTmVpZ2hib3JTZXJ2aWNlElwKEUxpc3RNZXNoTmVpZ2hib3JzEhYuZ29vZ2xlLnByb3RvYnVmLkVtcHR5Gi8ub3Blbm1hbmV0LnNlcnZpY2UudjEuTGlzdE1lc2hOZWlnaGJvcnNSZXNwb25zZULkAQoYY29tLm9wZW5tYW5ldC5zZXJ2aWNlLnYxQglNZXNoUHJvdG9QAVpLZ2l0aHViLmNvbS9vcGVubWFuZXQvb3Blbm1hbmV0ZC9pbnRlcm5hbC9hcGkvb3Blbm1hbmV0L3NlcnZpY2UvdjE7c2VydmljZXYxogIDT1NYqgIUT3Blbm1hbmV0LlNlcnZpY2UuVjHKAhRPcGVubWFuZXRcU2VydmljZVxWMeICIE9wZW5tYW5ldFxTZXJ2aWNlXFYxXEdQQk1ldGFkYXRh6gIWT3Blbm1hbmV0OjpTZXJ2aWNlOjpWMWIGcHJvdG8z", [file_google_protobuf_empty]);
 
 /**
  * Describes the message openmanet.service.v1.MeshNeighbor.
@@ -19,11 +19,32 @@ export const MeshNeighborSchema = /*@__PURE__*/
   messageDesc(file_openmanet_service_v1_mesh, 0);
 
 /**
+ * Describes the message openmanet.service.v1.LinkRate.
+ * Use `create(LinkRateSchema)` to create a new message.
+ */
+export const LinkRateSchema = /*@__PURE__*/
+  messageDesc(file_openmanet_service_v1_mesh, 1);
+
+/**
+ * Describes the enum openmanet.service.v1.LinkRate.Phy.
+ */
+export const LinkRate_PhySchema = /*@__PURE__*/
+  enumDesc(file_openmanet_service_v1_mesh, 1, 0);
+
+/**
+ * Phy is the modulation family the rate was negotiated with.
+ *
+ * @generated from enum openmanet.service.v1.LinkRate.Phy
+ */
+export const LinkRate_Phy = /*@__PURE__*/
+  tsEnum(LinkRate_PhySchema);
+
+/**
  * Describes the message openmanet.service.v1.ListMeshNeighborsResponse.
  * Use `create(ListMeshNeighborsResponseSchema)` to create a new message.
  */
 export const ListMeshNeighborsResponseSchema = /*@__PURE__*/
-  messageDesc(file_openmanet_service_v1_mesh, 1);
+  messageDesc(file_openmanet_service_v1_mesh, 2);
 
 /**
  * MeshNeighborService provides methods to retrieve mesh neighbor information.

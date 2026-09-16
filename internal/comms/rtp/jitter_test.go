@@ -34,8 +34,82 @@ func TestSeqLess_WrapAround(t *testing.T) {
 	}
 }
 
+func TestJitterBuffer_PushOversizedPayload(t *testing.T) {
+	jb := NewJitterBuffer(1, MaxDepth)
+
+	// receiveLoop reads into a 1500-byte buffer, so a hostile or malformed
+	// sender can deliver an RTP payload larger than the pool's
+	// MaxOpusPayloadSize capacity. Push must reject it, not panic.
+	oversized := make([]byte, MaxOpusPayloadSize+125)
+	if ok := jb.Push(0, oversized); ok {
+		t.Fatal("oversized payload must be rejected")
+	}
+
+	// The buffer must remain fully usable afterwards.
+	if ok := jb.Push(1, []byte{42}); !ok {
+		t.Fatal("push after oversized rejection must succeed")
+	}
+
+	payload, ready, _ := jb.PopReady()
+	if !ready || payload[0] != 42 {
+		t.Fatalf("expected seq=1 payload after rejection, got ready=%v payload=%v", ready, payload)
+	}
+}
+
+func TestJitterBuffer_SeqWrapContinuity(t *testing.T) {
+	jb := NewJitterBuffer(1, MaxDepth)
+
+	// A window of 24 in-flight frames straddling the uint16 sequence wrap.
+	// The seq→slot mapping must be continuous across the wrap: if maxDepth
+	// does not divide 65536, in-window frames collide and evict each other,
+	// surfacing as periodic PLC gaps roughly every 22 minutes of talk.
+	seqs := make([]uint16, 0, 24)
+	for i := range 24 {
+		seqs = append(seqs, uint16(65524+i)) // 65524..65535, then 0..11
+	}
+
+	for _, s := range seqs {
+		if !jb.Push(s, []byte{byte(s)}) {
+			t.Fatalf("push seq=%d must succeed", s)
+		}
+	}
+
+	for _, s := range seqs {
+		payload, ready, skipped := jb.PopReady()
+		if !ready {
+			t.Fatalf("seq=%d: expected in-order pop, got ready=false skipped=%v", s, skipped)
+		}
+
+		if payload[0] != byte(s) {
+			t.Fatalf("seq=%d: wrong payload byte %d", s, payload[0])
+		}
+
+		jb.ReleasePayload(payload)
+	}
+}
+
+func TestNewJitterBuffer_RejectsNonPowerOfTwoDepth(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for non-power-of-two depth")
+		}
+	}()
+
+	NewJitterBuffer(1, 10)
+}
+
+func TestNewJitterBuffer_RejectsDepthBeyondSlots(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for depth larger than the slot array")
+		}
+	}()
+
+	NewJitterBuffer(1, MaxDepth*2)
+}
+
 func TestJitterBuffer_InOrderDelivery(t *testing.T) {
-	jb := NewJitterBuffer(1, 10) // prebuffer=1 so first push triggers start
+	jb := NewJitterBuffer(1, 16) // prebuffer=1 so first push triggers start
 
 	jb.Push(10, []byte{1, 2, 3})
 
@@ -54,7 +128,7 @@ func TestJitterBuffer_InOrderDelivery(t *testing.T) {
 }
 
 func TestJitterBuffer_Prebuffer(t *testing.T) {
-	jb := NewJitterBuffer(3, 10)
+	jb := NewJitterBuffer(3, 16)
 
 	// Push only 2 packets — not enough to start.
 	jb.Push(0, []byte{0})
@@ -75,7 +149,7 @@ func TestJitterBuffer_Prebuffer(t *testing.T) {
 }
 
 func TestJitterBuffer_StalePacketRejected(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	jb.Push(5, []byte{5})
 
@@ -87,7 +161,7 @@ func TestJitterBuffer_StalePacketRejected(t *testing.T) {
 }
 
 func TestJitterBuffer_DuplicateRejected(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	if !jb.Push(10, []byte{10}) {
 		t.Fatal("first push should succeed")
@@ -100,7 +174,7 @@ func TestJitterBuffer_DuplicateRejected(t *testing.T) {
 
 func TestJitterBuffer_OutOfOrderDelivery(t *testing.T) {
 	// prebuffer=1 so a single push satisfies the threshold.
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	// Push seq=0 first — this sets expected=0 and satisfies the prebuffer.
 	jb.Push(0, []byte{0})
@@ -164,7 +238,7 @@ func TestJitterBuffer_SkipMissingWhenOverflow(t *testing.T) {
 }
 
 func TestJitterBuffer_ShouldConceal(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	// Not started yet — should NOT conceal.
 	if jb.ShouldConceal(100 * time.Millisecond) {
@@ -181,7 +255,7 @@ func TestJitterBuffer_ShouldConceal(t *testing.T) {
 }
 
 func TestJitterBuffer_AdvancePast(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	jb.Push(0, []byte{0})
 	jb.PopReady() // expected=1 now
@@ -202,7 +276,7 @@ func TestJitterBuffer_AdvancePast(t *testing.T) {
 }
 
 func TestJitterBuffer_WrapAroundSequence(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	// Start just below wrap point.
 	jb.Push(0xFFFE, []byte{0xFE})
@@ -226,7 +300,7 @@ func TestJitterBuffer_WrapAroundSequence(t *testing.T) {
 // ─── popOrConceal tests ──────────────────────────────────────────────────────
 
 func TestPopOrConceal_ReturnsReadyFrame(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA})
 
 	payload, conceal := jb.PopOrConceal(100 * time.Millisecond)
@@ -259,7 +333,7 @@ func TestPopOrConceal_ConcealOnSkippedGap(t *testing.T) {
 }
 
 func TestPopOrConceal_ConcealOnEmptyActiveStream(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	jb.Push(0, []byte{0})
 	jb.PopOrConceal(100 * time.Millisecond) // started=true, lastPush ~now
@@ -276,7 +350,7 @@ func TestPopOrConceal_ConcealOnEmptyActiveStream(t *testing.T) {
 }
 
 func TestPopOrConceal_NoConcealWhenStale(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	jb.Push(0, []byte{0})
 	jb.PopOrConceal(100 * time.Millisecond)
@@ -297,7 +371,7 @@ func TestPopOrConceal_NoConcealWhenStale(t *testing.T) {
 }
 
 func TestPopOrConceal_NoConcealBeforeStart(t *testing.T) {
-	jb := NewJitterBuffer(3, 10)
+	jb := NewJitterBuffer(3, 16)
 
 	// Only push 1 packet, need 3 for prebuffer.
 	jb.Push(0, []byte{0})
@@ -311,7 +385,7 @@ func TestPopOrConceal_NoConcealBeforeStart(t *testing.T) {
 // ─── Ring buffer integrity tests ─────────────────────────────────────────────
 
 func TestJitterBuffer_PushCopiesPayload(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	input := []byte{1, 2, 3}
 	jb.Push(0, input)
@@ -386,7 +460,7 @@ func TestJitterBuffer_FullBufferRejectsNewSequence(t *testing.T) {
 // TestJitterBuffer_Reset_ClearsState verifies that reset() zeros all internal
 // state so the jitter buffer behaves as if freshly constructed.
 func TestJitterBuffer_Reset_ClearsState(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	// Advance to started state.
 	jb.Push(0, []byte{0})
@@ -432,7 +506,7 @@ func TestJitterBuffer_Reset_ClearsState(t *testing.T) {
 // in the "past half" of the previous talker's frozen cursor must NOT be
 // rejected. The jitter buffer must detect the SSRC change and reset.
 func TestJitterBuffer_SSRCChangeResets(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	const (
 		ssrcA = uint32(0x11111111)
@@ -493,7 +567,7 @@ func TestJitterBuffer_SSRCChangeResets(t *testing.T) {
 // TestJitterBuffer_SSRCChange_NoCallbackOnSameSSRC verifies that a stream of
 // packets all sharing the same SSRC never triggers the SSRC-change path.
 func TestJitterBuffer_SSRCChange_NoCallbackOnSameSSRC(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	called := false
 	cb := func(_, _ uint32) { called = true }
@@ -516,7 +590,7 @@ func TestJitterBuffer_SSRCChange_NoCallbackOnSameSSRC(t *testing.T) {
 // must still be dropped (otherwise we'd accept duplicates and out-of-window
 // reorderings as fresh streams).
 func TestJitterBuffer_SameSSRCStalePacketStillDropped(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	jb.PushWithSSRC(1, 100, []byte{100}, nil)
 	jb.PopReady() // expected = 101
@@ -531,7 +605,7 @@ func TestJitterBuffer_SameSSRCStalePacketStillDropped(t *testing.T) {
 // the start of a fresh stream, even with the same SSRC.
 func TestJitterBuffer_IdleTimeoutResets(t *testing.T) {
 	fakeNow := time.Unix(0, 0)
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 	jb.now = func() time.Time { return fakeNow }
 
 	// First push at t=0, drain it.
@@ -564,7 +638,7 @@ func TestJitterBuffer_IdleTimeoutResets(t *testing.T) {
 // within the idle window do not trigger a reset.
 func TestJitterBuffer_IdleTimeout_NoResetWithinWindow(t *testing.T) {
 	fakeNow := time.Unix(0, 0)
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 	jb.now = func() time.Time { return fakeNow }
 
 	jb.PushWithSSRC(1, 1000, []byte{0xAA}, nil)
@@ -586,7 +660,7 @@ func TestJitterBuffer_IdleTimeout_NoResetWithinWindow(t *testing.T) {
 // TestJitterBuffer_Reset_PrebufferRestartsAfterReset verifies that after reset
 // the prebuffer threshold must be satisfied again before popReady returns frames.
 func TestJitterBuffer_Reset_PrebufferRestartsAfterReset(t *testing.T) {
-	jb := NewJitterBuffer(3, 10) // need 3 pushes before started
+	jb := NewJitterBuffer(3, 16) // need 3 pushes before started
 
 	// Satisfy prebuffer and advance to started.
 	for i := uint16(0); i < 3; i++ {
@@ -622,7 +696,7 @@ func TestJitterBuffer_Reset_PrebufferRestartsAfterReset(t *testing.T) {
 // installed by EnableNotify: a successful push must wake any consumer that
 // has parked on the channel within a single signal interval.
 func TestJitterBuffer_NotifyOnPush(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	notify := jb.EnableNotify()
 
@@ -648,7 +722,7 @@ func TestJitterBuffer_NotifyOnPush(t *testing.T) {
 // signals into one, and the consumer is responsible for draining all
 // available frames per wake.
 func TestJitterBuffer_NotifyCoalescesBurst(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	notify := jb.EnableNotify()
 
@@ -682,7 +756,7 @@ func TestJitterBuffer_NotifyCoalescesBurst(t *testing.T) {
 // never call EnableNotify pay no signaling cost: pushes succeed silently and
 // no goroutine ever wakes from a notify channel.
 func TestJitterBuffer_NotifyDisabledByDefault(t *testing.T) {
-	jb := NewJitterBuffer(1, 10)
+	jb := NewJitterBuffer(1, 16)
 
 	if jb.notifyCh != nil {
 		t.Fatal("notifyCh should be nil before EnableNotify is called")
@@ -702,7 +776,7 @@ func TestJitterBuffer_NotifyDisabledByDefault(t *testing.T) {
 // event, not once per skipped frame, and that a successful pop
 // terminates a run so the next gap is counted independently.
 func TestJitterBuffer_GapHistogram(t *testing.T) {
-	maxDepth := 24
+	maxDepth := 32
 	jb := NewJitterBuffer(1, maxDepth)
 
 	// Initialize expected=0, prebuffer satisfied.
@@ -713,17 +787,16 @@ func TestJitterBuffer_GapHistogram(t *testing.T) {
 	}
 	// expected is now 1.
 
-	// Craft a single 3-frame gap at 1..3, with 4..13 present (10 frames,
-	// ≥ maxDepth/2 = 12... not quite. Push enough to trip the skip.)
-	// We need jb.count >= 12 to enter the skip branch. Push seqs
-	// 4..15 (12 packets) leaving 1..3 missing.
-	for s := uint16(4); s <= 15; s++ {
+	// Craft a single 3-frame gap at 1..3. We need jb.count >= maxDepth/2 = 16
+	// to enter the skip branch. Push seqs 4..19 (16 packets) leaving 1..3
+	// missing.
+	for s := uint16(4); s <= 19; s++ {
 		if !jb.Push(s, []byte{byte(s)}) {
 			t.Fatalf("push seq=%d must succeed", s)
 		}
 	}
 
-	// First PopReady: expected=1, slot empty, count=12 ≥ 12 → skip.
+	// First PopReady: expected=1, slot empty, count=16 ≥ 16 → skip.
 	// measureGapRunLocked should return 3 (seqs 1,2,3 missing before 4).
 	if _, _, skipped := jb.PopReady(); !skipped {
 		t.Fatal("expected skipped=true at head of gap")
@@ -755,8 +828,8 @@ func TestJitterBuffer_GapHistogram(t *testing.T) {
 		t.Fatal("expected ready=true at seq=4")
 	}
 
-	// Drain 5..15 cleanly. No new gap runs should be counted.
-	for i := 0; i < 11; i++ {
+	// Drain 5..19 cleanly. No new gap runs should be counted.
+	for i := 0; i < 15; i++ {
 		if _, ready, _ := jb.PopReady(); !ready {
 			t.Fatalf("drain iter %d: expected ready=true", i)
 		}
@@ -774,7 +847,7 @@ func TestJitterBuffer_GapHistogram(t *testing.T) {
 // TestJitterBuffer_GapHistogram_SingleFrame verifies that a 1-frame
 // gap lands in the GapRuns1 bucket.
 func TestJitterBuffer_GapHistogram_SingleFrame(t *testing.T) {
-	maxDepth := 24
+	maxDepth := 32
 	jb := NewJitterBuffer(1, maxDepth)
 
 	jb.Push(0, []byte{0})
@@ -784,9 +857,9 @@ func TestJitterBuffer_GapHistogram_SingleFrame(t *testing.T) {
 	}
 	// expected=1.
 
-	// Single missing frame at seq=1, followed by 2..13 (12 packets)
-	// so count=12 meets skip threshold.
-	for s := uint16(2); s <= 13; s++ {
+	// Single missing frame at seq=1, followed by 2..17 (16 packets)
+	// so count=16 meets the maxDepth/2 skip threshold.
+	for s := uint16(2); s <= 17; s++ {
 		jb.Push(s, []byte{byte(s)})
 	}
 

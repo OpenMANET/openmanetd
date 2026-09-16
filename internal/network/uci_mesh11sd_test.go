@@ -25,6 +25,7 @@ func newMesh11sdMock(t *testing.T) *mockConfigReader {
 	require.NoError(t, m.SetType("mesh11sd", "setup", "enabled", uci.TypeOption, "0"))
 	require.NoError(t, m.SetType("mesh11sd", "mesh_params", "mesh_fwding", uci.TypeOption, "1"))
 	require.NoError(t, m.SetType("mesh11sd", "mesh_params", "mesh_gate_announcements", uci.TypeOption, "0"))
+	require.NoError(t, m.SetType("mesh11sd", "mesh_params", "mesh_nolearn", uci.TypeOption, "0"))
 
 	m.commitCalled = false
 	m.commitCount = 0
@@ -40,6 +41,7 @@ func TestGetMesh11sdMeshParamsWithReader(t *testing.T) {
 
 	assert.Equal(t, "0", got.MeshGateAnnouncements)
 	assert.Equal(t, "1", got.MeshFwding)
+	assert.Equal(t, "0", got.MeshNolearn)
 }
 
 func TestSetMeshGateAnnouncements_FlipsToOne(t *testing.T) {
@@ -81,6 +83,29 @@ func TestSetMeshFwding_RejectsInvalid(t *testing.T) {
 	assert.Error(t, SetMeshFwding(m, "yes"))
 }
 
+func TestSetMeshNolearn_FlipsToOne(t *testing.T) {
+	m := newMesh11sdMock(t)
+
+	require.NoError(t, SetMeshNolearn(m, "1"))
+
+	v, ok := m.Get("mesh11sd", "mesh_params", "mesh_nolearn")
+	require.True(t, ok)
+	require.Len(t, v, 1)
+	assert.Equal(t, "1", v[0])
+
+	// Helper does not commit; the wizard handler batches.
+	assert.Equal(t, 0, m.commitCount)
+}
+
+func TestSetMeshNolearn_RejectsInvalid(t *testing.T) {
+	m := newMesh11sdMock(t)
+
+	for _, v := range []string{"", "yes", "2", "true", "01"} {
+		err := SetMeshNolearn(m, v)
+		assert.Errorf(t, err, "should reject %q", v)
+	}
+}
+
 func TestSetMesh11sdSetupEnabled_FlipsToOne(t *testing.T) {
 	m := newMesh11sdMock(t)
 
@@ -106,6 +131,7 @@ func TestSetMesh11sdHelpers_PropagateSetError(t *testing.T) {
 	}{
 		{"MeshGateAnnouncements", func(m *mockConfigReader) error { return SetMeshGateAnnouncements(m, "1") }},
 		{"MeshFwding", func(m *mockConfigReader) error { return SetMeshFwding(m, "0") }},
+		{"MeshNolearn", func(m *mockConfigReader) error { return SetMeshNolearn(m, "1") }},
 		{"SetupEnabled", func(m *mockConfigReader) error { return SetMesh11sdSetupEnabled(m, "1") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

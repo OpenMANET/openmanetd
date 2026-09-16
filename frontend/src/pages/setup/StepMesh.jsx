@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo } from 'react';
 import LatSelect from '../../components/LatSelect.jsx';
+import QrScanInput from '../../components/QrScanInput.jsx';
 import { useSetup, SETUP_ACTIONS } from '../../contexts/SetupContext.jsx';
 import {
   MeshRole,
@@ -24,13 +25,21 @@ import {
   MESH_GATE_MODE_LABELS,
   optionsFromMap,
 } from './labels.js';
+import {
+  findCountryEntry,
+  channelsForCountryBandwidth,
+  bandwidthsForCountry,
+  meshJoinIssues,
+} from './meshChannels.js';
 
-// Mesh encryption is restricted to SAE or NONE per the plan; PSK
-// variants don't make sense on an 802.11s mesh.
-const MESH_ENCRYPTION_VALUES = [
-  WifiEncryption.SAE,
-  WifiEncryption.NONE,
-];
+// Selectable mesh-point modes. MESH_POINT_MODE_NONE is hidden here (and
+// rejected by validateProfile on the backend) until openmanetd's
+// address-reservation worker can leave a DHCP-client ahwlan alone —
+// wizard-parity ledger decision D1 (2026-08-27). The label stays in
+// MESH_POINT_MODE_LABELS so the review summary can still name it.
+const HIDDEN_MESH_POINT_MODES = new Set([MeshPointMode.UNSPECIFIED, MeshPointMode.NONE]);
+const MESH_POINT_MODE_OPTIONS = optionsFromMap(MESH_POINT_MODE_LABELS)
+  .filter(o => !HIDDEN_MESH_POINT_MODES.has(o.value));
 
 const BANDWIDTH_LABELS = {
   1: '1 MHz',
@@ -38,49 +47,6 @@ const BANDWIDTH_LABELS = {
   4: '4 MHz',
   8: '8 MHz',
 };
-
-// Fallback US S1G channel allocations used only when the device's
-// regulatory database (/usr/share/morse-regdb/channels.csv) was not
-// loaded — e.g. on a developer machine without the Morse userspace
-// package, or in unit tests that don't pass a fixture. Real devices
-// always pull these per-country from GetSetupStatusResponse.countries.
-//
-// Reference: IEEE 802.11ah-2020 Annex E / Morse Micro firmware default
-// regdom for US.
-const FALLBACK_US_CHANNELS = {
-  1: [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
-      33, 35, 37, 39, 41, 43, 45, 47, 49, 51],
-  2: [2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50],
-  4: [8, 16, 24, 32, 40, 48],
-  8: [12, 28, 44],
-};
-
-// findCountryEntry returns the SetupCountry message for the given code,
-// or undefined if not present.
-function findCountryEntry(countries, code) {
-  if (!countries || !code) return undefined;
-  return countries.find(c => c.code === code);
-}
-
-// channelsForCountryBandwidth returns the legal channel list for the
-// chosen (country, bandwidth) tuple, falling back to a baked-in US
-// allocation when the regdb is absent.
-function channelsForCountryBandwidth(countryEntry, bandwidthMhz) {
-  if (countryEntry?.bandwidths) {
-    const entry = countryEntry.bandwidths.find(b => b.mhz === bandwidthMhz);
-    if (entry?.channels?.length) return Array.from(entry.channels);
-  }
-  return FALLBACK_US_CHANNELS[bandwidthMhz] ?? [];
-}
-
-// bandwidthsForCountry returns the bandwidths legal in this regulatory
-// domain. Falls back to the four S1G widths when the regdb is empty.
-function bandwidthsForCountry(countryEntry) {
-  if (countryEntry?.bandwidths?.length) {
-    return countryEntry.bandwidths.map(b => b.mhz).sort((a, b) => a - b);
-  }
-  return [1, 2, 4, 8];
-}
 
 export default function StepMesh({ status }) {
   const { state, dispatch } = useSetup();
@@ -110,30 +76,54 @@ export default function StepMesh({ status }) {
   );
 
   // Snap bandwidth to a legal value when the country changes (e.g.
-  // some EU countries only allow 1MHz / 2MHz HaLow).
+  // some EU countries only allow 1MHz / 2MHz HaLow). A scanned code
+  // holds its own values instead — meshJoinIssues surfaces the warning
+  // and the operator resolves it manually.
   useEffect(() => {
+    if (state.mesh.fromScan) return;
     if (legalBandwidths.length === 0) return;
     if (!legalBandwidths.includes(state.mesh.bandwidthMhz)) {
       dispatch({ type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'bandwidthMhz', value: legalBandwidths[0] });
     }
-  }, [legalBandwidths, state.mesh.bandwidthMhz, dispatch]);
+  }, [legalBandwidths, state.mesh.bandwidthMhz, state.mesh.fromScan, dispatch]);
 
   const channels = useMemo(
     () => channelsForCountryBandwidth(countryEntry, state.mesh.bandwidthMhz),
     [countryEntry, state.mesh.bandwidthMhz],
   );
 
-  // Snap channel to the first legal one when (country, bandwidth) change.
+  // Snap channel to the first legal one when (country, bandwidth)
+  // change. Gated the same way as the bandwidth snap above.
   useEffect(() => {
+    if (state.mesh.fromScan) return;
     if (channels.length === 0) return;
     if (!channels.includes(state.mesh.channel)) {
       dispatch({ type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'channel', value: channels[0] });
     }
-  }, [channels, state.mesh.channel, dispatch]);
+  }, [channels, state.mesh.channel, state.mesh.fromScan, dispatch]);
+
+  const issues = useMemo(() => meshJoinIssues(state, status), [state, status]);
 
   return (
     <div className="setup-step">
       <h3>Mesh Configuration</h3>
+
+      <div className="setup-scan">
+        <div className="setup-scan-title">Have a QR code from another node?</div>
+        <div className="setup-help">Photograph its Share Mesh code to fill this step.</div>
+        <QrScanInput
+          onDecoded={(payload) => dispatch({ type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload, radios: status?.radios ?? [] })}
+        />
+        {state.meshJoin && (
+          <div className={issues.length > 0 ? 'lat-alert warn' : 'lat-alert ok'}>
+            <div>Scanned from {state.meshJoin.sourceHostname || 'another node'}.</div>
+            {state.meshJoin.backhaulSkippedReason === 'no-capable-radio' && (
+              <div>Backhaul skipped: no radio on this device can run the 2.4 GHz mesh backhaul.</div>
+            )}
+            {issues.map(msg => <div key={msg}>{msg}</div>)}
+          </div>
+        )}
+      </div>
 
       {halowRadios.length === 0 && (
         <div className="lat-alert crit">
@@ -183,32 +173,30 @@ export default function StepMesh({ status }) {
 
       <div className="lat-field">
         <label>Encryption</label>
-        <LatSelect
-          ariaLabel="Mesh encryption"
-          value={state.mesh.encryption}
-          options={MESH_ENCRYPTION_VALUES.map(v => ({ value: v, label: ENCRYPTION_LABELS[v] }))}
-          onChange={(v) => dispatch({ type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'encryption', value: v })}
-        />
+        <div className="lat-input" style={{ pointerEvents: 'none' }}>
+          {ENCRYPTION_LABELS[WifiEncryption.SAE]}
+        </div>
+        <div className="setup-help">
+          Mesh links are always WPA3 (SAE). Open meshes are not supported.
+        </div>
       </div>
 
-      {state.mesh.encryption !== WifiEncryption.NONE && (
-        <div className="lat-field">
-          <label htmlFor="setup-mesh-pass">Mesh passphrase</label>
-          <input
-            id="setup-mesh-pass"
-            className="lat-input"
-            type="password"
-            value={state.mesh.passphrase}
-            onChange={(e) => dispatch({ type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'passphrase', value: e.target.value })}
-            minLength={8}
-            maxLength={63}
-            autoComplete="new-password"
-          />
-          {state.mesh.passphrase && state.mesh.passphrase.length < 8 && (
-            <div className="setup-error">Passphrase must be at least 8 characters.</div>
-          )}
-        </div>
-      )}
+      <div className="lat-field">
+        <label htmlFor="setup-mesh-pass">Mesh passphrase</label>
+        <input
+          id="setup-mesh-pass"
+          className="lat-input"
+          type="password"
+          value={state.mesh.passphrase}
+          onChange={(e) => dispatch({ type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'passphrase', value: e.target.value })}
+          minLength={8}
+          maxLength={63}
+          autoComplete="new-password"
+        />
+        {state.mesh.passphrase && state.mesh.passphrase.length < 8 && (
+          <div className="setup-error">Passphrase must be at least 8 characters.</div>
+        )}
+      </div>
 
       <div className="lat-field">
         <label>Country</label>
@@ -276,9 +264,7 @@ export default function StepMesh({ status }) {
           <LatSelect
             ariaLabel="Mesh point mode"
             value={state.meshpointMode}
-            options={Object.entries(MESH_POINT_MODE_LABELS).map(([value, label]) => ({
-              value: Number(value), label,
-            })).filter(o => o.value !== MeshPointMode.UNSPECIFIED)}
+            options={MESH_POINT_MODE_OPTIONS}
             onChange={(v) => dispatch({ type: SETUP_ACTIONS.SET_MESHPOINT_MODE, value: v })}
           />
         </div>

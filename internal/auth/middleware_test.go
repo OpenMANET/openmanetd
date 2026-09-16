@@ -326,3 +326,31 @@ func TestFrontendAuthMiddleware_BearerToken(t *testing.T) {
 	assert.True(t, called)
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
+
+// TestAPIAuthMiddleware_MeshJoinRequiresSession pins that the mesh join
+// RPCs (which carry passphrases) are never on the skip list.
+func TestAPIAuthMiddleware_MeshJoinRequiresSession(t *testing.T) {
+	store := auth.NewSessionStore(time.Hour, 16)
+	mw := auth.NewAPIAuthMiddleware(store, true)
+
+	for _, path := range []string{
+		"/openmanet.mesh_join.v1.MeshJoinService/GetMeshJoinQR",
+		"/openmanet.mesh_join.v1.MeshJoinService/ApplyMeshJoin",
+	} {
+		t.Run(path, func(t *testing.T) {
+			called := false
+			handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			assert.False(t, called, "mesh join RPCs must not bypass auth")
+			assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		})
+	}
+}

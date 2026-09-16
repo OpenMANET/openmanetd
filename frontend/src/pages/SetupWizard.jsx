@@ -8,13 +8,14 @@
 // and the GetSetupStatus payload (so step components can render radio +
 // ethernet-port lists without re-fetching).
 //
-// On apply (StepReview), a streaming ApplySetup runs through all 14
+// On apply (StepReview), a streaming ApplySetup runs through all 15
 // phases. The terminal event is success/failure; if the stream drops
 // before the terminal arrives, StepReview falls back to polling
 // GetSetupStatus.
 
 import { useEffect, useMemo, useState } from 'react';
 import { setupClient } from '../services/setupClient.js';
+import { dismissSetup } from '../services/setupDismiss.js';
 import {
   SetupProvider,
   useSetup,
@@ -28,6 +29,7 @@ import StepAPs from './setup/StepAPs.jsx';
 import StepPassword from './setup/StepPassword.jsx';
 import StepReview from './setup/StepReview.jsx';
 import SetupBeforeUnloadGuard from './setup/SetupBeforeUnloadGuard.jsx';
+import { meshJoinIssues } from './setup/meshChannels.js';
 import './SetupWizard.css';
 
 const STEP_DEFS = [
@@ -54,6 +56,7 @@ function SetupWizardShell() {
   const [status, setStatus] = useState(null);
   const [statusError, setStatusError] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmSkip, setConfirmSkip] = useState(false);
 
   // Load the status payload on mount so step components have radio +
   // ethernet-port data available without re-fetching.
@@ -65,7 +68,13 @@ function SetupWizardShell() {
         setStatus(resp);
         // Pre-fill the mesh radio with the first HaLow radio so the
         // user doesn't have to pick when there's an obvious choice.
-        dispatch({ type: 'HYDRATE_FROM_STATUS', status: resp });
+        // browserTimezone rides on the action (not read inside the
+        // reducer) so the reducer stays pure.
+        dispatch({
+          type: 'HYDRATE_FROM_STATUS',
+          status: resp,
+          browserTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        });
       })
       .catch((err) => { if (!cancelled) setStatusError(err); });
     return () => { cancelled = true; };
@@ -124,8 +133,25 @@ function SetupWizardShell() {
     advance();
   };
 
+  // Full reload (not `navigate`): SetupGate computed its state on mount,
+  // so a reload re-evaluates the gate with the flag set. Simple and
+  // correct for a once-per-session action.
+  //
+  // Disarm SetupBeforeUnloadGuard first, the same way StepReview does on
+  // a successful apply (StepReview.jsx): mesh.radioName is auto-filled
+  // from the detected HaLow radio on mount (HYDRATE_FROM_STATUS), so
+  // hasMeaningfulInput() is true on real hardware even when the user has
+  // typed nothing — without this the native "leave site?" prompt fires
+  // right after the user answers this modal's own confirmation.
+  const onSkip = () => {
+    window.dispatchEvent(new Event('setup-applied'));
+    dismissSetup();
+    window.location.assign('/');
+  };
+
   const isFirst = currentIndex === 0;
   const isLast  = currentIndex === steps.length - 1;
+  const meshBlocked = step.key === 'mesh' && meshJoinIssues(state, status).length > 0;
 
   const labels = steps.map(s => s.label);
 
@@ -135,6 +161,11 @@ function SetupWizardShell() {
         <div>
           <h2>OpenMANET Setup Wizard</h2>
           <div className="crumb">Step {currentIndex + 1} of {steps.length}: {step.label}</div>
+        </div>
+        <div className="lat-view-toolbar">
+          <button type="button" className="lat-btn ghost" onClick={() => setConfirmSkip(true)}>
+            Skip for now
+          </button>
         </div>
       </div>
 
@@ -160,6 +191,8 @@ function SetupWizardShell() {
             type="button"
             className="lat-btn primary"
             onClick={goNext}
+            disabled={meshBlocked}
+            title={meshBlocked ? 'Fix the scanned values first' : undefined}
           >
             Next
           </button>
@@ -182,6 +215,22 @@ function SetupWizardShell() {
               onClick={() => { setConfirmReset(false); advance(); }}>
               Reset and continue
             </button>
+          </div>
+        </div>
+      )}
+
+      {confirmSkip && (
+        <div className="lat-panel" role="alertdialog" aria-label="Skip setup confirmation">
+          <div className="lat-alert warn" role="alert">Skip Setup?</div>
+          <p>This device stays unconfigured:</p>
+          <ul>
+            <li>No mesh, network, or firewall configuration applied</li>
+            <li>No admin password — the interface is unprotected</li>
+            <li>Setup reopens on your next visit until completed</li>
+          </ul>
+          <div className="setup-nav">
+            <button type="button" className="lat-btn ghost" onClick={() => setConfirmSkip(false)}>Cancel</button>
+            <button type="button" className="lat-btn" onClick={onSkip}>Skip for now</button>
           </div>
         </div>
       )}

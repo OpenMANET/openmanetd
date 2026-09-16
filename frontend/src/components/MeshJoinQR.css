@@ -1,0 +1,38 @@
+/* =============================================================================
+ * MeshJoinQR.css — QR + credential summary layout
+ * ============================================================================= */
+
+.mesh-qr {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.mesh-qr .kv .v {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-align: right;
+}
+
+.mesh-qr .kv .v .lat-btn.sm {
+  min-height: 24px;
+  padding: 2px 8px;
+}
+
+.mesh-qr-status {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .mesh-qr {
+    grid-template-columns: 1fr;
+  }
+  .mesh-qr .lat-qr {
+    margin: 0 auto;
+  }
+}

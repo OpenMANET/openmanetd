@@ -22,6 +22,72 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Phy is the modulation family the rate was negotiated with.
+type LinkRate_Phy int32
+
+const (
+	// No rate information from the driver: bitrate_kbps falls back to the
+	// plain station bitrate, width_mhz is 0, mcs and nss are -1.
+	LinkRate_PHY_UNSPECIFIED LinkRate_Phy = 0
+	// 802.11a/b/g. mcs and nss are -1.
+	LinkRate_PHY_LEGACY LinkRate_Phy = 1
+	// 802.11n.
+	LinkRate_PHY_HT LinkRate_Phy = 2
+	// 802.11ac.
+	LinkRate_PHY_VHT LinkRate_Phy = 3
+	// 802.11ax.
+	LinkRate_PHY_HE LinkRate_Phy = 4
+	// 802.11be.
+	LinkRate_PHY_EHT LinkRate_Phy = 5
+)
+
+// Enum value maps for LinkRate_Phy.
+var (
+	LinkRate_Phy_name = map[int32]string{
+		0: "PHY_UNSPECIFIED",
+		1: "PHY_LEGACY",
+		2: "PHY_HT",
+		3: "PHY_VHT",
+		4: "PHY_HE",
+		5: "PHY_EHT",
+	}
+	LinkRate_Phy_value = map[string]int32{
+		"PHY_UNSPECIFIED": 0,
+		"PHY_LEGACY":      1,
+		"PHY_HT":          2,
+		"PHY_VHT":         3,
+		"PHY_HE":          4,
+		"PHY_EHT":         5,
+	}
+)
+
+func (x LinkRate_Phy) Enum() *LinkRate_Phy {
+	p := new(LinkRate_Phy)
+	*p = x
+	return p
+}
+
+func (x LinkRate_Phy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (LinkRate_Phy) Descriptor() protoreflect.EnumDescriptor {
+	return file_openmanet_service_v1_mesh_proto_enumTypes[0].Descriptor()
+}
+
+func (LinkRate_Phy) Type() protoreflect.EnumType {
+	return &file_openmanet_service_v1_mesh_proto_enumTypes[0]
+}
+
+func (x LinkRate_Phy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use LinkRate_Phy.Descriptor instead.
+func (LinkRate_Phy) EnumDescriptor() ([]byte, []int) {
+	return file_openmanet_service_v1_mesh_proto_rawDescGZIP(), []int{1, 0}
+}
+
 type MeshNeighbor struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Neighbor node identifier.  This should be the hostname.interface_name
@@ -34,8 +100,16 @@ type MeshNeighbor struct {
 	Signal int32 `protobuf:"varint,4,opt,name=signal,proto3" json:"signal,omitempty"`
 	// Last seen in miliseconds
 	LastSeen int64 `protobuf:"varint,5,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
-	// throughput to the neighbor node.
-	Throughput    int32 `protobuf:"varint,6,opt,name=throughput,proto3" json:"throughput,omitempty"`
+	// Throughput to the neighbor node in bit/s: the nl80211 station transmit
+	// bitrate, replaced by the batman-adv link throughput (from `batctl nj`,
+	// kbit/s scaled up) when the neighbor is known to batman-adv.
+	Throughput int32 `protobuf:"varint,6,opt,name=throughput,proto3" json:"throughput,omitempty"`
+	// Rate the local radio last transmitted to this neighbor with.
+	Tx *LinkRate `protobuf:"bytes,7,opt,name=tx,proto3" json:"tx,omitempty"`
+	// Rate the local radio last received from this neighbor with.
+	Rx *LinkRate `protobuf:"bytes,8,opt,name=rx,proto3" json:"rx,omitempty"`
+	// Mesh wifi interface the station was seen on (e.g. "mesh1").
+	Interface     string `protobuf:"bytes,9,opt,name=interface,proto3" json:"interface,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -112,6 +186,111 @@ func (x *MeshNeighbor) GetThroughput() int32 {
 	return 0
 }
 
+func (x *MeshNeighbor) GetTx() *LinkRate {
+	if x != nil {
+		return x.Tx
+	}
+	return nil
+}
+
+func (x *MeshNeighbor) GetRx() *LinkRate {
+	if x != nil {
+		return x.Rx
+	}
+	return nil
+}
+
+func (x *MeshNeighbor) GetInterface() string {
+	if x != nil {
+		return x.Interface
+	}
+	return ""
+}
+
+// LinkRate describes one direction of the nl80211 station rate: what the
+// driver last used to talk to this peer, as `iw station dump` prints it.
+type LinkRate struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Bitrate in kbit/s.
+	BitrateKbps int32        `protobuf:"varint,1,opt,name=bitrate_kbps,json=bitrateKbps,proto3" json:"bitrate_kbps,omitempty"`
+	Phy         LinkRate_Phy `protobuf:"varint,2,opt,name=phy,proto3,enum=openmanet.service.v1.LinkRate_Phy" json:"phy,omitempty"`
+	// Channel width the rate used, in MHz: 1/2/4/8/16 for S1G, 20/40/80/160/320
+	// otherwise (160 for 80+80). 0 when unknown.
+	WidthMhz int32 `protobuf:"varint,3,opt,name=width_mhz,json=widthMhz,proto3" json:"width_mhz,omitempty"`
+	// MCS index, -1 when the PHY has none (legacy) or the driver did not
+	// report it.
+	Mcs int32 `protobuf:"varint,4,opt,name=mcs,proto3" json:"mcs,omitempty"`
+	// Spatial streams, -1 when not reported.
+	Nss           int32 `protobuf:"varint,5,opt,name=nss,proto3" json:"nss,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LinkRate) Reset() {
+	*x = LinkRate{}
+	mi := &file_openmanet_service_v1_mesh_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkRate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkRate) ProtoMessage() {}
+
+func (x *LinkRate) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_service_v1_mesh_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkRate.ProtoReflect.Descriptor instead.
+func (*LinkRate) Descriptor() ([]byte, []int) {
+	return file_openmanet_service_v1_mesh_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *LinkRate) GetBitrateKbps() int32 {
+	if x != nil {
+		return x.BitrateKbps
+	}
+	return 0
+}
+
+func (x *LinkRate) GetPhy() LinkRate_Phy {
+	if x != nil {
+		return x.Phy
+	}
+	return LinkRate_PHY_UNSPECIFIED
+}
+
+func (x *LinkRate) GetWidthMhz() int32 {
+	if x != nil {
+		return x.WidthMhz
+	}
+	return 0
+}
+
+func (x *LinkRate) GetMcs() int32 {
+	if x != nil {
+		return x.Mcs
+	}
+	return 0
+}
+
+func (x *LinkRate) GetNss() int32 {
+	if x != nil {
+		return x.Nss
+	}
+	return 0
+}
+
 type ListMeshNeighborsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// List of mesh neighbors
@@ -122,7 +301,7 @@ type ListMeshNeighborsResponse struct {
 
 func (x *ListMeshNeighborsResponse) Reset() {
 	*x = ListMeshNeighborsResponse{}
-	mi := &file_openmanet_service_v1_mesh_proto_msgTypes[1]
+	mi := &file_openmanet_service_v1_mesh_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -134,7 +313,7 @@ func (x *ListMeshNeighborsResponse) String() string {
 func (*ListMeshNeighborsResponse) ProtoMessage() {}
 
 func (x *ListMeshNeighborsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openmanet_service_v1_mesh_proto_msgTypes[1]
+	mi := &file_openmanet_service_v1_mesh_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -147,7 +326,7 @@ func (x *ListMeshNeighborsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMeshNeighborsResponse.ProtoReflect.Descriptor instead.
 func (*ListMeshNeighborsResponse) Descriptor() ([]byte, []int) {
-	return file_openmanet_service_v1_mesh_proto_rawDescGZIP(), []int{1}
+	return file_openmanet_service_v1_mesh_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ListMeshNeighborsResponse) GetNeighbors() []*MeshNeighbor {
@@ -161,7 +340,7 @@ var File_openmanet_service_v1_mesh_proto protoreflect.FileDescriptor
 
 const file_openmanet_service_v1_mesh_proto_rawDesc = "" +
 	"\n" +
-	"\x1fopenmanet/service/v1/mesh.proto\x12\x14openmanet.service.v1\x1a\x1bgoogle/protobuf/empty.proto\"\xd3\x01\n" +
+	"\x1fopenmanet/service/v1/mesh.proto\x12\x14openmanet.service.v1\x1a\x1bgoogle/protobuf/empty.proto\"\xd1\x02\n" +
 	"\fMeshNeighbor\x12\x1a\n" +
 	"\bneighbor\x18\x01 \x01(\tR\bneighbor\x12'\n" +
 	"\x0fsignal_strength\x18\x02 \x01(\x05R\x0esignalStrength\x12)\n" +
@@ -170,7 +349,26 @@ const file_openmanet_service_v1_mesh_proto_rawDesc = "" +
 	"\tlast_seen\x18\x05 \x01(\x03R\blastSeen\x12\x1e\n" +
 	"\n" +
 	"throughput\x18\x06 \x01(\x05R\n" +
-	"throughput\"]\n" +
+	"throughput\x12.\n" +
+	"\x02tx\x18\a \x01(\v2\x1e.openmanet.service.v1.LinkRateR\x02tx\x12.\n" +
+	"\x02rx\x18\b \x01(\v2\x1e.openmanet.service.v1.LinkRateR\x02rx\x12\x1c\n" +
+	"\tinterface\x18\t \x01(\tR\tinterface\"\x82\x02\n" +
+	"\bLinkRate\x12!\n" +
+	"\fbitrate_kbps\x18\x01 \x01(\x05R\vbitrateKbps\x124\n" +
+	"\x03phy\x18\x02 \x01(\x0e2\".openmanet.service.v1.LinkRate.PhyR\x03phy\x12\x1b\n" +
+	"\twidth_mhz\x18\x03 \x01(\x05R\bwidthMhz\x12\x10\n" +
+	"\x03mcs\x18\x04 \x01(\x05R\x03mcs\x12\x10\n" +
+	"\x03nss\x18\x05 \x01(\x05R\x03nss\"\\\n" +
+	"\x03Phy\x12\x13\n" +
+	"\x0fPHY_UNSPECIFIED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"PHY_LEGACY\x10\x01\x12\n" +
+	"\n" +
+	"\x06PHY_HT\x10\x02\x12\v\n" +
+	"\aPHY_VHT\x10\x03\x12\n" +
+	"\n" +
+	"\x06PHY_HE\x10\x04\x12\v\n" +
+	"\aPHY_EHT\x10\x05\"]\n" +
 	"\x19ListMeshNeighborsResponse\x12@\n" +
 	"\tneighbors\x18\x01 \x03(\v2\".openmanet.service.v1.MeshNeighborR\tneighbors2s\n" +
 	"\x13MeshNeighborService\x12\\\n" +
@@ -189,21 +387,27 @@ func file_openmanet_service_v1_mesh_proto_rawDescGZIP() []byte {
 	return file_openmanet_service_v1_mesh_proto_rawDescData
 }
 
-var file_openmanet_service_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_openmanet_service_v1_mesh_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_openmanet_service_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_openmanet_service_v1_mesh_proto_goTypes = []any{
-	(*MeshNeighbor)(nil),              // 0: openmanet.service.v1.MeshNeighbor
-	(*ListMeshNeighborsResponse)(nil), // 1: openmanet.service.v1.ListMeshNeighborsResponse
-	(*emptypb.Empty)(nil),             // 2: google.protobuf.Empty
+	(LinkRate_Phy)(0),                 // 0: openmanet.service.v1.LinkRate.Phy
+	(*MeshNeighbor)(nil),              // 1: openmanet.service.v1.MeshNeighbor
+	(*LinkRate)(nil),                  // 2: openmanet.service.v1.LinkRate
+	(*ListMeshNeighborsResponse)(nil), // 3: openmanet.service.v1.ListMeshNeighborsResponse
+	(*emptypb.Empty)(nil),             // 4: google.protobuf.Empty
 }
 var file_openmanet_service_v1_mesh_proto_depIdxs = []int32{
-	0, // 0: openmanet.service.v1.ListMeshNeighborsResponse.neighbors:type_name -> openmanet.service.v1.MeshNeighbor
-	2, // 1: openmanet.service.v1.MeshNeighborService.ListMeshNeighbors:input_type -> google.protobuf.Empty
-	1, // 2: openmanet.service.v1.MeshNeighborService.ListMeshNeighbors:output_type -> openmanet.service.v1.ListMeshNeighborsResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	2, // 0: openmanet.service.v1.MeshNeighbor.tx:type_name -> openmanet.service.v1.LinkRate
+	2, // 1: openmanet.service.v1.MeshNeighbor.rx:type_name -> openmanet.service.v1.LinkRate
+	0, // 2: openmanet.service.v1.LinkRate.phy:type_name -> openmanet.service.v1.LinkRate.Phy
+	1, // 3: openmanet.service.v1.ListMeshNeighborsResponse.neighbors:type_name -> openmanet.service.v1.MeshNeighbor
+	4, // 4: openmanet.service.v1.MeshNeighborService.ListMeshNeighbors:input_type -> google.protobuf.Empty
+	3, // 5: openmanet.service.v1.MeshNeighborService.ListMeshNeighbors:output_type -> openmanet.service.v1.ListMeshNeighborsResponse
+	5, // [5:6] is the sub-list for method output_type
+	4, // [4:5] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_openmanet_service_v1_mesh_proto_init() }
@@ -216,13 +420,14 @@ func file_openmanet_service_v1_mesh_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openmanet_service_v1_mesh_proto_rawDesc), len(file_openmanet_service_v1_mesh_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   2,
+			NumEnums:      1,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_openmanet_service_v1_mesh_proto_goTypes,
 		DependencyIndexes: file_openmanet_service_v1_mesh_proto_depIdxs,
+		EnumInfos:         file_openmanet_service_v1_mesh_proto_enumTypes,
 		MessageInfos:      file_openmanet_service_v1_mesh_proto_msgTypes,
 	}.Build()
 	File_openmanet_service_v1_mesh_proto = out.File

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -286,6 +287,8 @@ func containsSubstr(s, substr string) bool {
 type upstreamCapture struct {
 	path   atomic.Value // string
 	method atomic.Value // string
+	host   atomic.Value // string: Host header the upstream saw
+	xff    atomic.Value // string: X-Forwarded-For the upstream saw
 }
 
 func newProxyUpstream(t *testing.T, body string, header http.Header) (*httptest.Server, *upstreamCapture) {
@@ -295,6 +298,8 @@ func newProxyUpstream(t *testing.T, body string, header http.Header) (*httptest.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cap.path.Store(r.URL.Path)
 		cap.method.Store(r.Method)
+		cap.host.Store(r.Host)
+		cap.xff.Store(r.Header.Get("X-Forwarded-For"))
 
 		for k, vs := range header {
 			for _, v := range vs {
@@ -307,6 +312,41 @@ func newProxyUpstream(t *testing.T, body string, header http.Header) (*httptest.
 	t.Cleanup(srv.Close)
 
 	return srv, cap
+}
+
+// The upstream must see its own host and the real client address; a
+// browser-supplied X-Forwarded-For is discarded rather than trusted.
+func TestBuildAPIProxies_RewritesHostAndXForwardedFor(t *testing.T) {
+	upstream, capture := newProxyUpstream(t, `{"ok":true}`, nil)
+
+	rpcProxy, _ := buildAPIProxies(upstream.URL, zerolog.Nop())
+	require.NotNil(t, rpcProxy)
+
+	mux := http.NewServeMux()
+	mux.Handle("/rpc/", rpcProxy)
+
+	front := httptest.NewServer(mux)
+	t.Cleanup(front.Close)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		front.URL+"/rpc/openmanet.foo.v1.FooService/Bar", strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	assert.Equal(t, upstreamURL.Host, capture.host.Load(), "Host header must be rewritten to the upstream")
+
+	xff, _ := capture.xff.Load().(string)
+	assert.NotEmpty(t, xff, "client address must be forwarded")
+	assert.NotContains(t, xff, "203.0.113.9", "inbound X-Forwarded-For must not be trusted")
 }
 
 func TestBuildAPIProxies_StripsRPCPrefix(t *testing.T) {

@@ -68,6 +68,7 @@ vi.mock('../../components/TopologyMap.jsx', () => ({
 }));
 
 import DashboardPage from '../../pages/Dashboard.jsx';
+import { fetchMeshStatus } from '../../services/meshApi.js';
 
 beforeEach(() => {
   mockGetGNSSStatus.mockResolvedValue({
@@ -77,6 +78,12 @@ beforeEach(() => {
   mockGetBLOSStatus.mockResolvedValue({ blosEnabled: true });
   mockListBLOSPeers.mockResolvedValue({ peers: [] });
   mockListNetworkInterfaces.mockResolvedValue({ interfaces: [] });
+  // The module mock's default is consumed by the first test that sets
+  // neighbors; re-arm it so later tests never inherit another test's mesh.
+  fetchMeshStatus.mockResolvedValue({
+    status: { connected: false, neighbors: 0, mesh_interfaces: 0, is_gateway: false },
+    nodes: [], neighbors: [], interfaces: [],
+  });
 });
 
 afterEach(() => {
@@ -299,6 +306,7 @@ describe('TestDashboardPanels', () => {
       expect(screen.getByText('MEM')).toBeTruthy();
       expect(screen.getByText('OVERLAY')).toBeTruthy();
       expect(screen.getByText('2d 14h 23m')).toBeTruthy();
+      expect(screen.getByText('MorseMicro HaLowLink 2')).toBeTruthy();
       expect(screen.getByText('5.15.150')).toBeTruthy();
       expect(screen.getByText('OpenWrt 23.05.3 / OpenMANET 1.7.0')).toBeTruthy();
       expect(screen.getByText('mipsel_24kc')).toBeTruthy();
@@ -306,6 +314,10 @@ describe('TestDashboardPanels', () => {
     // 3 pbars: CPU, MEM, OVERLAY. LOAD 1M and HW Rev were removed because
     // neither field is surfaced by the current system-status handler.
     expect(container.querySelectorAll('.pbar').length).toBe(3);
+    // Board model sits directly under Uptime and above Kernel.
+    const keys = Array.from(container.querySelectorAll('.dashboard-resources-kv .kv .k'))
+      .map((el) => el.textContent);
+    expect(keys.slice(0, 3)).toEqual(['Uptime', 'Model', 'Kernel']);
     expect(screen.queryByText('LOAD 1M')).toBeNull();
     expect(screen.queryByText('HW Rev')).toBeNull();
   });
@@ -500,5 +512,88 @@ describe('TestUptimeFormatting', () => {
     mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse({ systemResources: resources }));
     render(<DashboardPage />);
     await waitFor(() => expect(screen.getByText('5m')).toBeTruthy());
+  });
+});
+
+// ── Peer TX Rate column ────────────────────────────────────────────────────
+
+describe('TestDashboardPeerTxRate', () => {
+  const HE40 = { bitrateKbps: 86700, phy: 4, widthMhz: 40, mcs: 7, nss: 2 };
+  const HT20 = { bitrateKbps: 21600, phy: 2, widthMhz: 20, mcs: 3, nss: 1 };
+
+  function meshWith(neighbors) {
+    fetchMeshStatus.mockResolvedValue({
+      status: { connected: true, neighbors: neighbors.length, mesh_interfaces: 2, is_gateway: false },
+      nodes: [], neighbors, interfaces: [],
+    });
+  }
+
+  function peerRow(name) {
+    return screen.getByText(name).closest('tr');
+  }
+
+  function cells(row) {
+    return [...row.querySelectorAll('td')].map((td) => td.textContent);
+  }
+
+  it('adds a TX Rate column after Throughput', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    const { container } = render(<DashboardPage />);
+    await waitFor(() => screen.getByText('Mesh Peers · Live'));
+
+    const headers = [...container.querySelectorAll('.lat-panel .lat-table thead th')]
+      .map((th) => th.textContent.trim());
+    const thr = headers.indexOf('Throughput');
+    expect(thr).toBeGreaterThan(-1);
+    expect(headers[thr + 1]).toBe('TX Rate');
+  });
+
+  it('renders the TX rate with PHY, width, MCS and streams', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    meshWith([{ name: 'bravo_mesh1', mac: 'aa:bb:cc:dd:ee:01', signal: -61, throughput: 60_000_000, iface: 'mesh1', tx: HE40, rx: HT20 }]);
+    render(<DashboardPage />);
+
+    await waitFor(() => screen.getByText('bravo'));
+    const row = cells(peerRow('bravo'));
+    expect(row[4]).toContain('86.7 Mbps');
+    expect(row[4]).toContain('mesh1 · HE40 · MCS7 · 2SS');
+  });
+
+  it('shows a dash when the driver reported no rate', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    meshWith([{ name: 'gamma_mesh0', mac: 'aa:bb:cc:dd:ee:02', signal: -75, throughput: 0, iface: 'mesh0', tx: null, rx: null }]);
+    render(<DashboardPage />);
+
+    await waitFor(() => screen.getByText('gamma'));
+    expect(cells(peerRow('gamma'))[4]).toBe('—');
+  });
+
+  it('omits unknown parts of the detail line', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    meshWith([{ name: 'delta_mesh0', mac: 'aa:bb:cc:dd:ee:03', signal: -70, throughput: 0, iface: 'mesh0', tx: { bitrateKbps: 54, phy: 0, widthMhz: 0, mcs: -1, nss: -1 }, rx: null }]);
+    render(<DashboardPage />);
+
+    await waitFor(() => screen.getByText('delta'));
+    const cell = cells(peerRow('delta'))[4];
+    expect(cell).toContain('54 Kbps');
+    expect(cell).toContain('mesh0');
+    expect(cell).not.toContain('MCS');
+    expect(cell).not.toContain('SS');
+  });
+
+  it('keeps the fastest interface rate when a host has two radios', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    meshWith([
+      { name: 'echo_mesh0', mac: 'aa:bb:cc:dd:ee:04', signal: -55, throughput: 7_000_000, iface: 'mesh0', tx: HT20, rx: HT20 },
+      { name: 'echo_mesh1', mac: 'aa:bb:cc:dd:ee:05', signal: -66, throughput: 60_000_000, iface: 'mesh1', tx: HE40, rx: HE40 },
+    ]);
+    render(<DashboardPage />);
+
+    await waitFor(() => screen.getByText('echo'));
+    expect(screen.getAllByText('echo')).toHaveLength(1);
+    const row = cells(peerRow('echo'));
+    expect(row[4]).toContain('86.7 Mbps');
+    expect(row[4]).toContain('mesh1 · HE40');
+    expect(row[5]).toBe('-55'); // RSSI still the strongest radio
   });
 });

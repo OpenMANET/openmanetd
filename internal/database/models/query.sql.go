@@ -8,6 +8,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 const createMeshNode = `-- name: CreateMeshNode :one
@@ -100,6 +101,16 @@ WHERE mac_addr = ?
 
 func (q *Queries) DeleteMeshNode(ctx context.Context, macAddr string) error {
 	_, err := q.db.ExecContext(ctx, deleteMeshNode, macAddr)
+	return err
+}
+
+const deleteMeshNodesUpdatedBefore = `-- name: DeleteMeshNodesUpdatedBefore :exec
+DELETE FROM mesh_nodes
+WHERE updated_at < ?
+`
+
+func (q *Queries) DeleteMeshNodesUpdatedBefore(ctx context.Context, updatedAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, deleteMeshNodesUpdatedBefore, updatedAt)
 	return err
 }
 

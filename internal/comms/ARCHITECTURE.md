@@ -5,7 +5,7 @@ internally, how each component relates to the others, and how to extend it.
 It is the companion to the higher-level [README](README.md).
 
 The package was reorganized from a flat 40+ file layout into orchestration
-code at the top level plus seven leaf sub-packages. References below use the
+code at the top level plus ten leaf sub-packages. References below use the
 current names; if you're reading older history, the old single-port,
 `pionRTPSession` / `rtpJitterBuffer` / `swappableSender` / `broadcastEncoder`
 shape has been retired.
@@ -23,9 +23,10 @@ shape has been retired.
 7. [Receive Path](#7-receive-path)
 8. [RTP Jitter Buffer](#8-rtp-jitter-buffer)
 9. [Comm Event System](#9-comm-event-system)
-10. [Interface Reference](#10-interface-reference)
-11. [Extending the Package](#11-extending-the-package)
-12. [Testing Strategy](#12-testing-strategy)
+10. [Talk Group Control Plane](#10-talk-group-control-plane)
+11. [Interface Reference](#11-interface-reference)
+12. [Extending the Package](#12-extending-the-package)
+13. [Testing Strategy](#13-testing-strategy)
 
 ---
 
@@ -38,13 +39,20 @@ internal/comms/
 ├── comms.go              buildCodec, sendToAllPorts, buildEventSource,
 │                         package-level constants
 ├── config.go             CommsConfig, CommsRuntime, NewComms, applyDefaults
-├── lifecycle.go          Start, startHardwareAudio (audio.Init wiring)
+├── fec_adapter.go        FECAdapter (loss-adaptive packetLossPerc loop)
+├── lifecycle.go          Start, startHardwareAudio / initAudioIO,
+│                         seedActiveChannel, startAnnouncer,
+│                         startGPIOSelector
 ├── manager.go            CommsManager (Enable / Disable / IsRunning)
 ├── service.go            Service + Default()/SetDefault() singleton +
-│                         Service.WebAudioBridge / WebEventSource /
-│                         TalkGroupStates / EnableTalkGroupSend / Receive
+│                         SelectTalkGroup / ActiveTalkGroup / Events /
+│                         forwardSelections + WebAudioBridge /
+│                         WebEventSource / TalkGroupStates /
+│                         EnableTalkGroupSend / Receive
+├── snapshot.go           CommsSnapshot + Service.Snapshot (instrumentation)
 ├── transmit.go           Run, beginTransmission, endTransmission,
-│                         drainPlaybackBuffer, isBroadcasting, pttStartDelay
+│                         drainPlaybackBuffer, queueLocalAudioFrame,
+│                         isBroadcasting, pttStartDelay
 ├── receive.go            receiveLoop, playoutOneFrame, webPlayoutLoop,
 │                         halfDuplexDecayLoop, isReceivingRemote
 ├── network.go            buildNetwork, buildSinglePortChannel,
@@ -55,6 +63,13 @@ internal/comms/
 │                         control.Register; buildControlDeps; Validate
 ├── device.go             normalizeControlSource, findCommDevice,
 │                         logInputDeviceList
+│
+├── announce/             Talk group voice announcements (F2)
+│   ├── announce.go           Player (latest-wins slot, 20 ms pacing loop)
+│   ├── clips.go              go:embed clips/*.opus + decode-at-start
+│   ├── ogg.go                minimal read-only Ogg page/packet walker
+│   └── clips/                tg_01.opus … tg_05.opus (Piper, CC BY 4.0)
+│                             + NOTICE (attribution, ships with clips)
 │
 ├── audio/                Hardware-bound capture + per-port playback
 │   ├── encoder.go            BroadcastEncoder + Deps + SendFn
@@ -89,6 +104,13 @@ internal/comms/
 │   ├── network.go            IfaceIPv4, JoinMulticastGroup
 │   └── malgo.go              ResolveAudio, LogAudioDevices
 │
+├── gpio/                 Raven 5-position hardware selector (F3)
+│   ├── selector.go           Selector, Events(ctx), decodeChannel,
+│   │                         SelectorPins (BCM 17/27/22/24/10 → TG 1-5),
+│   │                         SelectorSnapshot, read-error breaker
+│   └── hardware.go           sole go-gpiocdev importer (cdev uAPI v2:
+│                             pull-up, both edges, kernel debounce)
+│
 ├── rtp/                  RTP/RTCP transport + jitter buffer
 │   ├── session.go            Session, Sender, SSRCFromID, ParseIncoming
 │   ├── jitter.go             JitterBuffer (ring buffer + SSRC tracking +
@@ -96,6 +118,13 @@ internal/comms/
 │   └── transport.go          PacketWriter, PacketReader, SwappableSender
 │                             (lock-free + SwapAndDeferClose),
 │                             SwappableReceiver, SwapCloseGrace
+│
+├── talkgroup/            Talk group event vocabulary + registry (F1, leaf)
+│   ├── event.go              Source (RPC/GPIO/Init), Kind
+│   │                         (Selected/Direction), Event
+│   └── registry.go           Registry (BLOS listener pattern:
+│                             snapshot-under-lock, fire-unlocked,
+│                             per-listener recover, drop accounting)
 │
 └── webaudio/             Browser audio bridge (web control source only)
     └── bridge.go             Bridge, NewBridge, SendFn, InjectTxFrame,
@@ -145,9 +174,10 @@ ignorant of `*PortChannel` and the rest of the parent runtime types.
   │   │   RxGate (HalfDuplex)   │                                       │
   │   │   SendEnabled / RecvEn  │                                       │
   │   └─────────────────────────┘                                       │
-  │   ┌─────────────────────────┐                                       │
-  │   │ PortChannel [1] … [N-1] │  one entry per McastPortConfig        │
-  │   └─────────────────────────┘                                       │
+  │   ┌─────────────────────────┐   ActiveChannel (atomic.Int32)        │
+  │   │ PortChannel [1] … [N-1] │   Events    *talkgroup.Registry       │
+  │   └─────────────────────────┘   Announcer *announce.Player          │
+  │       one per McastPortConfig   GPIOSel   *gpio.Selector            │
   └──────────┬─────────────────────────────────┬────────────────────────┘
              │                                 │
              ▼                                 ▼
@@ -172,6 +202,14 @@ shutdown so handlers can defensively call `Default()` before comms is
 enabled. `CommsManager` sits one layer above and owns the start/stop
 lifetime — `Enable()` calls `Validate` synchronously, then runs `Start`
 in a background goroutine; `Disable()` cancels the context and waits.
+
+The talk group control plane funnels every selection source — the
+`SelectTalkGroup` RPC, the web UI, and the Raven's GPIO hardware selector —
+through one choke point, `Service.SelectTalkGroup`, which flips the per-port
+atomics exclusively (one group RX+TX, all others off) and fires
+`rt.Events`, a `talkgroup.Registry`. The voice announcer and the
+`StreamTalkGroupEvents` RPC are plain registry consumers. See
+[§10](#10-talk-group-control-plane).
 
 `FECAdapter` is a damped control loop that observes the per-port
 jitter-buffer gap-run histogram every 2 s and adjusts the Opus
@@ -231,6 +269,9 @@ CommsConfig
 │                                                   speaker→mic coupling
 ├── MicGain                   float32               int16 gain w/ clipping
 │
+├── GPIOSelectorEnable        bool                  comms.gpioSelector.enable
+│                                                   (honored on Raven only)
+│
 └── Debug, Loopback, Trace    bool
 ```
 
@@ -265,7 +306,19 @@ CommsRuntime
 ├── BeepBufferStop    []int16                    600 Hz, frame-sized
 │
 ├── Broadcasting      atomic.Bool                TX state
-└── RemoteRxActive    atomic.Bool                cached half-duplex flag
+├── RemoteRxActive    atomic.Bool                cached half-duplex flag
+│
+├── ActiveChannel     atomic.Int32               1-based active talk group;
+│                                                0 until selected/seeded
+├── Events            *talkgroup.Registry        selection/direction event
+│                                                fan-out (nil-safe Notify)
+├── Announcer         *announce.Player           nil in web mode / decode
+│                                                failure / minimal tests
+├── GPIOSel           *gpio.Selector             nil off-Raven / disabled /
+│                                                open failure
+└── selectMu          sync.Mutex (private)       serializes SelectTalkGroup's
+                                                 multi-port flip; never taken
+                                                 on frame paths
 ```
 
 `BroadcastTap` is a lock-free atomic pointer the ROIP control source
@@ -341,9 +394,17 @@ func SetDefault(svc *Service)    // Start publishes; shutdown clears
 
 Methods all tolerate a nil receiver and a nil `Service.Rt`:
 
-- `ActiveMulticastAddr()` / `ActiveMulticastPort()` — first port's address.
+- `SelectTalkGroup(channel int, src talkgroup.Source) error` — the exclusive
+  selection choke point; see [§10](#10-talk-group-control-plane).
+- `ActiveTalkGroup() int` — 1-based active group, 0 when unset/not running.
+- `Events() *talkgroup.Registry` — the event registry (nil when down).
+- `ActiveMulticastAddr()` — first port's address.
+- `ActiveMulticastPort()` — the **active** group's port, falling back to
+  the first configured port before any selection (this made the status
+  RPC's `ActiveTalkgroup` truthful for the first time).
 - `EnableTalkGroupSend(idx, bool)` / `EnableTalkGroupReceive(idx, bool)` —
-  toggle the per-port atomics.
+  toggle one direction on one port; emit a `KindDirection` event when the
+  stored value actually changed.
 - `TalkGroupStates() ([]McastPortState, error)` — snapshot of every port.
 - `WebEventSource() *control.WebEventSource` — non-nil only in web mode.
 - `WebAudioBridge() *webaudio.Bridge` — non-nil only in web mode.
@@ -526,15 +587,22 @@ Start(ctx)
   ├─ 9. SetDefault(&Service{Cfg: cfg, Rt: rt})
   │       publishes the live instance for HTTP handlers
   │
+  ├─ 9a. cfg.seedActiveChannel(rt)
+  │       derives the boot-time active group from the seeded per-port
+  │       toggles (first port with both directions on), stores
+  │       rt.ActiveChannel, and emits one KindSelected event tagged
+  │       SourceInit — which the announcer ignores, so boot is silent
+  │
   ├─10. cfg.buildEventSource(rt)
   │       factory := controlLookup(ControlSource)     (control.Lookup)
   │       deps   := cfg.buildControlDeps(rt)          (per-backend payload)
   │       return factory(deps)                        // *control.X
   │
-  ├─11. Branch on ControlSource:
+  ├─11. rt.audioCleanup = cfg.initAudioIO(ctx, rt)
   │       web → rt.WebBridge = webaudio.NewBridge(cfg.Log,
   │                func(p []byte) { cfg.sendToAllPorts(rt, p) })
-  │       else → cleanup, _ := cfg.startHardwareAudio(rt)
+  │       else → retries cfg.startHardwareAudio(rt) up to
+  │              audioInitAttempts times:
   │              builds audio.Init{Deps: …}, []audio.PortSlot, calls
   │              audioInit.StartHardware(slots) →
   │                malgo.InitContext (ALSA probe log lines suppressed
@@ -544,6 +612,21 @@ Start(ctx)
   │              rt.BroadcastStream = broadcast
   │              rt.ReopenBroadcast = audioInit.ReopenBroadcast wrapper
   │              defer cleanup()
+  │
+  ├─11a. cfg.startAnnouncer(ctx, rt)
+  │       must run after initAudioIO: needs the per-port playback
+  │       streams and checks rt.WebBridge to skip web mode. Decodes
+  │       the embedded clips (announce.New), stores rt.Announcer,
+  │       spawns player.Run(ctx), registers the KindSelected →
+  │       Announce listener (SourceInit excluded). Best-effort:
+  │       decode failure logs and disables announcements.
+  │
+  ├─11b. cfg.startGPIOSelector(ctx, svc)
+  │       Raven-only (board.GPIOSelectorSupported) and honors
+  │       GPIOSelectorEnable. Opens the selector lines, stores
+  │       rt.GPIOSel, spawns svc.forwardSelections(events, log).
+  │       Best-effort: open failure logs and degrades — RPC and
+  │       web selection keep working.
   │
   └─12. cfg.Run(ctx, rt, src)   ← blocks until ctx canceled
 ```
@@ -582,6 +665,22 @@ Once `Start` reaches step 12 the following goroutines are live:
               PTTDown   → beginTransmission(rt)
               PTTUp     → endTransmission(rt)
               PTTToggle → toggle by current Broadcasting state
+
+  [announce.Player, spawned by startAnnouncer — hardware audio mode only]
+  └── player.Run(ctx) — waits on the depth-1 latest-wins request slot;
+      while a clip plays, a 20 ms ticker feeds one pre-decoded frame per
+      tick into queueLocalAudioFrame. Ticker exists only mid-clip, so an
+      idle announcer costs nothing. Exits on ctx.Done.
+
+  [gpio.Selector, spawned by startGPIOSelector — Raven only]
+  ├── watch goroutine — blocks on kernel edge wakeups, re-reads all five
+  │   lines per edge, emits 1-based channels (latest-wins, depth 1).
+  │   Closes the events channel on ctx.Done or after readErrorBreaker
+  │   consecutive read failures.
+  └── forwardSelections goroutine — ranges the events channel (already
+      latest-wins on the producer side) and calls svc.SelectTalkGroup;
+      the first emission is tagged SourceInit (silent boot-position
+      adopt), the rest SourceGPIO. Exits when the events channel closes.
 
   [audio.BroadcastEncoder, spawned by NewBroadcastEncoder]
   └── encodeLoop goroutine — drains encCh, applies gain, EncodeS16,
@@ -880,9 +979,10 @@ playoutOneFrame(pc, rt, jitter, out []int16)
   └─ default: zeroInt16(out)         (idle stream / not started)
 ```
 
-The malgo playback callback drains `pc.PlaybackBuffer` (the beep side
-channel) ahead of falling through to `playoutOneFrame`, so a TX
-start/stop tone preempts exactly one frame of jitter-buffered audio.
+The malgo playback callback drains `pc.PlaybackBuffer` (the beep +
+announcement side channel) ahead of falling through to
+`playoutOneFrame`, so a TX start/stop tone or an announcement frame
+preempts exactly one frame of jitter-buffered audio.
 
 ### webPlayoutLoop (web mode only)
 
@@ -899,8 +999,7 @@ cfg.webPlayoutLoop(ctx, jitter, rt)
     for {
       payload, _ := jitter.PopOrConceal(200ms)
       if payload == nil { return }
-      cp := copy of payload
-      rt.WebBridge.PushRxFrame(cp)
+      rt.WebBridge.PushRxFrame(webChannel, payload)  // copies internally; webChannel = port's talk group
       jitter.ReleasePayload(payload)
     }
   }
@@ -1221,9 +1320,152 @@ Run(ctx, rt, src)
   }
 ```
 
+### Aux events and the hardware mixer
+
+`AuxEvent` (`VolumeUpPressed`/`VolumeUpReleased`/`VolumeDownPressed`/
+`VolumeDownReleased`) is `control`'s non-PTT counterpart to `PTTEvent`.
+Any `EventSource` that also implements `control.AuxEventSource` exposes
+an `AuxEvents()` channel; when `cfg.AuxHandler` is set, `Run` spawns
+`runAuxPump` on the *parent* context (not the `Run`-scoped one, so it
+keeps draining aux events already queued when the PTT channel closes)
+to forward each event to `cfg.AuxHandler.Handle`. Production wiring sets
+`AuxHandler` to a fresh `control/alsa.Controller`, which nudges a raw
+ALSA mixer control by a relative step per VOL+/VOL− press and swallows
+every error — a bad card can never take down the aux pump goroutine. A
+parallel absolute-control path lives beside it: `control/alsa.Volume`
+backs the `GetAudioMixer`/`UpdateAudioMixer` RPCs and
+`CommsConfig.AudioMixerStartup`, the closure the manager wires to
+re-apply persisted `comms.audio.*` levels after ALSA card detection
+(step 3 in §4) and after every successful in-run audio recovery. See
+[README.md § Volume control via ALSA](README.md#volume-control-via-alsa)
+for the full candidate-list resolution, persistence, and
+startup-behavior detail.
+
 ---
 
-## 10. Interface Reference
+## 10. Talk Group Control Plane
+
+Three features on one event spine (spec:
+`docs/superpowers/specs/2026-08-20-talkgroup-control-plane-design.md`):
+**F1** exclusive selection + listener registry + streaming RPC, **F2**
+voice announcements, **F3** the Raven GPIO hardware selector.
+
+### Event vocabulary (`talkgroup`, leaf package)
+
+```go
+type Source uint8  // SourceRPC = 1, SourceGPIO = 2, SourceInit = 3
+type Kind   uint8  // KindSelected = 1, KindDirection = 2
+
+type Event struct {
+    At      time.Time
+    Channel int  // 1-based talk group the event is about
+    Prev    int  // previous active channel (KindSelected only, 0 if none)
+    Kind    Kind
+    Send    bool
+    Receive bool
+    Source  Source
+}
+```
+
+`Registry` follows the BLOS status-worker pattern: ID-keyed listener map,
+snapshot-under-lock, fire-unlocked, per-listener `recover`, and
+`NoteDropped`/`Dropped` drop accounting. `Notify` is nil-receiver safe and
+allocates only the listener-slice snapshot — events fire at human rate,
+never on a frame path. The proto enums (`TalkGroupEventKind` /
+`TalkGroupEventSource`) mirror these numeric values by construction so the
+RPC handler casts directly; `TestTalkGroupEventToProto` pins every value.
+
+### SelectTalkGroup — the choke point
+
+All selection sources funnel through `Service.SelectTalkGroup(channel,
+src)`. Two phases under `rt.selectMu`:
+
+```
+SelectTalkGroup(channel, src)
+  │  validate channel (config.TalkGroupPort) + provisioned-port lookup
+  │
+  │  selectMu.Lock()
+  ├─ phase 1 (flags only, no device I/O):
+  │    disable send+receive flags on every other port FIRST,
+  │    enable the target LAST — no transient two-active window,
+  │    so TX can never leak cross-channel mid-flip
+  │  prev := rt.ActiveChannel.Swap(channel)
+  ├─ changed || prev != channel → rt.Events.Notify(KindSelected …)
+  │    emitted UNDER selectMu so concurrent selections notify in
+  │    swap order — the latest-wins announcer can never speak a
+  │    superseded channel
+  │  selectMu.Unlock()
+  │
+  └─ phase 2 (unlocked): applyReceivePlayback on each rx-changed port
+       — malgo stream stop/start reconciliation happens outside the
+       lock, honoring "no lock across blocking ops"
+```
+
+A selection that changes nothing emits no event. The direction toggles
+(`EnableTalkGroupSend` / `Receive`) delegate to change-tracking helpers
+(`setSend`, `setReceiveFlag` + `applyReceivePlayback`) and emit
+`KindDirection` only on an actual change.
+
+### Announcer (`announce`)
+
+- Five Ogg-Opus clips ("talk group one" … "five", Piper
+  `en_US-libritts_r-medium`, CC BY 4.0 — attribution in `clips/NOTICE`)
+  are embedded and decoded ONCE at `startAnnouncer` into
+  `audiopool.FrameSize` int16 frames (~480 KB resident bound). A minimal
+  read-only Ogg walker (`ogg.go`) bridges to the raw-packet `codec`
+  decoder; zero-length packets are skipped.
+- `Announce(channel)` is non-blocking into a depth-1 latest-wins slot —
+  a rapid selector spin announces only the final position. `Run` paces
+  one frame per 20 ms into `queueLocalAudioFrame`.
+- `queueLocalAudioFrame` (transmit.go) picks one audible stream:
+  (1) the active group's running playback stream, (2) the first running
+  stream, (3) wake the first startable stream and arm the beep re-sleep
+  timer. Sends are non-blocking; a full buffer drops (counted), never
+  wedges the player. 0 allocs/op (`BenchmarkAnnouncerEnqueue`).
+- The registry listener plays `KindSelected` only and skips `SourceInit`
+  — boot is silent. Web mode gets no announcer (browser owns the
+  speaker); it consumes `StreamTalkGroupEvents` instead.
+
+### GPIO selector (`gpio`)
+
+- Raven-only (`board.GPIOSelectorSupported()`, model
+  `BCM2711_RAVEN_USB`), operator-disable via `comms.gpioSelector.enable`.
+- Five lines (`SelectorPins`, BCM GPIO 17, 27, 22, 24, 10 → talk
+  groups 1–5, confirmed against the Raven schematic 2026-09-05),
+  pull-up, active-low (switch common to GND: selected position reads
+  LOW, the rest HIGH), both-edge kernel events with kernel-side
+  debounce (cdev uAPI v2, `go-gpiocdev`, pure Go). No polling loop.
+- On each debounced edge the watcher re-reads all five lines:
+  exactly one low → emit that channel; zero or several low (rotary in
+  transit, wiring fault) → hold the last selection (`held_glitches`
+  counter). Delivery is latest-wins depth 1. Ten consecutive read
+  failures trip a breaker: channel closes, selector disabled, RPC/web
+  selection unaffected.
+- The boot read is emitted first so the daemon adopts the physical
+  switch position (forwarded as `SourceInit`, no announcement). A boot
+  read with no single low line logs one warning with the raw values and
+  emits nothing — the daemon keeps its configured channel; later edge
+  glitches only bump the counter.
+- `hardware.go` is the only file that imports the library; tests run
+  against the `lineGroup` fake via the `openFn` seam.
+
+### RPC surface
+
+| RPC | Shape | Handler notes |
+|---|---|---|
+| `SelectTalkGroup` | unary | `talkgroup` constrained `gte:1, lte:32` via buf.validate; maps to `Service.SelectTalkGroup(…, SourceRPC)`; not-provisioned → `CodeInvalidArgument`, not running → `CodeFailedPrecondition`. |
+| `StreamTalkGroupEvents` | server stream | Bounded chan (16) fed by `TalkGroupEventListener` — non-blocking send, drop-newest with `NoteDropped`, `defer Remove(id)`, pump loop vs `ctx.Done()`. |
+
+### Instrumentation
+
+`CommsSnapshot` carries `active_talkgroup`, `talkgroup_events_dropped`,
+`announcer{plays,frame_drops}`, `gpio_selector{transitions,held_glitches}`
+— all atomic loads, zero-alloc; field semantics and triage heuristics in
+`docs/instrumentation-snapshot.md` (schema 1.5.0).
+
+---
+
+## 11. Interface Reference
 
 Every hardware-touching operation is hidden behind one of these
 interfaces. Each sub-package owns its own `mocks_test.go` (or similar)
@@ -1375,8 +1617,8 @@ type SendFn func(opusData []byte)
 
 func NewBridge(log zerolog.Logger, send SendFn) *Bridge
 func (b *Bridge) InjectTxFrame(opusData []byte)        // RPC TX path
-func (b *Bridge) PushRxFrame(opusData []byte)          // webPlayoutLoop RX
-func (b *Bridge) RxFrames() <-chan []byte              // RPC RX channel
+func (b *Bridge) PushRxFrame(ch byte, opusData []byte) // webPlayoutLoop RX (ch = 1-based talk group, 0 = unknown)
+func (b *Bridge) RxFrames() <-chan Frame               // RPC RX channel; Frame carries Data(), Channel(), Release()
 ```
 
 The parent binds `SendFn` to `cfg.sendToAllPorts(rt, …)` at construction
@@ -1384,7 +1626,7 @@ so `webaudio` never imports the parent and never sees a `*PortChannel`.
 
 ---
 
-## 11. Extending the Package
+## 12. Extending the Package
 
 ### Adding a new control source
 
@@ -1471,14 +1713,28 @@ constructor through `buildCodec` in [comms.go](comms.go). The rest of
 the pipeline — capture/playback callbacks, RTP session, jitter buffer,
 and playout — is codec-agnostic.
 
-### Toggling talk-group direction at runtime
+### Selecting or toggling talk groups at runtime
 
 ```go
 svc := comms.Default()
+
+// Exclusive select: channel 3 RX+TX, all others off; emits KindSelected.
+if err := svc.SelectTalkGroup(3, talkgroup.SourceRPC); err != nil { /* … */ }
+
+// Fine-grained escape hatch: one direction on one port; emits
+// KindDirection when the value actually changed.
 if err := svc.EnableTalkGroupSend(idx, true); err != nil { /* … */ }
 if err := svc.EnableTalkGroupReceive(idx, false); err != nil { /* … */ }
 states, _ := svc.TalkGroupStates()
 ```
+
+New selection *sources* (a rotary encoder, a button matrix, a schedule)
+should call `SelectTalkGroup` with their own `talkgroup.Source` value —
+never flip the port atomics directly — so every registry consumer
+(announcer, stream RPC, future listeners) sees an identical event stream.
+New event *consumers* just call `svc.Events().Add(fn)`; callbacks must be
+non-blocking (bounded buffer + `NoteDropped`, see `TalkGroupEventListener`
+in the handlers package for the canonical shape).
 
 The atomic toggles are checked by `sendToAllPorts` (TX side),
 `receiveLoop` (RX side, via `pc.ReceiveEnabled`), and
@@ -1492,11 +1748,11 @@ half-duplex purposes). No goroutines or sockets are restarted.
 
 ---
 
-## 12. Testing Strategy
+## 13. Testing Strategy
 
 The package and every sub-package are fully testable without real
 hardware because every external dependency is hidden behind one of the
-interfaces in [§10](#10-interface-reference). Each sub-package keeps its
+interfaces in [§11](#11-interface-reference). Each sub-package keeps its
 own hand-written fakes in a sibling `_test.go` file (no shared mock
 package, no mock framework).
 
@@ -1504,13 +1760,16 @@ package, no mock framework).
 
 | Area | Package | Main test files |
 |---|---|---|
-| Top-level orchestration | `comms` | [comms_test.go](comms_test.go), [transmit_test.go](transmit_test.go), [receive_test.go](receive_test.go), [manager_test.go](manager_test.go), [service_test.go](service_test.go), [register_close_test.go](register_close_test.go), [control_register_test.go](control_register_test.go), [multiport_test.go](multiport_test.go), [integration_test.go](integration_test.go), [event_test.go](event_test.go), [bench_test.go](bench_test.go), [mocks_test.go](mocks_test.go) |
+| Top-level orchestration | `comms` | [comms_test.go](comms_test.go), [transmit_test.go](transmit_test.go), [receive_test.go](receive_test.go), [manager_test.go](manager_test.go), [service_test.go](service_test.go), [lifecycle_test.go](lifecycle_test.go), [snapshot_test.go](snapshot_test.go), [register_close_test.go](register_close_test.go), [control_register_test.go](control_register_test.go), [multiport_test.go](multiport_test.go), [integration_test.go](integration_test.go), [event_test.go](event_test.go), [bench_test.go](bench_test.go), [select_bench_test.go](select_bench_test.go), [localaudio_bench_test.go](localaudio_bench_test.go), [mocks_test.go](mocks_test.go) |
+| Talk group announcements | `announce` | [announce/announce_test.go](announce/announce_test.go), [announce/ogg_test.go](announce/ogg_test.go) |
 | Broadcast encoder + Init | `audio` | [audio/encoder_test.go](audio/encoder_test.go), [audio/mocks_test.go](audio/mocks_test.go) |
 | Pools + RMS energy | `audiopool` | [audiopool/audiopool_test.go](audiopool/audiopool_test.go) |
 | Opus wrapper | `codec` | [codec/opus_test.go](codec/opus_test.go) |
 | PTT backends + gate | `control` | [control/openvlm_test.go](control/openvlm_test.go), [control/roip_test.go](control/roip_test.go), [control/web_event_source_test.go](control/web_event_source_test.go), [control/source_test.go](control/source_test.go), [control/half_duplex_gate_test.go](control/half_duplex_gate_test.go) |
 | Device discovery | `device` | [device/cm108_test.go](device/cm108_test.go), [device/alsa_test.go](device/alsa_test.go) |
+| GPIO hardware selector | `gpio` | [gpio/selector_test.go](gpio/selector_test.go) (fake `lineGroup` via `openFn` seam — every test runs hardware-free) |
 | RTP session, jitter, transport | `rtp` | [rtp/session_test.go](rtp/session_test.go), [rtp/jitter_test.go](rtp/jitter_test.go), [rtp/transport_test.go](rtp/transport_test.go), [rtp/fuzz_test.go](rtp/fuzz_test.go), [rtp/mocks_test.go](rtp/mocks_test.go) |
+| Talk group events | `talkgroup` | [talkgroup/registry_test.go](talkgroup/registry_test.go), [talkgroup/registry_bench_test.go](talkgroup/registry_bench_test.go) |
 | Web audio bridge | `webaudio` | [webaudio/bridge_test.go](webaudio/bridge_test.go) |
 
 ### Mock injection pattern

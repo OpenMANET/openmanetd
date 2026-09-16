@@ -22,6 +22,10 @@ type UCIMesh11sdMeshParams struct {
 	// always the case in this codebase, since batman-adv is mandatory)
 	// and "1" if the device falls back to in-driver mesh forwarding.
 	MeshFwding string `uci:"option mesh_fwding"`
+	// MeshNolearn is "1" when batman-adv owns path discovery (always,
+	// in this codebase) so the 802.11s driver does not learn mesh paths
+	// from received frames; "0" lets the driver learn them.
+	MeshNolearn string `uci:"option mesh_nolearn"`
 }
 
 // UCIMesh11sdConfigReader wraps go-uci with the same shape as the
@@ -87,6 +91,10 @@ func GetMesh11sdMeshParamsWithReader(reader ConfigReader) (*UCIMesh11sdMeshParam
 		cfg.MeshFwding = v[0]
 	}
 
+	if v, ok := reader.Get(mesh11sdConfigName, mesh11sdMeshParamSection, "mesh_nolearn"); ok && len(v) > 0 {
+		cfg.MeshNolearn = v[0]
+	}
+
 	return cfg, nil
 }
 
@@ -104,6 +112,14 @@ func SetMeshGateAnnouncements(reader ConfigReader, value string) error {
 // in-driver forwarding would create routing loops. Does not commit.
 func SetMeshFwding(reader ConfigReader, value string) error {
 	return setMesh11sdMeshParam(reader, "mesh_fwding", value)
+}
+
+// SetMeshNolearn writes mesh11sd.mesh_params.mesh_nolearn. The setup
+// wizard always passes "1" because batman-adv owns path discovery; the
+// 802.11s driver learning paths from received frames would fight it.
+// Does not commit.
+func SetMeshNolearn(reader ConfigReader, value string) error {
+	return setMesh11sdMeshParam(reader, "mesh_nolearn", value)
 }
 
 // SetMesh11sdSetupEnabled writes mesh11sd.setup.enabled. Required for

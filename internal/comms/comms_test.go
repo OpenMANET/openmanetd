@@ -3,6 +3,7 @@ package comms
 import (
 	"context"
 	"net"
+	"net/netip"
 	"os"
 	"testing"
 	"time"
@@ -47,9 +48,9 @@ func TestReceiveLoop_ExitsOnContextCancel(t *testing.T) {
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
 	pc.PlaybackBuffer = make(chan []int16, 8)
+	pc.Decoder = &mockDecoder{}
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{},
+		Ports: []*PortChannel{pc},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -76,7 +77,7 @@ func TestReceiveLoop_IngestsPackets(t *testing.T) {
 
 	for i := 0; i < rtp.PrebufferPackets+2; i++ {
 		raw := makeRTPBytes(t, uint16(i))
-		pkts = append(pkts, mockPacket{data: raw, src: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4)}})
+		pkts = append(pkts, mockPacket{data: raw, src: netip.MustParseAddrPort("1.2.3.4:5004")})
 	}
 
 	reader := newMockReader(pkts...)
@@ -87,9 +88,9 @@ func TestReceiveLoop_IngestsPackets(t *testing.T) {
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
 	pc.PlaybackBuffer = make(chan []int16, 32)
+	pc.Decoder = &mockDecoder{returnN: int(rtp.FrameSamples)}
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -133,13 +134,13 @@ func TestPlayoutOneFrame_SuppressedDuringBroadcastOnSendPort(t *testing.T) {
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
 
+	pc.Decoder = &mockDecoder{fillValue: 42, returnN: audiopool.FrameSize}
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{fillValue: 42, returnN: audiopool.FrameSize},
+		Ports: []*PortChannel{pc},
 	}
 	rt.Broadcasting.Store(true)
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA, 0xBB})
 
 	out := make([]int16, audiopool.FrameSize)
@@ -164,9 +165,10 @@ func TestPlayoutOneFrame_DecodesPayloadIntoOut(t *testing.T) {
 	pc.ReceiveEnabled.Store(true)
 
 	dec := &mockDecoder{fillValue: 42, returnN: audiopool.FrameSize}
-	rt := &CommsRuntime{Decoder: dec}
+	pc.Decoder = dec
+	rt := &CommsRuntime{}
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{1, 2, 3})
 
 	out := make([]int16, audiopool.FrameSize)
@@ -194,12 +196,13 @@ func TestPlayoutOneFrame_PLCFillsOut(t *testing.T) {
 	pc.ReceiveEnabled.Store(true)
 
 	dec := &mockDecoder{fillValue: 10, returnN: audiopool.FrameSize}
-	rt := &CommsRuntime{Decoder: dec}
+	pc.Decoder = dec
+	rt := &CommsRuntime{}
 
 	// Push and pop to set started=true and a recent lastPush; the next
 	// playoutOneFrame call will hit the conceal branch and call the decoder
 	// with a nil payload (PLC).
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0})
 	jb.PopReady()
 
@@ -245,28 +248,23 @@ func TestEncoderComplexity_DefaultIsMIPSFriendly(t *testing.T) {
 	}
 }
 
-// TestBuildCodec_UsesDefaultComplexity verifies that buildCodec falls back
-// to the package default when CommsConfig.EncoderComplexity is unset, and
-// that the default produces a working encoder/decoder pair.
-func TestBuildCodec_UsesDefaultComplexity(t *testing.T) {
+// TestBuildEncoder_UsesDefaultComplexity verifies that buildEncoder falls
+// back to the package default when CommsConfig.EncoderComplexity is unset,
+// and that the default produces a working encoder.
+func TestBuildEncoder_UsesDefaultComplexity(t *testing.T) {
 	cfg := &CommsConfig{Log: zerolog.Nop()}
 
-	enc, dec, err := cfg.buildCodec()
+	enc, err := cfg.buildEncoder()
 	if err != nil {
-		t.Fatalf("buildCodec with default complexity: %v", err)
+		t.Fatalf("buildEncoder with default complexity: %v", err)
 	}
 
 	if enc == nil {
-		t.Fatal("buildCodec returned nil encoder")
-	}
-
-	if dec == nil {
-		t.Fatal("buildCodec returned nil decoder")
+		t.Fatal("buildEncoder returned nil encoder")
 	}
 
 	t.Cleanup(func() {
 		_ = enc.Close()
-		_ = dec.Close()
 	})
 
 	// Smoke test: a single frame round-trip succeeds with the default
@@ -281,6 +279,43 @@ func TestBuildCodec_UsesDefaultComplexity(t *testing.T) {
 
 	if n <= 0 {
 		t.Fatalf("EncodeS16 produced %d bytes, want > 0", n)
+	}
+}
+
+// TestBuildPortDecoders_DistinctPerReceivePort verifies that every
+// receive-capable port gets its own decoder instance. Concurrent receive on
+// multiple talk groups is a designed capability, and each port's playback
+// callback runs on its own audio thread, so decoder state must never be
+// shared between ports.
+func TestBuildPortDecoders_DistinctPerReceivePort(t *testing.T) {
+	ports := []*PortChannel{
+		{Receiver: rtp.NewSwappableReceiver(newMockReader())},
+		{}, // send-only: no receive socket, no decoder needed
+		{Receiver: rtp.NewSwappableReceiver(newMockReader())},
+	}
+
+	if err := buildPortDecoders(ports); err != nil {
+		t.Fatalf("buildPortDecoders: %v", err)
+	}
+
+	t.Cleanup(func() {
+		for _, pc := range ports {
+			if pc.Decoder != nil {
+				_ = pc.Decoder.Close()
+			}
+		}
+	})
+
+	if ports[0].Decoder == nil || ports[2].Decoder == nil {
+		t.Fatal("every receive-capable port must get a decoder")
+	}
+
+	if ports[0].Decoder == ports[2].Decoder {
+		t.Fatal("ports must not share a decoder instance")
+	}
+
+	if ports[1].Decoder != nil {
+		t.Error("send-only port should not get a decoder")
 	}
 }
 
@@ -304,14 +339,13 @@ func TestBuildCodec_HonorsExplicitComplexity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &CommsConfig{Log: zerolog.Nop(), EncoderComplexity: tc.in}
 
-			enc, dec, err := cfg.buildCodec()
+			enc, err := cfg.buildEncoder()
 			if err != nil {
-				t.Fatalf("buildCodec(%d): %v", tc.in, err)
+				t.Fatalf("buildEncoder(%d): %v", tc.in, err)
 			}
 
 			t.Cleanup(func() {
 				_ = enc.Close()
-				_ = dec.Close()
 			})
 		})
 	}

@@ -44,10 +44,8 @@ const (
 	optionRAFlags          string = "ra_flags"
 	optionLocalService     string = "localservice"
 	optionRASlaac          string = "ra_slaac"
-
-	// Values used by `option ra` / `option ra_flags` and routing tables.
-	raServerValue = "server"
-	raFlagsNone   = "none"
+	optionDHCPOption       string = "dhcp_option"
+	optionInstance         string = "instance"
 )
 
 // UCIDnsmasq represents the dnsmasq global configuration section.
@@ -220,7 +218,7 @@ func GetDHCPConfigWithReader(section string, reader DHCPConfigReader) (*UCIDHCP,
 		config.Ignore = values[0]
 	}
 
-	if values, ok := reader.Get(dhcpConfigName, section, "dhcp_option"); ok && len(values) > 0 {
+	if values, ok := reader.Get(dhcpConfigName, section, optionDHCPOption); ok && len(values) > 0 {
 		config.DHCPOption = values[0]
 	}
 
@@ -302,7 +300,7 @@ func SetDHCPConfigWithReader(section string, config *UCIDHCP, reader DHCPConfigR
 	}
 
 	if config.DHCPOption != "" {
-		if err := reader.SetType(dhcpConfigName, section, "dhcp_option", uci.TypeOption, config.DHCPOption); err != nil {
+		if err := reader.SetType(dhcpConfigName, section, optionDHCPOption, uci.TypeOption, config.DHCPOption); err != nil {
 			return fmt.Errorf("failed to set dhcp_option: %w", err)
 		}
 	}
@@ -909,17 +907,13 @@ func ComputeDHCPRangeStart(baseIP string, start int) (string, error) {
 const (
 	dhcpSectionType string = "dhcp"
 
-	// CloudflareIPv6DNS is the IPv6 DNS server address that the LuCI
-	// Morse wizard hardcodes into every newly-created DHCP pool.
-	CloudflareIPv6DNS string = "2606:4700:4700::1111"
-
 	// DefaultDhcpPoolLimit is the per-pool address count the wizard
 	// uses (a /28-sized window, matching LuCI's createDhcp).
 	DefaultDhcpPoolLimit string = "16"
 
 	// DefaultDhcpPoolLeasetime is the lease duration the wizard sets
-	// on every pool. Three minutes mirrors LuCI exactly.
-	DefaultDhcpPoolLeasetime string = "3m"
+	// on every pool. Matches the LuCI capture fixtures.
+	DefaultDhcpPoolLeasetime string = "12h"
 )
 
 // WizardDnsmasqWhitelist is the field whitelist the wizard applies to
@@ -952,7 +946,7 @@ var allDnsmasqOptions = []string{ //nolint:gochecknoglobals // package-level con
 var allDhcpPoolOptions = []string{ //nolint:gochecknoglobals // package-level constant
 	networkInterfaceType, optionStart, optionLimit, optionLeaseTime, optionIgnore,
 	optionForce, "ra", optionRASlaac, optionRAFlags, optionDNS, optionDNSService,
-	"dhcp_option", "instance",
+	optionDHCPOption, optionInstance,
 }
 
 // WhitelistDnsmasqSurvivor removes every option NOT in allowList from
@@ -1023,59 +1017,21 @@ func WhitelistAndIgnoreAllPools(reader ConfigReader) error {
 	return nil
 }
 
-// SetupDnsmasqInstance writes the 11 standard dnsmasq options that
-// the LuCI Morse wizard sets on every dnsmasq instance (matching
-// `setupDnsmasq()` in morse/uci.js). The networkID parameter
-// scopes the `local` and `domain` options to the network section
-// (e.g. "ahwlan").
+// CreateDhcpPool creates a new dhcp pool section linked to networkID,
+// populating the option set the LuCI Morse wizard's `createDhcp()`
+// helper writes plus any scenario-specific extraOptions. The `start`
+// offset is drawn from the supplied seeded RNG via RandomDhcpStart so
+// tests are reproducible.
 //
-// Does not commit.
-func SetupDnsmasqInstance(reader ConfigReader, dnsmasqName, networkID string) error {
-	if dnsmasqName == "" {
-		return fmt.Errorf("dnsmasqName cannot be empty")
-	}
-
-	if networkID == "" {
-		return fmt.Errorf("networkID cannot be empty")
-	}
-
-	writes := []struct {
-		option, value string
-	}{
-		{optionDomainNeeded, "1"},
-		{optionLocalizeQueries, "1"},
-		{optionRebindLocalhost, "1"},
-		{optionLocal, "/" + networkID + "/"},
-		{optionDomain, networkID},
-		{optionExpandHosts, "1"},
-		{optionCacheSize, "1000"},
-		{optionAuthoritative, "1"},
-		{optionReadEthers, "1"},
-		{optionLocalService, "1"},
-		{optionEdnsPacketMax, "1232"},
-	}
-
-	for _, w := range writes {
-		if err := reader.SetType(dhcpConfigName, dnsmasqName, w.option, uci.TypeOption, w.value); err != nil {
-			return fmt.Errorf("setting %s.%s.%s: %w",
-				dhcpConfigName, dnsmasqName, w.option, err)
-		}
-	}
-
-	return nil
-}
-
-// CreateDhcpPool creates a new dhcp pool section linked to networkID
-// and the supplied dnsmasq instance, populating every field the LuCI
-// `createDhcp()` helper does. The `start` offset is drawn from the
-// supplied seeded RNG via RandomDhcpStart so tests are reproducible.
+// Deliberately does NOT create or link a per-network dnsmasq
+// instance: OpenWrt launches one dnsmasq process per `config
+// dnsmasq` section, so a second instance races the global one for
+// port 53 — the loser exits and takes its bound pool down with it.
+// Both LuCI captures show exactly one dnsmasq and an instance-less
+// pool.
 //
 // Returns the section name of the newly-created pool. Does not commit.
-func CreateDhcpPool(reader ConfigReader, dnsmasqName, networkID string, rng *rand.Rand) (string, error) {
-	if dnsmasqName == "" {
-		return "", fmt.Errorf("dnsmasqName cannot be empty")
-	}
-
+func CreateDhcpPool(reader ConfigReader, networkID string, extraOptions map[string][]string, rng *rand.Rand) (string, error) {
 	if networkID == "" {
 		return "", fmt.Errorf("networkID cannot be empty")
 	}
@@ -1110,51 +1066,85 @@ func CreateDhcpPool(reader ConfigReader, dnsmasqName, networkID string, rng *ran
 		return "", fmt.Errorf("adding dhcp section: %w", err)
 	}
 
-	startOffset := strconv.Itoa(RandomDhcpStart(rng))
-
-	writes := []struct {
-		option, value string
-	}{
-		{"start", startOffset},
-		{optionLimit, DefaultDhcpPoolLimit},
-		{optionLeaseTime, DefaultDhcpPoolLeasetime},
-		{"ra", raServerValue},
-		{optionRASlaac, "1"},
-		{"dns_service", "0"},
-		{optionIgnore, "0"},
-		{optionForce, "1"},
-		{optionDNS, CloudflareIPv6DNS},
-		{"ra_flags", raFlagsNone},
-		{networkInterfaceType, networkID},
-	}
-
-	for _, w := range writes {
-		if err := reader.SetType(dhcpConfigName, proposedName, w.option, uci.TypeOption, w.value); err != nil {
-			return "", fmt.Errorf("setting %s.%s.%s: %w",
-				dhcpConfigName, proposedName, w.option, err)
-		}
-	}
-
-	// Link to the dnsmasq instance only when the instance is named (a
-	// non-anonymous section). LuCI checks `!uci.get(...).['.anonymous']`;
-	// in our reader, anonymous sections come back with a name beginning
-	// with "@". Conservatively, set instance only when the name is not
-	// the @-prefixed form.
-	if !isAnonymousSectionRef(dnsmasqName) {
-		if err := reader.SetType(dhcpConfigName, proposedName, "instance", uci.TypeOption, dnsmasqName); err != nil {
-			return "", fmt.Errorf("setting %s.%s.instance: %w",
-				dhcpConfigName, proposedName, err)
-		}
+	if err := backfillPoolOptions(reader, proposedName, networkID, extraOptions, rng); err != nil {
+		return "", err
 	}
 
 	return proposedName, nil
 }
 
+// backfillPoolOptions writes the wizard's standard pool option set on
+// section. start/limit/leasetime are written only when absent — so a
+// re-run of GetOrCreateDhcpPool doesn't reshuffle addresses on a pool
+// that already carries them — while interface and force are always
+// (re)written, since the reset phase's pool whitelist strips force
+// (it isn't in WizardDhcpPoolWhitelist) on every run. extraOptions
+// entries are always (re)written too, list-typed when they carry more
+// than one value (mirrors the existing dhcp_option write style) —
+// the reset phase's option universe also strips dhcp_option, so a
+// re-run must restore it rather than assume it survived.
+//
+// Does not commit.
+func backfillPoolOptions(reader ConfigReader, section, networkID string, extraOptions map[string][]string, rng *rand.Rand) error {
+	if _, exists := reader.Get(dhcpConfigName, section, optionStart); !exists {
+		if rng == nil {
+			return fmt.Errorf("rng cannot be nil")
+		}
+
+		if err := reader.SetType(dhcpConfigName, section, optionStart, uci.TypeOption,
+			strconv.Itoa(RandomDhcpStart(rng))); err != nil {
+			return fmt.Errorf("setting %s.%s.start: %w", dhcpConfigName, section, err)
+		}
+	}
+
+	if _, exists := reader.Get(dhcpConfigName, section, optionLimit); !exists {
+		if err := reader.SetType(dhcpConfigName, section, optionLimit, uci.TypeOption, DefaultDhcpPoolLimit); err != nil {
+			return fmt.Errorf("setting %s.%s.limit: %w", dhcpConfigName, section, err)
+		}
+	}
+
+	if _, exists := reader.Get(dhcpConfigName, section, optionLeaseTime); !exists {
+		if err := reader.SetType(dhcpConfigName, section, optionLeaseTime, uci.TypeOption, DefaultDhcpPoolLeasetime); err != nil {
+			return fmt.Errorf("setting %s.%s.leasetime: %w", dhcpConfigName, section, err)
+		}
+	}
+
+	if err := reader.SetType(dhcpConfigName, section, networkInterfaceType, uci.TypeOption, networkID); err != nil {
+		return fmt.Errorf("setting %s.%s.%s: %w", dhcpConfigName, section, networkInterfaceType, err)
+	}
+
+	if err := reader.SetType(dhcpConfigName, section, optionForce, uci.TypeOption, "1"); err != nil {
+		return fmt.Errorf("setting %s.%s.force: %w", dhcpConfigName, section, err)
+	}
+
+	for opt, values := range extraOptions {
+		typ := uci.TypeOption
+		if len(values) > 1 {
+			typ = uci.TypeList
+		}
+
+		if err := reader.SetType(dhcpConfigName, section, opt, typ, values...); err != nil {
+			return fmt.Errorf("setting %s.%s.%s: %w", dhcpConfigName, section, opt, err)
+		}
+	}
+
+	return nil
+}
+
 // GetOrCreateDhcpPool finds an enabled dhcp pool that targets
-// networkID and is associated with dnsmasqName (or no instance), or
-// re-enables a disabled matching pool, or creates a fresh one.
-// Returns the section name of the resulting pool. Does not commit.
-func GetOrCreateDhcpPool(reader ConfigReader, dnsmasqName, networkID string, rng *rand.Rand) (string, error) {
+// networkID, or re-enables a disabled matching pool, or creates a
+// fresh one. Returns the section name of the resulting pool. Does
+// not commit.
+//
+// The enabled-match path also runs backfillPoolOptions: interface/
+// force/extraOptions are always rewritten (idempotent — same values
+// unless the caller's extraOptions changed), and start/limit/
+// leasetime are left untouched since backfillPoolOptions only writes
+// them when absent. This isn't a no-op precondition-dependent path —
+// even if a future caller reaches an "enabled" pool whose options
+// were never stripped by a reset phase, the rewrite still converges
+// to the correct wizard shape.
+func GetOrCreateDhcpPool(reader ConfigReader, networkID string, extraOptions map[string][]string, rng *rand.Rand) (string, error) {
 	if networkID == "" {
 		return "", fmt.Errorf("networkID cannot be empty")
 	}
@@ -1170,37 +1160,42 @@ func GetOrCreateDhcpPool(reader ConfigReader, dnsmasqName, networkID string, rng
 			continue
 		}
 
-		instance, _ := reader.Get(dhcpConfigName, s, "instance")
-		if len(instance) > 0 && instance[0] != dnsmasqName {
-			continue
-		}
-
 		ignore, _ := reader.Get(dhcpConfigName, s, "ignore")
 		if len(ignore) == 0 || ignore[0] != "1" {
+			if err := backfillPoolOptions(reader, s, networkID, extraOptions, rng); err != nil {
+				return "", err
+			}
+
 			return s, nil
 		}
 	}
 
-	// No enabled pool — re-enable a disabled match if one exists.
+	// No enabled pool — re-enable a disabled matching pool: clear
+	// ignore AND stale instance (a prior firmware's wizard may have
+	// left one), then backfill the wizard's option set. start/limit/
+	// leasetime are kept when present (points randomize start; a
+	// re-run must not reshuffle addresses), written fresh when the
+	// reset whitelist stripped them.
 	for _, s := range sections {
 		iface, _ := reader.Get(dhcpConfigName, s, "interface")
 		if len(iface) == 0 || iface[0] != networkID {
 			continue
 		}
 
-		instance, _ := reader.Get(dhcpConfigName, s, "instance")
-		if len(instance) > 0 && instance[0] != dnsmasqName {
-			continue
+		for _, opt := range []string{optionIgnore, optionInstance} {
+			if err := reader.Del(dhcpConfigName, s, opt); err != nil {
+				return "", fmt.Errorf("clearing %s on %s: %w", opt, s, err)
+			}
 		}
 
-		if err := reader.Del(dhcpConfigName, s, "ignore"); err != nil {
-			return "", fmt.Errorf("clearing ignore on %s: %w", s, err)
+		if err := backfillPoolOptions(reader, s, networkID, extraOptions, rng); err != nil {
+			return "", err
 		}
 
 		return s, nil
 	}
 
-	return CreateDhcpPool(reader, dnsmasqName, networkID, rng)
+	return CreateDhcpPool(reader, networkID, extraOptions, rng)
 }
 
 // containsString returns true iff slice contains v. Defined locally
@@ -1214,10 +1209,4 @@ func containsString(haystack []string, v string) bool {
 	}
 
 	return false
-}
-
-// isAnonymousSectionRef reports whether the supplied section name is
-// in @type[N] notation, indicating an anonymous section.
-func isAnonymousSectionRef(section string) bool {
-	return len(section) > 0 && section[0] == '@'
 }

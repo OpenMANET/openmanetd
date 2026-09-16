@@ -44,7 +44,10 @@ const (
 type NodeServiceClient interface {
 	// Retrieves detailed information for a specific node by hostname.
 	GetNode(context.Context, *v1.GetNodeRequest) (*v1.GetNodeResponse, error)
-	// Lists all available nodes currently managed by the system.
+	// Lists all nodes currently managed by the system. Rows are fed by the
+	// alfred poll and expire: a peer silent for longer than alfred.nodeExpiry
+	// (default 24h) is deleted on the next poll and drops out of this list.
+	// No expiry runs while alfred itself is unreachable.
 	ListNodes(context.Context, *emptypb.Empty) (*v1.ListNodesResponse, error)
 }
 
@@ -102,7 +105,10 @@ func (c *nodeServiceClient) ListNodes(ctx context.Context, req *emptypb.Empty) (
 type NodeServiceHandler interface {
 	// Retrieves detailed information for a specific node by hostname.
 	GetNode(context.Context, *v1.GetNodeRequest) (*v1.GetNodeResponse, error)
-	// Lists all available nodes currently managed by the system.
+	// Lists all nodes currently managed by the system. Rows are fed by the
+	// alfred poll and expire: a peer silent for longer than alfred.nodeExpiry
+	// (default 24h) is deleted on the next poll and drops out of this list.
+	// No expiry runs while alfred itself is unreachable.
 	ListNodes(context.Context, *emptypb.Empty) (*v1.ListNodesResponse, error)
 }
 

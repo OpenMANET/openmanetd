@@ -135,7 +135,7 @@ func TestWorker_RunWritesSnapshots(t *testing.T) {
 		}
 
 		require.NoError(t, json.Unmarshal(data, &decoded))
-		assert.Equal(t, "1.2.0", decoded.SchemaVersion)
+		assert.Equal(t, "1.6.0", decoded.SchemaVersion)
 		require.Len(t, decoded.Sections, 1)
 		assert.Equal(t, "producer", decoded.Sections[0].Name)
 	}

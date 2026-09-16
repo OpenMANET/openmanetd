@@ -57,3 +57,7 @@ WHERE rowid NOT IN (
     GROUP BY mac_addr
   ) latest ON mn.mac_addr = latest.mac_addr AND mn.updated_at = latest.max_updated_at
 );
+
+-- name: DeleteMeshNodesUpdatedBefore :exec
+DELETE FROM mesh_nodes
+WHERE updated_at < ?;

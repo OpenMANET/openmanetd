@@ -91,6 +91,13 @@ linters:
           - staticcheck
           - unparam
         path: "_test\\.go$"
+      # fw4's icmp_type table spells NDP options "neighbour-*" (matches
+      # the captured LuCI fixtures byte-for-byte); an unknown name
+      # voids the whole rule. Not a typo — exclude rather than let
+      # --fix silently rewrite it back to US spelling.
+      - linters:
+          - misspell
+        text: "neighbour"
     paths:
       - third_party$
       - builtin$

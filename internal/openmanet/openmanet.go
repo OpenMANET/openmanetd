@@ -17,6 +17,7 @@ import (
 	batmanadv "github.com/openmanet/openmanetd/internal/batman-adv"
 	"github.com/openmanet/openmanetd/internal/blos"
 	"github.com/openmanet/openmanetd/internal/comms"
+	"github.com/openmanet/openmanetd/internal/comms/control/alsa"
 	"github.com/openmanet/openmanetd/internal/config"
 	"github.com/openmanet/openmanetd/internal/database"
 	"github.com/openmanet/openmanetd/internal/database/models"
@@ -33,6 +34,7 @@ import (
 	"github.com/openmanet/openmanetd/internal/terminal"
 	"github.com/openmanet/openmanetd/internal/util/board"
 	"github.com/openmanet/openmanetd/internal/util/logger"
+	"github.com/openmanet/openmanetd/internal/wireless"
 	"github.com/rs/zerolog"
 )
 
@@ -51,7 +53,15 @@ func Start(staticFS fs.FS) {
 	applyRuntimeTuning(cfg, log)
 
 	// Create Comms manager (always, so the API handler can use it even if comms is currently disabled)
-	commsManager := comms.NewCommsManager(cfg, logger.GetLogger("comms"))
+	mixerVol := &alsa.Volume{
+		Log: logger.GetLogger("alsa-mixer"),
+		Names: alsa.NamesFromOverrides(
+			cfg.GetCommsAudioSpeakerControl(),
+			cfg.GetCommsAudioMicControl(),
+			cfg.GetCommsAudioAGCControl(),
+		),
+	}
+	commsManager := comms.NewCommsManager(cfg, logger.GetLogger("comms"), mixerVol)
 
 	if board.CommsSupported() && cfg.GetCommsEnable() {
 		if err := commsManager.Enable(); err != nil {
@@ -97,6 +107,7 @@ func Start(staticFS fs.FS) {
 			AddressReservationDataType: cfg.GetAlfredDataTypeAddressReservation(),
 			MeshNeighborsDataType:      cfg.GetAlfredDataTypeMeshNeighbors(),
 			BatmanMulticastForceflood:  cfg.GetBatmanMulticastForceflood(),
+			NodeExpiry:                 cfg.GetAlfredNodeExpiry(),
 			DB:                         db,
 		})
 		if err != nil {
@@ -141,11 +152,16 @@ func Start(staticFS fs.FS) {
 		PersistentLogDir:    "/etc/openmanetd/sysupgrade",
 	})
 
+	// One TTL-bounded wireless cache serves both the API handlers and
+	// the instrumentation snapshotter, so the snapshot adds no netlink
+	// polling of its own. manager is nil when alfred is disabled.
+	wifiProvider := buildWifiProvider(manager)
+
 	// Wire the instrumentation snapshot registry and conditionally spawn
 	// the periodic worker. The registry is always constructed (cheap) but
 	// the worker goroutine is only started when the config flag is true,
 	// so a disabled deployment pays nothing beyond the adapter structs.
-	startInstrumentationWorker(ctx, cfg, blosManager, sysupgradeMgr, log)
+	startInstrumentationWorker(ctx, cfg, blosManager, sysupgradeMgr, mixerVol, wifiProvider, log)
 
 	// BatctlSnapshotter owns one background goroutine that refreshes the
 	// outputs of batctl oj / nj / mj / gwj plus /tmp/bat-hosts every 5s.
@@ -221,10 +237,10 @@ func Start(staticFS fs.FS) {
 	interfaceProvider := &network.NetlinkInterfaceProvider{}
 
 	// Setup wizard wiring: shared UCI reader (production wraps the
-	// default go-uci tree, so all seven wizard configs are addressed
+	// default go-uci tree, so all nine wizard configs are addressed
 	// through one reader). The snapshotter captures the raw file
 	// contents of /etc/config/{wireless,network,dhcp,firewall,system,
-	// mesh11sd,openmanetd} before phase 3 runs and restores them atomically on
+	// mesh11sd,umdns,openmanetd,luci} before phase 3 runs and restores them atomically on
 	// any failure between phases 3 and 12. The post-bricking
 	// restructure makes this load-bearing: without it, a phase-12
 	// commit failure leaves the device with a half-applied wizard
@@ -241,6 +257,7 @@ func Start(staticFS fs.FS) {
 		BLOSManager:           blosManager,
 		Tailscale:             blosManager,
 		CommsManager:          commsManager,
+		Mixer:                 mixerVol,
 		MeshDeltaTracker:      meshDeltaTracker,
 		MeshOrigProvider:      meshOrigProvider,
 		MeshVisProvider:       batctlSnapshotter,
@@ -269,9 +286,15 @@ func Start(staticFS fs.FS) {
 		SetupRNG:            setupRNG,
 	}
 
-	if manager != nil {
-		apiServer.Wifi = manager.WirelessConfig
-		interfaceProvider.WifiInterfaces = manager.WirelessConfig.Interfaces
+	// buildWifiProvider returns nil when the manager is absent or its
+	// nl80211 client failed to initialize; both consumers then stay
+	// unset (name-based interface classification, no wifi handlers)
+	// instead of dereferencing a nil WirelessConfig. Reading the
+	// classifier through the cache also folds its Interfaces() walk
+	// into the one the handlers already share.
+	if wifiProvider != nil {
+		apiServer.Wifi = wifiProvider
+		interfaceProvider.WifiInterfaces = wifiProvider.Interfaces
 	}
 
 	api := server.NewAPIServer(apiServer)
@@ -330,12 +353,13 @@ func Start(staticFS fs.FS) {
 }
 
 // startInstrumentationWorker constructs the instrumentation snapshot
-// registry, registers the comms and BLOS adapters, and starts the
-// periodic worker goroutine when the config flag is enabled. The
-// registry itself is cheap; only the worker has runtime cost. Errors
-// during setup are logged but never fatal — a misconfigured snapshot
-// subsystem must not prevent the daemon from serving traffic.
-func startInstrumentationWorker(ctx context.Context, cfg *config.Config, blosManager *blos.BLOSManager, sysupgradeMgr *sysupgrade.Manager, log zerolog.Logger) {
+// registry, registers the comms, BLOS, sysupgrade and wireless
+// adapters, and starts the periodic worker goroutine when the config
+// flag is enabled. The registry itself is cheap; only the worker has
+// runtime cost. Errors during setup are logged but never fatal — a
+// misconfigured snapshot subsystem must not prevent the daemon from
+// serving traffic.
+func startInstrumentationWorker(ctx context.Context, cfg *config.Config, blosManager *blos.BLOSManager, sysupgradeMgr *sysupgrade.Manager, mixerVol *alsa.Volume, wifiProvider *handlers.CachedWirelessProvider, log zerolog.Logger) {
 	if !cfg.GetInstrumentationEnable() {
 		return
 	}
@@ -361,6 +385,12 @@ func startInstrumentationWorker(ctx context.Context, cfg *config.Config, blosMan
 		return
 	}
 
+	if err = reg.Register("audio_mixer", &alsa.MixerSnapshotter{V: mixerVol}); err != nil {
+		log.Error().Err(err).Msg("instrumentation: failed to register audio mixer snapshotter")
+
+		return
+	}
+
 	if err = reg.Register("blos", &blos.BLOSSnapshotter{Manager: blosManager}); err != nil {
 		log.Error().Err(err).Msg("instrumentation: failed to register blos snapshotter")
 
@@ -370,6 +400,16 @@ func startInstrumentationWorker(ctx context.Context, cfg *config.Config, blosMan
 	if sysupgradeMgr != nil {
 		if err = reg.Register("sysupgrade", &sysupgrade.Snapshotter{Manager: sysupgradeMgr}); err != nil {
 			log.Error().Err(err).Msg("instrumentation: failed to register sysupgrade snapshotter")
+
+			return
+		}
+	}
+
+	// A typed nil must never reach the Provider interface field, so the
+	// section is registered only when the cache exists.
+	if wifiProvider != nil {
+		if err = reg.Register("wireless", &wireless.Snapshotter{Provider: wifiProvider}); err != nil {
+			log.Error().Err(err).Msg("instrumentation: failed to register wireless snapshotter")
 
 			return
 		}
@@ -449,6 +489,27 @@ func resolveGOMAXPROCS(cfgVal int, prof board.ExecutionProfile) int {
 	}
 
 	return prof.GOMAXPROCS
+}
+
+// buildWifiProvider constructs the TTL-bounded wireless cache shared by
+// the API handlers, the instrumentation snapshotter, and the netlink
+// interface classifier (interfaceProvider.WifiInterfaces), or returns nil
+// when alfred is disabled (manager is nil) or when mgmt.NewManager
+// tolerated a failed nl80211 init (manager.WirelessConfig is nil, e.g.
+// the family is absent or the driver isn't loaded). NewManager logs
+// and continues in that case rather than failing startup, so wrapping
+// a nil WirelessConfig here would hand the cache a nil *wifi.Client
+// and panic on the first Refresh; returning nil instead leaves the API
+// and the snapshot with no wifi provider, same as before this cache
+// existed. Building the cache once here and handing the same pointer
+// to both consumers means the snapshot adds no netlink polling of its
+// own.
+func buildWifiProvider(manager *mgmt.ManagementConfig) *handlers.CachedWirelessProvider {
+	if manager == nil || manager.WirelessConfig == nil {
+		return nil
+	}
+
+	return handlers.NewCachedWirelessProvider(manager.WirelessConfig, handlers.DefaultWirelessCacheTTL)
 }
 
 // startMeshNeighborsSnapshotter constructs and starts the

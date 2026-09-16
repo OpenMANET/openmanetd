@@ -238,3 +238,50 @@ func TestCommsSupported_UnknownModel(t *testing.T) {
 		t.Errorf("CommsSupported() with unknown model = %v, want false", got)
 	}
 }
+
+func TestGPIOSelectorSupported(t *testing.T) {
+	tests := []struct {
+		name    string
+		modelID string
+		want    bool
+	}{
+		{name: "raven", modelID: BCM2711_RAVEN_USB, want: true},
+		{name: "mm6108 spi", modelID: BCM2711_MM6108_SPI, want: false},
+		{name: "halowlink2", modelID: HalowLink2, want: false},
+		{name: "unknown", modelID: "vendor,unknown", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origNewBoardConfigInfo := newBoardConfigInfoFn
+
+			defer func() { newBoardConfigInfoFn = origNewBoardConfigInfo }()
+
+			newBoardConfigInfoFn = func() (*Board, error) {
+				return &Board{
+					Model: Model{ID: tt.modelID},
+				}, nil
+			}
+
+			got := GPIOSelectorSupported()
+			if got != tt.want {
+				t.Errorf("GPIOSelectorSupported() for model %v = %v, want %v", tt.modelID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGPIOSelectorSupported_BoardConfigError(t *testing.T) {
+	origNewBoardConfigInfo := newBoardConfigInfoFn
+
+	defer func() { newBoardConfigInfoFn = origNewBoardConfigInfo }()
+
+	newBoardConfigInfoFn = func() (*Board, error) {
+		return nil, errors.New("board config not available")
+	}
+
+	got := GPIOSelectorSupported()
+	if got != false {
+		t.Errorf("GPIOSelectorSupported() with config error = %v, want false", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/openmanet/openmanetd/internal/network/morseregdb"
 	"github.com/openmanet/openmanetd/internal/system"
+	"github.com/openmanet/openmanetd/internal/tzinfo"
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -86,11 +88,16 @@ type UCISnapshotter interface {
 	Restore(ctx context.Context, snapshot UCISnapshot) error
 }
 
-// wizardConfigs lists the seven UCI configs the wizard touches. The
+// wizardConfigs lists the UCI configs the wizard touches. The
 // snapshot phase captures all of them so any failure can be rolled
-// back atomically.
+// back atomically. umdns is included so a failure between the
+// base-network phase (which registers lan/ahwlan with umdns) and
+// phase 12's commit rolls the umdns write back along with everything
+// else, rather than leaving a half-applied umdns section live.
+// openmanetd carries the address-reservation flags staged in phase 9.
+// luci carries the wizard-used flag and homepage reset staged in phase 9.
 var wizardConfigs = []string{ //nolint:gochecknoglobals // package-level constant
-	"wireless", "network", "dhcp", "firewall", "system", "mesh11sd", "openmanetd",
+	"wireless", "network", "dhcp", "firewall", "system", "mesh11sd", "umdns", "openmanetd", "luci",
 }
 
 // SetupService implements the SetupService ConnectRPC service. It
@@ -106,11 +113,13 @@ type SetupService struct {
 	PasswordSetter auth.PasswordSetter
 	HostnameSetter HostnameSetter
 	Iwinfo         iwinfo.IwinfoProvider
+	WirelessStatus network.WirelessStatusProvider
 	Interfaces     InterfaceProvider
 	Cfg            *config.Config
 	RNG            *rand.Rand
-	Now            func() time.Time
 	LoadRegDB      func(path string) (*morseregdb.DB, error)
+	SetTimeFn      func(time.Time) error // overrideable clock write for tests; nil falls back to unix.Settimeofday
+	nowFn          func() time.Time      // overrideable time.Now for deterministic clock-drift tests; nil falls back to time.Now
 	RegDBPath      string
 	mu             sync.Mutex
 }
@@ -252,12 +261,19 @@ func (s *SetupService) GetSetupStatus(ctx context.Context, _ *emptypb.Empty) (*s
 	// (`luci.wizard.used=1`) has all the same UCI state the new wizard
 	// would otherwise produce, so we treat it as fully configured and
 	// hide the new wizard route.
+	//
+	// One system-config read serves both current_hostname and
+	// current_timezone below.
+	sysCfg := s.currentSystemConfig()
+
 	resp := &setupv1.GetSetupStatusResponse{
 		IsEnabled:       s.Cfg.GetSetupEnabled(),
 		IsSetupComplete: s.Cfg.GetSetupComplete() || s.legacyLuciWizardUsed(),
-		CurrentHostname: s.currentHostname(),
+		CurrentHostname: sysCfg.Hostname,
 		Radios:          s.collectSetupRadios(ctx),
 		EthernetPorts:   s.collectEthernetPorts(),
+		Timezones:       tzinfo.Names(),
+		CurrentTimezone: sysCfg.Zonename,
 	}
 
 	resp.HasHalowRadio = anyHalow(resp.Radios)
@@ -267,18 +283,18 @@ func (s *SetupService) GetSetupStatus(ctx context.Context, _ *emptypb.Empty) (*s
 	return resp, nil
 }
 
-// legacyLuciWizardUsed reports whether the device has already been
-// configured via the legacy LuCI Morse wizard. The LuCI wizard records
-// completion in /etc/config/luci as:
+// legacyLuciWizardUsed reports whether a wizard — the legacy LuCI
+// Morse wizard or this one — has already marked the device configured
+// in /etc/config/luci:
 //
 //	config wizard 'wizard'
 //	    option used '1'
 //
-// When this flag is set we treat the device as fully set up — running
-// the new wizard would reset everything the LuCI wizard already wrote.
-// Operators who genuinely want to re-run setup can clear the flag via
-// `uci set luci.wizard.used=0 && uci commit luci` or by hand-editing
-// /etc/config/luci.
+// The Go wizard writes the same flag at apply (writeLuciBookkeeping) so
+// LuCI stops offering its own wizard. When set we treat the device as
+// fully set up. Operators who genuinely want to re-run setup must
+// clear it together with setup.complete: `openmanetd setup-reset`
+// does both.
 func (s *SetupService) legacyLuciWizardUsed() bool {
 	v, ok := s.UCI.Get("luci", "wizard", "used")
 	if !ok || len(v) == 0 {
@@ -369,17 +385,20 @@ func (s *SetupService) currentMorseCountry() string {
 	return ""
 }
 
-// currentHostname reads `system.@system[0].hostname` via the UCI
-// reader, returning empty if the section cannot be read.
-func (s *SetupService) currentHostname() string {
+// currentSystemConfig reads `system.@system[0]` via the UCI reader
+// once, returning a zero-value UCISystem (never nil) if the section
+// cannot be read — so GetSetupStatus can pull both current_hostname
+// and current_timezone from a single read rather than two. The
+// SetupGate polls GetSetupStatus, so halving its UCI reads matters.
+func (s *SetupService) currentSystemConfig() *network.UCISystem {
 	cfg, err := network.GetSystemConfigWithReader(s.UCI)
 	if err != nil {
-		s.Log.Warn().Err(err).Msg("reading system hostname")
+		s.Log.Warn().Err(err).Msg("reading system config")
 
-		return ""
+		return &network.UCISystem{}
 	}
 
-	return cfg.Hostname
+	return cfg
 }
 
 // collectSetupRadios returns one SetupRadio entry per `wifi-device`
@@ -387,7 +406,14 @@ func (s *SetupService) currentHostname() string {
 // as HaLow. Bandwidths/channels per radio are not yet populated; the
 // wizard handler defers to WifiConfigService.GetRadioSettings for the
 // channel list (frontend calls both RPCs in parallel).
-func (s *SetupService) collectSetupRadios(_ context.Context) []*setupv1.SetupRadio {
+//
+// When at least one non-HaLow 2.4 GHz radio exists, the radios' live
+// interfaces are resolved through iwinfo + ubus wireless status (the
+// correlation mgmt.setupBatMesh1Interface uses) so the label can show
+// the chipset and supports_mesh_backhaul can say whether the daemon
+// would run the secondary link there. On HaLow-only boards nothing is
+// resolved, keeping the SetupGate poll free of ubus calls.
+func (s *SetupService) collectSetupRadios(ctx context.Context) []*setupv1.SetupRadio {
 	deviceSections, err := s.UCI.GetSections("wireless", "wifi-device")
 	if err != nil {
 		s.Log.Warn().Err(err).Msg("listing wifi-device sections")
@@ -396,6 +422,7 @@ func (s *SetupService) collectSetupRadios(_ context.Context) []*setupv1.SetupRad
 	}
 
 	radios := make([]*setupv1.SetupRadio, 0, len(deviceSections))
+	candidates := make(map[string]struct{}, len(deviceSections))
 
 	for _, name := range deviceSections {
 		dev, err := network.GetWirelessDeviceByNameWithReader(name, s.UCI)
@@ -409,9 +436,75 @@ func (s *SetupService) collectSetupRadios(_ context.Context) []*setupv1.SetupRad
 			HardwareName: dev.Path,
 			IsHalow:      strings.EqualFold(dev.Type, "morse"),
 		})
+
+		if isSecondaryMeshCandidate(dev) {
+			candidates[name] = struct{}{}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return radios
+	}
+
+	hardware := s.resolveRadioHardware(ctx, deviceSections)
+
+	for _, radio := range radios {
+		hw, ok := hardware[radio.GetName()]
+		if !ok {
+			continue
+		}
+
+		radio.HardwareName = hw
+
+		if _, candidate := candidates[radio.GetName()]; candidate {
+			radio.SupportsMeshBackhaul = network.SupportsSecondaryMeshLink(hw)
+		}
 	}
 
 	return radios
+}
+
+// isSecondaryMeshCandidate reports whether a wifi-device could carry the
+// 2.4 GHz secondary mesh link at all: band 2g and not the HaLow radio.
+// The chipset test is applied separately, once the live interface is
+// resolved.
+func isSecondaryMeshCandidate(dev *network.UCIWirelessDevice) bool {
+	return dev.Band == "2g" && !strings.EqualFold(dev.Type, "morse")
+}
+
+// resolveRadioHardware maps each wifi-device section to the iwinfo
+// hardware name of its live interface. Both providers are optional;
+// when either is missing or fails every radio stays unresolved and the
+// callers fall back (bus-path label, no backhaul offer, daemon fallback
+// at boot). Two ubus calls per invocation.
+func (s *SetupService) resolveRadioHardware(ctx context.Context, devices []string) map[string]string {
+	out := make(map[string]string, len(devices))
+
+	if s.Iwinfo == nil || s.WirelessStatus == nil {
+		return out
+	}
+
+	infos, err := s.Iwinfo.GetInfoForAll(ctx)
+	if err != nil {
+		s.Log.Debug().Err(err).Msg("iwinfo unavailable; radio hardware names unresolved")
+
+		return out
+	}
+
+	status, err := s.WirelessStatus.GetWirelessStatus(ctx)
+	if err != nil {
+		s.Log.Debug().Err(err).Msg("wireless status unavailable; radio hardware names unresolved")
+
+		return out
+	}
+
+	for _, name := range devices {
+		if hw := network.ResolveWirelessRadioHardwareName(name, status, infos); hw != "" {
+			out[name] = hw
+		}
+	}
+
+	return out
 }
 
 // collectEthernetPorts enumerates the ethernet interfaces that the
@@ -651,9 +744,12 @@ func (s *SetupService) emitTerminalSuccess(stream applySetupStream, profile *set
 // so its new bridges/interfaces are live before `firewall` rebuilds
 // chains and `wireless` brings up wifi-ifaces against the new
 // network sections. `dhcp`, `mesh11sd`, and `system` come last
-// because they depend on network being up.
+// because they depend on network being up. `umdns` comes last of all
+// so it re-announces after every other service has settled; reload
+// tolerance (reloadOneService) means an image without umdns installed
+// just logs a warning here and the other six still succeed.
 var reloadServices = []string{ //nolint:gochecknoglobals // package-level constant
-	"network", "firewall", "wireless", "dhcp", "mesh11sd", "system",
+	"network", "firewall", "wireless", "dhcp", "mesh11sd", "system", "umdns",
 }
 
 // runReloadServices reloads every service in the canonical list,
@@ -750,6 +846,9 @@ func (s *SetupService) checkReapplyGuard(_ context.Context) error {
 			errors.New("setup wizard already completed on this device"))
 	}
 
+	// Set by the LuCI wizard and, since F2, by this wizard too — see
+	// legacyLuciWizardUsed. setup-reset clears it alongside
+	// setup.complete.
 	if s.legacyLuciWizardUsed() {
 		return connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("legacy LuCI Morse wizard already configured this device (luci.wizard.used=1)"))
@@ -792,7 +891,7 @@ func (s *SetupService) hasUsableHalowRadio() bool {
 // failure. Returns the validation error so the caller can decide
 // whether to roll back.
 func (s *SetupService) runValidate(
-	_ context.Context,
+	ctx context.Context,
 	stream applySetupStream,
 	profile *setupv1.MeshNodeProfile,
 ) error {
@@ -801,7 +900,12 @@ func (s *SetupService) runValidate(
 		return err
 	}
 
-	if err := s.validateProfile(profile); err != nil {
+	err := s.validateProfile(profile)
+	if err == nil {
+		err = s.validateMeshBackhaul(ctx, profile)
+	}
+
+	if err != nil {
 		_ = emitPhaseFailed(stream, setupv1.ApplySetupResponse_PHASE_VALIDATE, err.Error())
 
 		return err
@@ -818,6 +922,10 @@ func (s *SetupService) validateProfile(profile *setupv1.MeshNodeProfile) error {
 	if !hostnameRFC1123.MatchString(profile.GetHostname()) {
 		return fmt.Errorf("hostname %q is not a valid RFC 1123 label",
 			profile.GetHostname())
+	}
+
+	if tz := profile.GetTimezone(); tz != "" && !tzinfo.Known(tz) {
+		return fmt.Errorf("unknown timezone %q", tz)
 	}
 
 	role := profile.GetRole()
@@ -844,6 +952,16 @@ func (s *SetupService) validateProfile(profile *setupv1.MeshNodeProfile) error {
 			return errors.New("meshpoint_mode is required when role is MESH_POINT")
 		}
 
+		// D1 (wizard-parity ledger, 2026-08-27): the address-reservation
+		// worker rewrites every non-gateway's ahwlan to a static address
+		// on its first tick, so the DHCP-client ahwlan this mode needs
+		// cannot survive boot. Rejected until the daemon supports it;
+		// the enum value and scenarioMeshPointNone are kept for that day.
+		if profile.GetMeshpointMode() == setupv1.MeshPointMode_MESH_POINT_MODE_NONE {
+			return errors.New("meshpoint_mode NONE is not supported yet: " +
+				"the address-reservation worker overrides a DHCP-client ahwlan on its first tick")
+		}
+
 		if profile.GetMeshgateMode() != setupv1.MeshGateMode_MESH_GATE_MODE_UNSPECIFIED {
 			return errors.New("meshgate_mode must not be set when role is MESH_POINT")
 		}
@@ -866,11 +984,11 @@ func (s *SetupService) validateProfile(profile *setupv1.MeshNodeProfile) error {
 		return err
 	}
 
-	if err := validateAPs(profile.GetAps(), mesh.GetRadioName()); err != nil {
+	if err := validateAPs(profile.GetAps(), mesh.GetRadioName(), s.radioExistsAsMorse); err != nil {
 		return err
 	}
 
-	if err := validateUplink(profile.GetUplink(), mesh.GetRadioName(), profile.GetAps()); err != nil {
+	if err := validateUplink(profile.GetUplink(), mesh.GetRadioName(), profile.GetAps(), s.radioExistsAsMorse); err != nil {
 		return err
 	}
 
@@ -941,12 +1059,7 @@ func (s *SetupService) radioExistsAsMorse(radioName string) bool {
 		return false
 	}
 
-	typ, ok := s.UCI.Get("wireless", radioName, "type")
-	if !ok || len(typ) == 0 {
-		return false
-	}
-
-	return strings.EqualFold(typ[0], "morse")
+	return network.IsMorseDevice(s.UCI, radioName)
 }
 
 // validateMeshChannelBandwidth applies a minimal sanity check on
@@ -967,9 +1080,11 @@ func validateMeshChannelBandwidth(bandwidthMHz, channel uint32) error {
 	}
 }
 
-// validateAPs enforces uniqueness of AP radio names and that none
-// equals the mesh radio.
-func validateAPs(aps []*setupv1.RadioApProfile, meshRadio string) error {
+// validateAPs enforces uniqueness of AP radio names, that none equals
+// the mesh radio, and that none is a type=morse (HaLow) wifi-device —
+// a HaLow radio only ever carries mesh-mode ifaces, and every entry
+// here produces an AP section (disabled or not).
+func validateAPs(aps []*setupv1.RadioApProfile, meshRadio string, isMorse func(string) bool) error {
 	seen := make(map[string]struct{}, len(aps))
 
 	for _, ap := range aps {
@@ -980,6 +1095,10 @@ func validateAPs(aps []*setupv1.RadioApProfile, meshRadio string) error {
 
 		if name == meshRadio {
 			return fmt.Errorf("AP radio %q must differ from the mesh radio", name)
+		}
+
+		if isMorse(name) {
+			return fmt.Errorf("AP radio %q is a HaLow (type=morse) wifi-device, which only carries mesh interfaces", name)
 		}
 
 		if _, dup := seen[name]; dup {
@@ -1001,10 +1120,11 @@ func validateAPs(aps []*setupv1.RadioApProfile, meshRadio string) error {
 }
 
 // validateUplink confirms the wireless STA radio (when uplink type
-// is WIRELESS_STA) is not the mesh radio and not also configured as
-// an enabled AP — concurrent AP+STA on a single radio is not
-// supported by the wizard.
-func validateUplink(uplink *setupv1.Uplink, meshRadio string, aps []*setupv1.RadioApProfile) error {
+// is WIRELESS_STA) is not the mesh radio, not a type=morse (HaLow)
+// wifi-device — those only carry mesh-mode ifaces — and not also
+// configured as an enabled AP: concurrent AP+STA on a single radio is
+// not supported by the wizard.
+func validateUplink(uplink *setupv1.Uplink, meshRadio string, aps []*setupv1.RadioApProfile, isMorse func(string) bool) error {
 	if uplink == nil ||
 		uplink.GetType() != setupv1.UplinkType_UPLINK_TYPE_WIRELESS_STA {
 		return nil
@@ -1019,9 +1139,23 @@ func validateUplink(uplink *setupv1.Uplink, meshRadio string, aps []*setupv1.Rad
 		return fmt.Errorf("uplink STA radio %q must differ from the mesh radio", wireless.GetRadioName())
 	}
 
+	if isMorse(wireless.GetRadioName()) {
+		return fmt.Errorf("uplink STA radio %q is a HaLow (type=morse) wifi-device, which only carries mesh interfaces",
+			wireless.GetRadioName())
+	}
+
 	for _, ap := range aps {
-		if ap.GetEnabled() && ap.GetRadioName() == wireless.GetRadioName() {
+		if ap.GetRadioName() != wireless.GetRadioName() {
+			continue
+		}
+
+		if ap.GetEnabled() {
 			return fmt.Errorf("uplink STA radio %q is also configured as an enabled AP",
+				wireless.GetRadioName())
+		}
+
+		if ap.GetMeshBackhaul() != nil {
+			return fmt.Errorf("mesh backhaul radio %q is also the wireless uplink radio",
 				wireless.GetRadioName())
 		}
 	}
@@ -1031,6 +1165,80 @@ func validateUplink(uplink *setupv1.Uplink, meshRadio string, aps []*setupv1.Rad
 	}
 
 	return nil
+}
+
+// validateMeshBackhaul enforces the per-radio mesh-backhaul rules: at
+// most one backhaul entry, never combined with an enabled AP on the
+// same radio, and only on a radio the daemon would accept (2.4 GHz,
+// not HaLow, MT7915/MT7916 per iwinfo). The mesh-radio and STA-radio
+// clashes are covered by validateAPs and validateUplink.
+func (s *SetupService) validateMeshBackhaul(ctx context.Context, profile *setupv1.MeshNodeProfile) error {
+	var backhaul *setupv1.RadioApProfile
+
+	for _, ap := range profile.GetAps() {
+		if ap.GetMeshBackhaul() == nil {
+			continue
+		}
+
+		if ap.GetEnabled() {
+			return fmt.Errorf("radio %q cannot be both an AP and the mesh backhaul", ap.GetRadioName())
+		}
+
+		if backhaul != nil {
+			return fmt.Errorf("only one radio may be the mesh backhaul (%q and %q)",
+				backhaul.GetRadioName(), ap.GetRadioName())
+		}
+
+		backhaul = ap
+	}
+
+	if backhaul == nil {
+		return nil
+	}
+
+	if !s.radioSupportsMeshBackhaul(ctx, backhaul.GetRadioName()) {
+		return fmt.Errorf("radio %q does not support mesh backhaul (needs a 2.4 GHz MT7915/MT7916 radio)",
+			backhaul.GetRadioName())
+	}
+
+	return validateBackhaulRadioTuning(backhaul.GetRadioName(), backhaul.GetMeshBackhaul())
+}
+
+// validateBackhaulRadioTuning checks the optional channel/width/country
+// on a backhaul entry: both channel and bandwidth are zero (keep the
+// daemon defaults) or both are set, the width is a 2.4 GHz width and
+// the channel is in the static 2.4 GHz list the settings API uses.
+func validateBackhaulRadioTuning(radio string, bh *setupv1.MeshBackhaulProfile) error {
+	if (bh.GetChannel() == 0) != (bh.GetBandwidthMhz() == 0) {
+		return fmt.Errorf("mesh backhaul on %q: channel and bandwidth_mhz must be set together", radio)
+	}
+
+	if bh.GetChannel() == 0 {
+		return nil
+	}
+
+	if network.SecondaryMeshHTMode(bh.GetBandwidthMhz()) == "" {
+		return fmt.Errorf("mesh backhaul on %q: %d MHz is not a 2.4 GHz width (20 or 40)", radio, bh.GetBandwidthMhz())
+	}
+
+	if !slices.Contains(availableChannelsForBand(wificonfigv1.WifiBand_WIFI_BAND_2G), strconv.FormatUint(uint64(bh.GetChannel()), 10)) {
+		return fmt.Errorf("mesh backhaul on %q: channel %d is not a 2.4 GHz channel (1-11)", radio, bh.GetChannel())
+	}
+
+	return nil
+}
+
+// radioSupportsMeshBackhaul answers with the same inventory
+// GetSetupStatus reports, so the wizard can never be told a radio
+// qualifies and then have the apply refuse it (or the reverse).
+func (s *SetupService) radioSupportsMeshBackhaul(ctx context.Context, name string) bool {
+	for _, radio := range s.collectSetupRadios(ctx) {
+		if radio.GetName() == name {
+			return radio.GetSupportsMeshBackhaul()
+		}
+	}
+
+	return false
 }
 
 // validatePassphrase enforces WPA's 8..63 char rule unless the

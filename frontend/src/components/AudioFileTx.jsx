@@ -24,6 +24,19 @@ export default function AudioFileTxPanel({ onLog, onPttSet, txEnabled }) {
   const audioBufferRef = useRef(null);
   const stopFnRef = useRef(null);
   const handleStopRef = useRef(null);
+  const pollIdRef = useRef(null);
+
+  // Stop the completion-poll interval. Shared by handleStop and the unmount
+  // cleanup: a poll that survives unmount fires against a torn-down page
+  // (in tests, a destroyed jsdom window) and crashes the run.
+  const clearPoll = useCallback(() => {
+    if (pollIdRef.current != null) {
+      clearInterval(pollIdRef.current);
+      pollIdRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearPoll, [clearPoll]);
 
   // Handle file selection and decode.
   const handleFileChange = useCallback(async (e) => {
@@ -57,6 +70,7 @@ export default function AudioFileTxPanel({ onLog, onPttSet, txEnabled }) {
 
   // Stop file playback.
   const handleStop = useCallback(() => {
+    clearPoll();
     stopPlayback();
     onPttSet(false);
     setPlaying(false);
@@ -64,7 +78,7 @@ export default function AudioFileTxPanel({ onLog, onPttSet, txEnabled }) {
       setStatusText(`${audioBufferRef.current.duration.toFixed(1)}s ready`);
     }
     onLog('File TX stop', 'tx');
-  }, [onLog, onPttSet]);
+  }, [clearPoll, onLog, onPttSet]);
 
   // Keep ref in sync so polling interval always calls the latest version.
   useEffect(() => {
@@ -104,16 +118,18 @@ export default function AudioFileTxPanel({ onLog, onPttSet, txEnabled }) {
       ctx
     );
 
-    // Poll for playback completion (non-looping).
+    // Poll for playback completion (non-looping). handleStop clears the
+    // interval via clearPoll, so the callback needs no clearInterval of
+    // its own.
     if (!loop) {
-      const pollId = setInterval(() => {
+      clearPoll();
+      pollIdRef.current = setInterval(() => {
         if (!isPlaying()) {
-          clearInterval(pollId);
           handleStopRef.current();
         }
       }, 100);
     }
-  }, [playing, loop, txEnabled, onLog, onPttSet]);
+  }, [playing, loop, txEnabled, clearPoll, onLog, onPttSet]);
 
   return (
     <div className="audio-file-tx">

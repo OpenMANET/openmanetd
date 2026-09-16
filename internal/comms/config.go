@@ -8,9 +8,12 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/openmanet/openmanetd/internal/comms/announce"
 	"github.com/openmanet/openmanetd/internal/comms/codec"
 	"github.com/openmanet/openmanetd/internal/comms/control"
 	"github.com/openmanet/openmanetd/internal/comms/device"
+	"github.com/openmanet/openmanetd/internal/comms/gpio"
+	"github.com/openmanet/openmanetd/internal/comms/talkgroup"
 	"github.com/openmanet/openmanetd/internal/comms/webaudio"
 	"github.com/openmanet/openmanetd/internal/config"
 )
@@ -39,7 +42,6 @@ type BroadcastCapture interface {
 // incoming stream) and cleared by halfDuplexDecayLoop on a coarse 100 ms
 // ticker once every gate's window has expired.
 type CommsRuntime struct { //nolint:govet // fieldalignment: mu must sit directly above the broadcastStream field it guards (.claude/rules/concurrency.md); the pointer-scan-optimal layout would separate them.
-	Decoder         codec.AudioDecoder
 	Encoder         codec.AudioEncoder
 	FECAdapter      *FECAdapter
 	WebBridge       *webaudio.Bridge
@@ -58,6 +60,26 @@ type CommsRuntime struct { //nolint:govet // fieldalignment: mu must sit directl
 	PlaybackOutputLatency time.Duration
 	Broadcasting          atomic.Bool
 	RemoteRxActive        atomic.Bool
+
+	// ActiveChannel is the 1-based talk group most recently applied by
+	// SelectTalkGroup (or seeded from the boot-time toggles). 0 until a
+	// selection or seed happens. Read lock-free by status and snapshot.
+	ActiveChannel atomic.Int32
+	// Events fans talk group changes out to the announcer, streaming
+	// RPC subscribers, and any future listeners. Allocated once in
+	// Start; nil in minimal test runtimes (Notify is nil-safe).
+	Events *talkgroup.Registry
+	// Announcer plays talk group voice clips; nil in web mode, when clip
+	// decode failed, or in minimal test runtimes.
+	Announcer *announce.Player
+	// GPIOSel is the hardware talk group selector; nil when the board
+	// doesn't wire one, the operator disabled it, or open failed.
+	GPIOSel *gpio.Selector
+
+	// selectMu serializes SelectTalkGroup's multi-port flip so two
+	// concurrent selections cannot interleave partial port states. Never
+	// taken on the audio or packet hot paths.
+	selectMu sync.Mutex
 
 	// mu protects broadcastStream. It is written at startup by
 	// initAudioIO/startHardwareAudio and again by the Run loop's audio
@@ -103,13 +125,29 @@ func (rt *CommsRuntime) SetBroadcast(bs BroadcastCapture) {
 // owned by *Service (returned by Start via SetDefault) so the static
 // config and the per-startup runtime have distinct lifetimes.
 type CommsConfig struct {
-	Log                  zerolog.Logger
-	AuxHandler           control.AuxEventHandler
-	Interrupt            chan os.Signal
+	Log        zerolog.Logger
+	AuxHandler control.AuxEventHandler
+	Interrupt  chan os.Signal
+	// AudioMixerStartup, when non-nil, re-applies persisted hardware mixer
+	// levels (speaker/mic volume), enforces the AGC policy (persisted
+	// value, defaulting to disabled), and clears mute switches. Invoked
+	// after ALSA card detection in Start and again after every successful
+	// in-run audio recovery — a USB replug resets the card's mixer state.
+	// The manager wires it whenever a hardware mixer accessor exists; the
+	// closure re-reads config at every invocation, so levels first
+	// persisted mid-run still reach later recoveries. Nil only when no
+	// mixer is wired (tests, frontend-only mode).
+	AudioMixerStartup    func()
 	startHardwareAudioFn func(rt *CommsRuntime) (func(), error)
 	// detectALSACardFn overrides ALSA card auto-detection for tests. When
 	// nil, detectALSACard falls back to control.DetectAndSetALSACard(cfg.Log).
-	detectALSACardFn         func()
+	detectALSACardFn func()
+	// readUDPDropsFn overrides the /proc/net/udp kernel-drop scan for
+	// tests. When nil, readUDPDrops falls back to readUDPSocketDrops.
+	readUDPDropsFn func(localPort int) (int64, error)
+	// gpioSelectorSupportedFn overrides the board capability check for
+	// tests. Nil means board.GPIOSelectorSupported.
+	gpioSelectorSupportedFn  func() bool
 	BluetoothOutputDevice    string
 	NanoPTTDevicePath        string
 	CommKey                  string
@@ -129,21 +167,31 @@ type CommsConfig struct {
 	CaptureFramesPerBuffer   int
 	CaptureLatencyMs         int
 	PacketLossPerc           int
-	PlaybackLatencyMs        int
+	// DSCP is applied to both sender sockets of every Send-enabled port
+	// at build time (IP_TOS = DSCP<<2, SO_PRIORITY = 256 + DSCP>>3). The
+	// config layer resolves absent-vs-zero before this struct is built:
+	// 0 always means "marking off" here and applyDefaults must not
+	// overwrite it, or the operator's `dscp: 0` kill switch would break.
+	DSCP              int
+	PlaybackLatencyMs int
 	// audioRecoveryInterval is the Run-loop ticker period for re-attempting
 	// hardware audio init after startup failed (OpenVLM unplugged at boot,
 	// transient ALSA error). <= 0 disables in-run recovery; applyDefaults
 	// sets the production value.
 	audioRecoveryInterval time.Duration
-	ROIPVOXThreshold      float32
-	MicGain               float32
-	EnableNanoPTT         bool
-	EnableBluetoothPtt    bool
-	Enable                bool
-	Trace                 bool
-	Loopback              bool
-	Debug                 bool
-	ROIPCOSGPIOMask       byte
+	// webStatInterval overrides the webPlayoutLoop stat-reporting ticker
+	// period for tests. <= 0 (production) uses webStatDefaultInterval.
+	webStatInterval    time.Duration
+	ROIPVOXThreshold   float32
+	MicGain            float32
+	EnableNanoPTT      bool
+	EnableBluetoothPtt bool
+	Enable             bool
+	Trace              bool
+	Loopback           bool
+	Debug              bool
+	GPIOSelectorEnable bool
+	ROIPCOSGPIOMask    byte
 }
 
 // NewComms copies cfg and returns a pointer ready for Start.
@@ -160,6 +208,7 @@ func NewComms(cfg CommsConfig) *CommsConfig {
 		CommKey:                  cfg.CommKey,
 		RtpID:                    cfg.RtpID,
 		Debug:                    cfg.Debug,
+		GPIOSelectorEnable:       cfg.GPIOSelectorEnable,
 		Loopback:                 cfg.Loopback,
 		Trace:                    cfg.Trace,
 		ControlSource:            cfg.ControlSource,
@@ -178,11 +227,13 @@ func NewComms(cfg CommsConfig) *CommsConfig {
 		HalfDuplexThreshold:      cfg.HalfDuplexThreshold,
 		EncoderComplexity:        cfg.EncoderComplexity,
 		PacketLossPerc:           cfg.PacketLossPerc,
+		DSCP:                     cfg.DSCP,
 		PlaybackLatencyMs:        cfg.PlaybackLatencyMs,
 		CaptureLatencyMs:         cfg.CaptureLatencyMs,
 		CaptureFramesPerBuffer:   cfg.CaptureFramesPerBuffer,
 		PttStartDelayMs:          cfg.PttStartDelayMs,
 		AuxHandler:               cfg.AuxHandler,
+		AudioMixerStartup:        cfg.AudioMixerStartup,
 	}
 }
 

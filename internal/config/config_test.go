@@ -1,7 +1,9 @@
 package config
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -518,6 +520,46 @@ func TestGetCommsDebug(t *testing.T) {
 	}
 }
 
+func TestGetCommsGPIOSelectorEnable(t *testing.T) {
+	tests := []struct {
+		setValue *bool
+		name     string
+		want     bool
+	}{
+		{
+			name:     "returns true when enabled",
+			setValue: boolPtr(true),
+			want:     true,
+		},
+		{
+			name:     "returns false when disabled",
+			setValue: boolPtr(false),
+			want:     false,
+		},
+		{
+			name:     "returns default when not set",
+			setValue: nil,
+			want:     DefaultCommsGPIOSelectorEnable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			if tt.setValue != nil {
+				v.Set("comms.gpioSelector.enable", *tt.setValue)
+			}
+
+			cfg := New(v)
+
+			got := cfg.GetCommsGPIOSelectorEnable()
+			if got != tt.want {
+				t.Errorf("GetCommsGPIOSelectorEnable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetCommsLoopback(t *testing.T) {
 	tests := []struct {
 		setValue *bool
@@ -735,6 +777,17 @@ func TestGetCommsBluetoothPttBluetoothAudioDeviceHint(t *testing.T) {
 				t.Errorf("GetCommsBluetoothPttBluetoothAudioDeviceHint() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDefaultCommsMicGain pins the bench-derived residual (2026-08-30):
+// at the chip's shipped +20 dB analog gain, a loud talker's speech body
+// measures ~9.5k ADC counts, so 2.0 keeps it under the 24576 soft knee —
+// the knee stays reserved for plosives and transients. The previous 8.0
+// hard-clipped every sample at or above 4096 counts.
+func TestDefaultCommsMicGain(t *testing.T) {
+	if DefaultCommsMicGain != 2.0 {
+		t.Fatalf("DefaultCommsMicGain = %v, want 2.0 (bench residual)", DefaultCommsMicGain)
 	}
 }
 
@@ -1330,46 +1383,6 @@ func TestBLOSEnabled(t *testing.T) {
 	}
 }
 
-func TestGetEnableBatmanMulticastEnhancements(t *testing.T) {
-	tests := []struct {
-		setValue *bool
-		name     string
-		want     bool
-	}{
-		{
-			name:     "returns true when enabled",
-			setValue: boolPtr(true),
-			want:     true,
-		},
-		{
-			name:     "returns false when disabled",
-			setValue: boolPtr(false),
-			want:     false,
-		},
-		{
-			name:     "returns default when not set",
-			setValue: nil,
-			want:     DefaultBatmanMulticastEnhancementsEnabled,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			v := viper.New()
-			if tt.setValue != nil {
-				v.Set("batman.multicastEnhancementsEnabled", *tt.setValue)
-			}
-
-			cfg := New(v)
-
-			got := cfg.GetEnableBatmanMulticastEnhancements()
-			if got != tt.want {
-				t.Errorf("GetEnableBatmanMulticastEnhancements() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestGetBatmanMulticastForceflood(t *testing.T) {
 	tests := []struct {
 		setValue *bool
@@ -1410,15 +1423,36 @@ func TestGetBatmanMulticastForceflood(t *testing.T) {
 	}
 }
 
-// TestDefaultBatmanMulticastForceflood_IsSnooping locks in the semantic choice
-// that out-of-the-box deployments use batman-adv MCAST snooping (forceflood
-// off). Flooding every multicast frame to every node scales quadratically
-// with voice-channel × site count and was the prior default; snooping scales
-// with active subscribers. Changing this default is a deployment-wide
-// behavior change and should be deliberate.
-func TestDefaultBatmanMulticastForceflood_IsSnooping(t *testing.T) {
-	if DefaultBatmanMulticastForceflood {
-		t.Errorf("DefaultBatmanMulticastForceflood = true; expected false (use MCAST snooping by default)")
+// TestNewWithoutWatch_IgnoresRemovedMulticastEnhancementsKey pins that a
+// config.yml written before batman.multicastEnhancementsEnabled was removed
+// (decision D0, 2026-08-27) still loads: viper ignores keys nothing reads,
+// and the sibling batman.multicastForceflood key in the same block is still
+// honored. This is a regression pin, not a RED test — it passed before the
+// key was removed too.
+func TestNewWithoutWatch_IgnoresRemovedMulticastEnhancementsKey(t *testing.T) {
+	v := viper.New()
+	v.SetConfigType("yaml")
+
+	legacy := "batman:\n  multicastEnhancementsEnabled: false\n  multicastForceflood: true\n"
+	if err := v.ReadConfig(strings.NewReader(legacy)); err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+
+	cfg := NewWithoutWatch(v)
+
+	if !cfg.GetBatmanMulticastForceflood() {
+		t.Error("GetBatmanMulticastForceflood() = false; the sibling key must still be read when the removed key is present")
+	}
+}
+
+// TestDefaultBatmanMulticastForceflood_IsClassicFlooding locks in decision
+// D7 (2026-08-27): out-of-the-box deployments classic-flood every multicast
+// frame (bat0 multicast_mode 0), matching the LuCI wizard and both fixture
+// captures. Changing this default flips the shipped UCI value on every
+// device and must be deliberate.
+func TestDefaultBatmanMulticastForceflood_IsClassicFlooding(t *testing.T) {
+	if !DefaultBatmanMulticastForceflood {
+		t.Error("DefaultBatmanMulticastForceflood = false; expected true (classic flooding, multicast_mode 0)")
 	}
 }
 
@@ -2645,5 +2679,119 @@ func TestGetSetupComplete(t *testing.T) {
 				t.Errorf("GetSetupComplete() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetCommsDSCP(t *testing.T) {
+	tests := []struct {
+		name     string
+		isSet    bool
+		setValue int
+		want     int
+	}{
+		{
+			name:  "returns default 46 when not set",
+			isSet: false,
+			want:  DefaultCommsDSCP,
+		},
+		{
+			name:     "explicit zero disables marking",
+			isSet:    true,
+			setValue: 0,
+			want:     0,
+		},
+		{
+			name:     "returns configured EF value",
+			isSet:    true,
+			setValue: 46,
+			want:     46,
+		},
+		{
+			name:     "returns configured CS6 value",
+			isSet:    true,
+			setValue: 48,
+			want:     48,
+		},
+		{
+			name:     "accepts upper bound 63",
+			isSet:    true,
+			setValue: 63,
+			want:     63,
+		},
+		{
+			name:     "clamps negative to 0",
+			isSet:    true,
+			setValue: -5,
+			want:     0,
+		},
+		{
+			name:     "clamps above 63 to max",
+			isSet:    true,
+			setValue: 64,
+			want:     CommsDSCPMax,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			if tt.isSet {
+				v.Set("comms.dscp", tt.setValue)
+			}
+
+			cfg := NewWithoutWatch(v)
+
+			if got := cfg.GetCommsDSCP(); got != tt.want {
+				t.Errorf("GetCommsDSCP() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetAlfredNodeExpiry(t *testing.T) {
+	tests := []struct {
+		name     string
+		setValue *string
+		want     time.Duration
+	}{
+		{name: "returns configured duration", setValue: strPtr("30m"), want: 30 * time.Minute},
+		{name: "accepts hours", setValue: strPtr("48h"), want: 48 * time.Hour},
+		{name: "zero disables expiry", setValue: strPtr("0"), want: 0},
+		{name: "empty falls back to default", setValue: strPtr(""), want: DefaultAlfredNodeExpiry},
+		{name: "unparsable falls back to default", setValue: strPtr("soon"), want: DefaultAlfredNodeExpiry},
+		{name: "negative falls back to default", setValue: strPtr("-1h"), want: DefaultAlfredNodeExpiry},
+		{name: "returns default when not set", setValue: nil, want: DefaultAlfredNodeExpiry},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			if tt.setValue != nil {
+				v.Set("alfred.nodeExpiry", *tt.setValue)
+			}
+
+			cfg := New(v)
+
+			got := cfg.GetAlfredNodeExpiry()
+			if got != tt.want {
+				t.Errorf("GetAlfredNodeExpiry() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetAlfredNodeExpiry_NumericZeroFromYAML(t *testing.T) {
+	// YAML `nodeExpiry: 0` arrives as an int, not a string.
+	v := viper.New()
+	v.Set("alfred.nodeExpiry", 0)
+
+	if got := New(v).GetAlfredNodeExpiry(); got != 0 {
+		t.Errorf("GetAlfredNodeExpiry() = %v, want 0", got)
+	}
+}
+
+func TestDefaultAlfredNodeExpiry_Is24h(t *testing.T) {
+	if DefaultAlfredNodeExpiry != 24*time.Hour {
+		t.Errorf("DefaultAlfredNodeExpiry = %v, want 24h (ledger D4)", DefaultAlfredNodeExpiry)
 	}
 }

@@ -2,8 +2,10 @@ package handlers_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	setupv1 "github.com/openmanet/openmanetd/internal/api/openmanet/setup/v1"
 	wificonfigv1 "github.com/openmanet/openmanetd/internal/api/openmanet/wifi_config/v1"
 	"github.com/openmanet/openmanetd/internal/config"
+	"github.com/openmanet/openmanetd/internal/iwinfo"
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/openmanet/openmanetd/internal/openmanet/server/handlers"
 	"github.com/rs/zerolog"
@@ -20,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // ── helper: build a SetupService over a populated UCI tree ──────────────────
@@ -170,6 +174,41 @@ func TestGetSetupStatus_FreshDevice_DefaultsDisabled(t *testing.T) {
 	assert.Len(t, resp.GetRadios(), 2)
 }
 
+// TestGetSetupStatus_ReturnsTimezones asserts the response carries the
+// full, sorted tzinfo table plus the device's currently-configured
+// zonename (read from system.@system[0].zonename).
+func TestGetSetupStatus_ReturnsTimezones(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "auth:\n  enable: false\n")
+
+	reader := newSetupReader()
+	reader.data["system"]["@system[0]"]["zonename"] = []string{"America/Denver"}
+
+	svc := newSetupService(t, cfg, reader, &fakeInterfaceProvider{})
+
+	resp, err := svc.GetSetupStatus(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "America/Denver", resp.GetCurrentTimezone())
+
+	tzs := resp.GetTimezones()
+	require.NotEmpty(t, tzs)
+	assert.True(t, sort.StringsAreSorted(tzs), "Timezones must be sorted")
+	assert.Contains(t, tzs, "America/Denver")
+}
+
+// TestGetSetupStatus_CurrentTimezoneEmptyWhenUnset asserts a fresh
+// device (no zonename ever written) reports an empty current_timezone
+// rather than erroring.
+func TestGetSetupStatus_CurrentTimezoneEmptyWhenUnset(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "auth:\n  enable: false\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+
+	resp, err := svc.GetSetupStatus(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	assert.Empty(t, resp.GetCurrentTimezone())
+}
+
 func TestGetSetupStatus_EnabledIncomplete(t *testing.T) {
 	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n  complete: false\n")
 	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
@@ -240,6 +279,95 @@ func TestGetSetupStatus_RadioMetadataIsHalowSet(t *testing.T) {
 	assert.Equal(t, "s1g", byName["radio1"].GetBand())
 }
 
+// backhaulCapableProviders returns iwinfo + wireless-status fakes that
+// report radio0's live interface as a MediaTek MT7915AN, the shape the
+// daemon's batmesh1 fallback keys on.
+func backhaulCapableProviders() (*fakeIwinfoProvider, *fakeWirelessStatusProvider) {
+	iw := &fakeIwinfoProvider{infoByDevice: map[string]*iwinfo.InterfaceInfo{
+		"phy0-ap0": {Hardware: iwinfo.HardwareInfo{Name: "MediaTek MT7915AN"}},
+	}}
+	ws := &fakeWirelessStatusProvider{status: map[string]*network.WirelessRadioStatus{
+		"radio0": {Interfaces: []network.WirelessRadioInterface{{Ifname: "phy0-ap0"}}},
+	}}
+
+	return iw, ws
+}
+
+func TestGetSetupStatus_SupportsMeshBackhaul_MT7915(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	resp, err := svc.GetSetupStatus(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	byName := map[string]*setupv1.SetupRadio{}
+	for _, r := range resp.GetRadios() {
+		byName[r.GetName()] = r
+	}
+
+	require.NotNil(t, byName["radio0"])
+	assert.True(t, byName["radio0"].GetSupportsMeshBackhaul())
+	assert.Equal(t, "MediaTek MT7915AN", byName["radio0"].GetHardwareName(),
+		"the label shows the chipset when iwinfo knows it")
+
+	require.NotNil(t, byName["radio1"])
+	assert.False(t, byName["radio1"].GetSupportsMeshBackhaul(), "HaLow radios never qualify")
+	assert.Equal(t, "platform/soc/fe204000.spi", byName["radio1"].GetHardwareName(),
+		"unresolved radios keep the bus-path label")
+}
+
+func TestGetSetupStatus_SupportsMeshBackhaul_FalseFor5GHz(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "")
+	reader := newSetupReader()
+	reader.data["wireless"]["radio0"]["band"] = []string{"5g"}
+	svc := newSetupService(t, cfg, reader, &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	resp, err := svc.GetSetupStatus(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	for _, r := range resp.GetRadios() {
+		assert.False(t, r.GetSupportsMeshBackhaul(), "%s: only 2.4 GHz radios carry the secondary link", r.GetName())
+	}
+}
+
+func TestGetSetupStatus_SupportsMeshBackhaul_FalseWhenUnresolvable(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "")
+
+	cases := map[string]func(svc *handlers.SetupService){
+		"no providers wired": func(*handlers.SetupService) {},
+		"iwinfo error": func(svc *handlers.SetupService) {
+			svc.Iwinfo = &fakeIwinfoProvider{infoErr: errors.New("ubus timeout")}
+			_, svc.WirelessStatus = backhaulCapableProviders()
+		},
+		"wireless status error": func(svc *handlers.SetupService) {
+			svc.Iwinfo, _ = backhaulCapableProviders()
+			svc.WirelessStatus = &fakeWirelessStatusProvider{err: errors.New("ubus timeout")}
+		},
+		"other chipset": func(svc *handlers.SetupService) {
+			svc.Iwinfo = &fakeIwinfoProvider{infoByDevice: map[string]*iwinfo.InterfaceInfo{
+				"phy0-ap0": {Hardware: iwinfo.HardwareInfo{Name: "Broadcom BCM43430"}},
+			}}
+			_, svc.WirelessStatus = backhaulCapableProviders()
+		},
+	}
+
+	for name, arrange := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+			arrange(svc)
+
+			resp, err := svc.GetSetupStatus(context.Background(), &emptypb.Empty{})
+			require.NoError(t, err)
+
+			for _, r := range resp.GetRadios() {
+				assert.False(t, r.GetSupportsMeshBackhaul(), r.GetName())
+			}
+		})
+	}
+}
+
 func TestGetSetupStatus_AlreadyConfigured_NonFactoryHostname(t *testing.T) {
 	cfg := setupBLOSTestConfig(t, "")
 
@@ -295,8 +423,9 @@ func TestGetSetupStatus_AlreadyConfigured_FactoryMeshGateAnnouncementsIgnored(t 
 
 func TestGetSetupStatus_AlreadyConfigured_WizardBookkeepingSection(t *testing.T) {
 	// The wizard writes a `config wizard 'wizard'` section into
-	// /etc/config/network on apply. If we see one, the wizard has
-	// already run.
+	// /etc/config/network on apply (writeWizardBookkeeping; pinned by
+	// TestCompat_WizardBookkeepingSectionType). If we see one, the
+	// wizard has already run.
 	cfg := setupBLOSTestConfig(t, "")
 
 	reader := newSetupReader()
@@ -711,6 +840,56 @@ func TestApplySetup_RejectsAPSameAsMeshRadio(t *testing.T) {
 	requireConnectCode(t, err, connect.CodeInvalidArgument)
 }
 
+// withSecondMorseRadio adds radio2 (type=morse) beside the fixture's
+// radio1 mesh radio, so the type=morse rule can be exercised on a
+// radio the mesh-radio rule does not already reject.
+func withSecondMorseRadio(reader *fakeConfigReader) *fakeConfigReader {
+	reader.data["wireless"]["radio2"] = map[string][]string{
+		"type": {"morse"}, "band": {"s1g"}, "channel": {"42"},
+	}
+	reader.sectionTypes["wireless"]["radio2"] = "wifi-device"
+
+	return reader
+}
+
+func TestApplySetup_RejectsAPOnMorseRadio(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, withSecondMorseRadio(newSetupReader()), &fakeInterfaceProvider{})
+
+	prof := minimalProfile()
+	// Disabled on purpose: even a disabled entry stages a mode=ap
+	// section, so the rule must not depend on Enabled.
+	prof.Aps = []*setupv1.RadioApProfile{{RadioName: "radio2", Enabled: false}}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "type=morse")
+}
+
+func TestApplySetup_RejectsSTAUplinkOnMorseRadio(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, withSecondMorseRadio(newSetupReader()), &fakeInterfaceProvider{})
+
+	prof := minimalProfile()
+	prof.Role = setupv1.MeshRole_MESH_ROLE_MESH_GATE
+	prof.DeviceMode = &setupv1.MeshNodeProfile_MeshgateMode{
+		MeshgateMode: setupv1.MeshGateMode_MESH_GATE_MODE_ROUTER,
+	}
+	prof.Uplink = &setupv1.Uplink{
+		Type: setupv1.UplinkType_UPLINK_TYPE_WIRELESS_STA,
+		Wireless: &setupv1.WifiStaProfile{
+			RadioName:  "radio2",
+			Ssid:       "upstream",
+			Passphrase: "upstreampass",
+			Encryption: wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_PSK2,
+		},
+	}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "type=morse")
+}
+
 func TestApplySetup_RejectsDuplicateAPRadios(t *testing.T) {
 	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
 	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
@@ -723,6 +902,102 @@ func TestApplySetup_RejectsDuplicateAPRadios(t *testing.T) {
 
 	err := runApplySetup(t, svc, prof)
 	requireConnectCode(t, err, connect.CodeInvalidArgument)
+}
+
+func backhaulEntry(radio string) *setupv1.RadioApProfile {
+	return &setupv1.RadioApProfile{
+		RadioName:  radio,
+		Enabled:    false,
+		Encryption: wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_SAE,
+		MeshBackhaul: &setupv1.MeshBackhaulProfile{
+			MeshId:     "backhaul-2g",
+			Passphrase: "backhaulpass",
+		},
+	}
+}
+
+func TestApplySetup_RejectsBackhaulThatIsAlsoEnabledAP(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	entry := backhaulEntry("radio0")
+	entry.Enabled = true
+	entry.Ssid = "both"
+	entry.Passphrase = "longenough"
+	prof.Aps = []*setupv1.RadioApProfile{entry}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "cannot be both an AP and the mesh backhaul")
+}
+
+func TestApplySetup_RejectsTwoBackhauls(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	reader := newSetupReader()
+	reader.data["wireless"]["radio2"] = map[string][]string{"type": {"mac80211"}, "band": {"2g"}, "channel": {"6"}}
+	reader.sectionTypes["wireless"]["radio2"] = "wifi-device"
+	svc := newSetupService(t, cfg, reader, &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	prof.Aps = []*setupv1.RadioApProfile{backhaulEntry("radio0"), backhaulEntry("radio2")}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "only one radio may be the mesh backhaul")
+}
+
+func TestApplySetup_RejectsBackhaulOnUnsupportedRadio(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	// No providers wired: capability cannot be resolved, so the choice is refused.
+
+	prof := minimalProfile()
+	prof.Aps = []*setupv1.RadioApProfile{backhaulEntry("radio0")}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "does not support mesh backhaul")
+}
+
+func TestApplySetup_RejectsBackhaulOnMeshRadio(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	prof.Aps = []*setupv1.RadioApProfile{backhaulEntry("radio1")} // the HaLow mesh radio
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+}
+
+func TestApplySetup_RejectsBackhaulOnSTARadio(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	prof.Role = setupv1.MeshRole_MESH_ROLE_MESH_GATE
+	prof.DeviceMode = &setupv1.MeshNodeProfile_MeshgateMode{
+		MeshgateMode: setupv1.MeshGateMode_MESH_GATE_MODE_ROUTER,
+	}
+	prof.Uplink = &setupv1.Uplink{
+		Type: setupv1.UplinkType_UPLINK_TYPE_WIRELESS_STA,
+		Wireless: &setupv1.WifiStaProfile{
+			RadioName:  "radio0",
+			Ssid:       "upstream",
+			Passphrase: "upstreampass",
+			Encryption: wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_PSK2,
+		},
+	}
+	prof.Aps = []*setupv1.RadioApProfile{backhaulEntry("radio0")}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "also the wireless uplink radio")
 }
 
 func TestApplySetup_RejectsShortPassphrase(t *testing.T) {
@@ -882,18 +1157,61 @@ func requireConnectCode(t *testing.T, err error, want connect.Code) {
 
 // ── Phase 2-12 scenario tests ───────────────────────────────────────────────
 
-// fakeUCISnapshot is a simple test double for UCISnapshot. It just
-// remembers which configs it was created from so tests can assert
-// the snapshotter saw the expected scopes.
+// snapConfigData is a deep copy of one UCI config's option data and
+// section types, captured so the reader-backed fake snapshotter can
+// put it back on rollback. present=false records that the config did
+// not exist at snapshot time, so restore removes it again.
+type snapConfigData struct {
+	present bool
+	data    map[string]map[string][]string
+	types   map[string]string
+}
+
+// captureConfig deep-copies one config out of a fakeConfigReader.
+func captureConfig(r *fakeConfigReader, config string) snapConfigData {
+	d, hasData := r.data[config]
+
+	tt, hasTypes := r.sectionTypes[config]
+	if !hasData && !hasTypes {
+		return snapConfigData{present: false}
+	}
+
+	out := snapConfigData{present: true, data: map[string]map[string][]string{}, types: map[string]string{}}
+
+	for sec, opts := range d {
+		optCopy := make(map[string][]string, len(opts))
+		for k, v := range opts {
+			optCopy[k] = append([]string(nil), v...)
+		}
+
+		out.data[sec] = optCopy
+	}
+
+	for sec, ty := range tt {
+		out.types[sec] = ty
+	}
+
+	return out
+}
+
+// fakeUCISnapshot is a test double for UCISnapshot. It remembers which
+// configs it was created from (so tests can assert the snapshotter saw
+// the expected scopes) and, when the snapshotter is reader-backed, a
+// deep copy of each config's state for a real rollback.
 type fakeUCISnapshot struct {
-	configs []string
+	configs  []string
+	captured map[string]snapConfigData
 }
 
 func (f *fakeUCISnapshot) Configs() []string { return f.configs }
 
-// fakeSnapshotter implements UCISnapshotter and records the calls
-// made to it. Restore is a no-op.
+// fakeSnapshotter implements UCISnapshotter and records the calls made
+// to it. When reader is set it deep-copies the mock UCI state on
+// Snapshot and writes it back on Restore, so rollback tests can assert
+// the tree returns to its pre-apply values; when reader is nil Restore
+// only records the call (the shape older tests rely on).
 type fakeSnapshotter struct {
+	reader        *fakeConfigReader
 	snapshotCalls int
 	restoreCalls  int
 	snapshotErr   error
@@ -908,15 +1226,71 @@ func (f *fakeSnapshotter) Snapshot(_ context.Context, configs []string) (handler
 		return nil, f.snapshotErr
 	}
 
-	f.lastSnapshot = &fakeUCISnapshot{configs: append([]string(nil), configs...)}
+	snap := &fakeUCISnapshot{configs: append([]string(nil), configs...)}
 
-	return f.lastSnapshot, nil
+	if f.reader != nil {
+		snap.captured = make(map[string]snapConfigData, len(configs))
+		for _, c := range configs {
+			snap.captured[c] = captureConfig(f.reader, c)
+		}
+	}
+
+	f.lastSnapshot = snap
+
+	return snap, nil
 }
 
-func (f *fakeSnapshotter) Restore(_ context.Context, _ handlers.UCISnapshot) error {
+func (f *fakeSnapshotter) Restore(_ context.Context, snapshot handlers.UCISnapshot) error {
 	f.restoreCalls++
 
-	return f.restoreErr
+	if f.restoreErr != nil {
+		return f.restoreErr
+	}
+
+	if f.reader == nil {
+		return nil
+	}
+
+	snap, ok := snapshot.(*fakeUCISnapshot)
+	if !ok || snap.captured == nil {
+		return nil
+	}
+
+	for config, cd := range snap.captured {
+		delete(f.reader.data, config)
+		delete(f.reader.sectionTypes, config)
+
+		if !cd.present {
+			continue
+		}
+
+		restored := captureConfigInto(cd)
+		f.reader.data[config] = restored.data
+		f.reader.sectionTypes[config] = restored.types
+	}
+
+	return nil
+}
+
+// captureConfigInto returns a fresh deep copy of a captured config so
+// a restore never aliases the snapshot's own maps.
+func captureConfigInto(cd snapConfigData) snapConfigData {
+	out := snapConfigData{present: true, data: map[string]map[string][]string{}, types: map[string]string{}}
+
+	for sec, opts := range cd.data {
+		optCopy := make(map[string][]string, len(opts))
+		for k, v := range opts {
+			optCopy[k] = append([]string(nil), v...)
+		}
+
+		out.data[sec] = optCopy
+	}
+
+	for sec, ty := range cd.types {
+		out.types[sec] = ty
+	}
+
+	return out
 }
 
 // fakeHostnameSetter records the hostnames it was asked to set.
@@ -1072,12 +1446,21 @@ func newFullSetupReader() *fakeConfigReader {
 		"output":  {"ACCEPT"},
 		"forward": {"ACCEPT"},
 	}
+	// wan mirrors the factory image (testfixtures/setup-wizard/before/
+	// firewall:16-24): OpenWrt's default REJECT input/forward policy
+	// with masq + mtu_fix, which the wizard strips in phase 4 and
+	// re-applies only on a forwarding destination. wan6 is deliberately
+	// left out of the network list so
+	// TestCompat_RouterFirewallEth_Wan6InWanZone keeps proving the
+	// wizard adds it.
 	r.data["firewall"]["@zone[1]"] = map[string][]string{
 		"name":    {"wan"},
 		"network": {"wan"},
-		"input":   {"ACCEPT"},
+		"input":   {"REJECT"},
 		"output":  {"ACCEPT"},
-		"forward": {"ACCEPT"},
+		"forward": {"REJECT"},
+		"masq":    {"1"},
+		"mtu_fix": {"1"},
 	}
 
 	if r.sectionTypes["firewall"] == nil {
@@ -1146,7 +1529,7 @@ func newFullSetupService(t *testing.T, cfg *config.Config) (*handlers.SetupServi
 		Snap:     &fakeSnapshotter{},
 		Host:     &fakeHostnameSetter{},
 		Pass:     &fakePasswordSetter{},
-		Reloader: newFakeReloader(len(handlersReloadServices)),
+		Reloader: newFakeReloader(len(handlers.ReloadServicesForTest())),
 		Reader:   newFullSetupReader(),
 	}
 
@@ -1161,14 +1544,18 @@ func newFullSetupService(t *testing.T, cfg *config.Config) (*handlers.SetupServi
 		Interfaces:     &fakeInterfaceProvider{},
 	}
 
-	return svc, deps
-}
+	// Reader-back the snapshotter so a rollback in a phase test really
+	// restores the mock tree, not just counts the call.
+	if r, ok := svc.UCI.(*fakeConfigReader); ok {
+		deps.Snap.reader = r
+	}
 
-// handlersReloadServices mirrors the package-private reloadServices
-// constant in setup.go so tests can size the fake reloader's done
-// channel correctly.
-var handlersReloadServices = []string{ //nolint:gochecknoglobals // test-scoped slice mirroring an unexported package constant
-	"wireless", "network", "dhcp", "firewall", "system", "mesh11sd",
+	// radio0 (2g mac80211) resolves to an MT7915 so backhaul profiles
+	// pass validation; HaLow-only or unresolvable boards are covered
+	// by TestGetSetupStatus_SupportsMeshBackhaul_*.
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	return svc, deps
 }
 
 // waitForReloadGoroutine blocks until either every reloadService has
@@ -1177,16 +1564,18 @@ var handlersReloadServices = []string{ //nolint:gochecknoglobals // test-scoped 
 func waitForReloadGoroutine(t *testing.T, r *fakeServiceReloader, timeout time.Duration) {
 	t.Helper()
 
+	want := len(handlers.ReloadServicesForTest())
+
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
-	for i := 0; i < len(handlersReloadServices); i++ {
+	for i := 0; i < want; i++ {
 		select {
 		case <-r.done:
 			// Got one.
 		case <-deadline.C:
 			t.Fatalf("reload goroutine did not finish within %s (got %d/%d)",
-				timeout, i, len(handlersReloadServices))
+				timeout, i, want)
 		}
 	}
 }
@@ -1204,10 +1593,11 @@ func TestApplySetup_MeshPointExtender_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, deps.Snap.snapshotCalls)
 	assert.Equal(t, 0, deps.Snap.restoreCalls, "happy path must not roll back")
 
-	// Snapshot scope covered all seven wizard configs.
+	// Snapshot scope covers every wizard config, including the
+	// openmanetd flags file staged in phase 9.
 	require.NotNil(t, deps.Snap.lastSnapshot)
 	assert.ElementsMatch(t, []string{
-		"wireless", "network", "dhcp", "firewall", "system", "mesh11sd", "openmanetd",
+		"wireless", "network", "dhcp", "firewall", "system", "mesh11sd", "umdns", "openmanetd", "luci",
 	}, deps.Snap.lastSnapshot.configs)
 
 	// A rerun must request a fresh address reservation instead of retaining
@@ -1225,7 +1615,7 @@ func TestApplySetup_MeshPointExtender_HappyPath(t *testing.T) {
 	assert.Equal(t, "root", calls[0].username)
 	assert.Equal(t, "supersecret", calls[0].password)
 
-	// All 14 phases fired (PHASE_VALIDATE through PHASE_PERSIST_FLAGS)
+	// All 15 phases fired (PHASE_VALIDATE through PHASE_PERSIST_FLAGS)
 	// plus PHASE_TERMINAL with success.
 	wantPhases := []setupv1.ApplySetupResponse_Phase{
 		setupv1.ApplySetupResponse_PHASE_VALIDATE,
@@ -1233,6 +1623,7 @@ func TestApplySetup_MeshPointExtender_HappyPath(t *testing.T) {
 		setupv1.ApplySetupResponse_PHASE_RESET_WIRELESS,
 		setupv1.ApplySetupResponse_PHASE_RESET_NETWORK,
 		setupv1.ApplySetupResponse_PHASE_HOSTNAME,
+		setupv1.ApplySetupResponse_PHASE_SET_TIMEZONE,
 		setupv1.ApplySetupResponse_PHASE_BASE_NETWORK,
 		setupv1.ApplySetupResponse_PHASE_WIRELESS_MESH,
 		setupv1.ApplySetupResponse_PHASE_PER_RADIO_AP_STA,
@@ -1269,7 +1660,7 @@ func TestApplySetup_MeshPointExtender_HappyPath(t *testing.T) {
 
 	// Reload goroutine should have run reload on every wizard service.
 	waitForReloadGoroutine(t, deps.Reloader, 2*time.Second)
-	assert.ElementsMatch(t, handlersReloadServices, deps.Reloader.reloadCallsCopy())
+	assert.ElementsMatch(t, handlers.ReloadServicesForTest(), deps.Reloader.reloadCallsCopy())
 	assert.Empty(t, deps.Reloader.restartCallsCopy(), "all reloads succeeded; no restart fallback")
 
 	// Setup-complete and auth-enable flags now true.
@@ -1302,6 +1693,53 @@ func TestApplySetup_MeshGateRouterEth_HappyPath(t *testing.T) {
 	assert.Equal(t, setupv1.ApplySetupResponse_PHASE_TERMINAL, last.GetPhase())
 	require.NotNil(t, last.GetResult())
 	assert.True(t, last.GetResult().GetSuccess())
+}
+
+// TestApplySetup_DisabledAPClearsStaleCredentials seeds a wifi-iface
+// with stale ssid/key/encryption left over from a prior wizard run
+// (these options survive the reset phase because they're on the
+// wizard's wifi-iface whitelist), then applies a profile with that
+// radio disabled. The comment on writeAPIface's disabled branch
+// claims credentials are cleared; this pins that the code actually
+// does it, not just marks disabled=1.
+func TestApplySetup_DisabledAPClearsStaleCredentials(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, _ := newFullSetupService(t, cfg)
+
+	reader, ok := svc.UCI.(*fakeConfigReader)
+	require.True(t, ok, "fakeConfigReader expected on UCI field")
+
+	// Seed default_radio0 with stale credentials from a prior run.
+	reader.data["wireless"]["default_radio0"] = map[string][]string{
+		"device":     {"radio0"},
+		"mode":       {"ap"},
+		"ssid":       {"stale-ssid"},
+		"key":        {"stale-passphrase"},
+		"encryption": {"psk2"},
+	}
+	reader.sectionTypes["wireless"]["default_radio0"] = "wifi-iface"
+
+	prof := pointExtenderProfile()
+	prof.Aps = []*setupv1.RadioApProfile{
+		{
+			RadioName: "radio0",
+			Enabled:   false, // operator chose to disable
+		},
+	}
+
+	require.NoError(t, runApplySetup(t, svc, prof))
+
+	ssid, _ := reader.Get("wireless", "default_radio0", "ssid")
+	assert.Empty(t, ssid, "stale ssid must be cleared when the AP is disabled")
+
+	key, _ := reader.Get("wireless", "default_radio0", "key")
+	assert.Empty(t, key, "stale key must be cleared when the AP is disabled")
+
+	encryption, _ := reader.Get("wireless", "default_radio0", "encryption")
+	assert.Empty(t, encryption, "stale encryption must be cleared when the AP is disabled")
+
+	disabled, _ := reader.Get("wireless", "default_radio0", "disabled")
+	assert.Equal(t, []string{"1"}, disabled, "disabled=1 must still be written")
 }
 
 func TestApplySetup_SnapshotFailureRollsBack(t *testing.T) {
@@ -1414,6 +1852,45 @@ func TestApplySetup_PasswordFailureRollsBackUCIButNotPassword(t *testing.T) {
 	assert.False(t, cfg.GetSetupComplete())
 }
 
+// TestApplySetup_RollbackRestoresStagedFlags proves the rollback path
+// actually puts the tree back: a commit failure after the luci and
+// openmanetd bookkeeping has been staged must restore both to their
+// pre-apply values, not leave them half-written. Runs in the default
+// suite (the integration test covers the same over ConnectRPC).
+func TestApplySetup_RollbackRestoresStagedFlags(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, deps := newFullSetupService(t, cfg)
+
+	reader, ok := svc.UCI.(*fakeConfigReader)
+	require.True(t, ok)
+
+	// Pre-apply state a successful run would change: a stale
+	// dhcpconfigured=1 the wizard sets to 0, and the first-boot LuCI
+	// landing homepage the wizard deletes. Both must come back on
+	// rollback. (luci.wizard.used is left unset so the re-apply guard
+	// does not refuse before the snapshot is even taken.)
+	require.NoError(t, reader.AddSection("openmanetd", "config", "openmanet"))
+	require.NoError(t, reader.SetType("openmanetd", "config", "dhcpconfigured", uci.TypeOption, "1"))
+	require.NoError(t, reader.AddSection("luci", "main", "core"))
+	require.NoError(t, reader.SetType("luci", "main", "homepage", uci.TypeOption, "admin/morse/landing"))
+
+	// Fail the phase-12 commit so the mutation pipeline rolls back.
+	reader.commitError = assert.AnError
+
+	err := svc.ApplySetupForTest(context.Background(), minimalProfile(), &streamCollector{})
+	requireConnectCode(t, err, connect.CodeInternal)
+
+	assert.Equal(t, 1, deps.Snap.restoreCalls, "a commit failure must roll back")
+
+	tr := &uciTree{reader: reader}
+	assert.Equal(t, "1", tr.getOne("openmanetd", "config", "dhcpconfigured"),
+		"rollback must restore the pre-apply dhcpconfigured=1, not leave the wizard's 0")
+	assert.Equal(t, "admin/morse/landing", tr.getOne("luci", "main", "homepage"),
+		"rollback must restore the deleted landing homepage")
+	assert.Empty(t, tr.getOne("luci", "wizard", "used"),
+		"rollback must undo the wizard's luci.wizard.used=1 write")
+}
+
 func TestApplySetup_PersistFlagsFailureDoesNotRollback(t *testing.T) {
 	// PersistFlags failure leaves UCI in the new state but flags
 	// stay false. The user re-runs the wizard; the reset phases
@@ -1433,7 +1910,7 @@ func TestApplySetup_PersistFlagsFailureDoesNotRollback(t *testing.T) {
 		Snap:     &fakeSnapshotter{},
 		Host:     &fakeHostnameSetter{},
 		Pass:     &fakePasswordSetter{},
-		Reloader: newFakeReloader(len(handlersReloadServices)),
+		Reloader: newFakeReloader(len(handlers.ReloadServicesForTest())),
 	}
 
 	svc := &handlers.SetupService{
@@ -1477,8 +1954,8 @@ func TestApplySetup_ReloadFailuresFallBackToRestart(t *testing.T) {
 
 	waitForReloadGoroutine(t, deps.Reloader, 2*time.Second)
 
-	assert.ElementsMatch(t, handlersReloadServices, deps.Reloader.reloadCallsCopy())
-	assert.ElementsMatch(t, handlersReloadServices, deps.Reloader.restartCallsCopy())
+	assert.ElementsMatch(t, handlers.ReloadServicesForTest(), deps.Reloader.reloadCallsCopy())
+	assert.ElementsMatch(t, handlers.ReloadServicesForTest(), deps.Reloader.restartCallsCopy())
 }
 
 func TestApplySetup_ReloadCompleteFailureAbortsBeforeFlagFlip(t *testing.T) {
@@ -1575,6 +2052,7 @@ func TestApplySetup_PhasesEmitInCorrectOrder(t *testing.T) {
 		setupv1.ApplySetupResponse_PHASE_RESET_WIRELESS,
 		setupv1.ApplySetupResponse_PHASE_RESET_NETWORK,
 		setupv1.ApplySetupResponse_PHASE_HOSTNAME,
+		setupv1.ApplySetupResponse_PHASE_SET_TIMEZONE,
 		setupv1.ApplySetupResponse_PHASE_BASE_NETWORK,
 		setupv1.ApplySetupResponse_PHASE_WIRELESS_MESH,
 		setupv1.ApplySetupResponse_PHASE_PER_RADIO_AP_STA,
@@ -1588,4 +2066,257 @@ func TestApplySetup_PhasesEmitInCorrectOrder(t *testing.T) {
 	}, startedSequence)
 
 	_ = deps // reload now runs synchronously; no goroutine wait needed
+}
+
+// TestWizardConfigsIncludesUmdns pins that umdns is captured by the
+// snapshot/rollback phase. Without it, a failure between the umdns
+// write (phase 6) and phase 12's commit would restore the other six
+// configs but leave a partial umdns write live on disk.
+func TestWizardConfigsIncludesUmdns(t *testing.T) {
+	assert.Contains(t, handlers.WizardConfigsForTest(), "umdns")
+}
+
+// TestWizardConfigsIncludesOpenmanetd pins that the openmanetd flags
+// file is captured by the snapshot/rollback phase: a failure after
+// phase 9 must restore dhcpconfigured/batmesh1configured too.
+func TestWizardConfigsIncludesOpenmanetd(t *testing.T) {
+	assert.Contains(t, handlers.WizardConfigsForTest(), "openmanetd")
+}
+
+// TestWizardConfigsIncludesLuci pins that /etc/config/luci is in the
+// snapshot scope: a failure after phase 9 must roll back
+// luci.wizard.used and the homepage deletion.
+func TestWizardConfigsIncludesLuci(t *testing.T) {
+	assert.Contains(t, handlers.WizardConfigsForTest(), "luci")
+}
+
+// TestReloadServicesIncludesUmdns pins that umdns is nudged by the
+// reload phase, so a freshly-registered network list takes effect
+// without a reboot.
+func TestReloadServicesIncludesUmdns(t *testing.T) {
+	assert.Contains(t, handlers.ReloadServicesForTest(), "umdns")
+}
+
+// ── PHASE_SET_TIMEZONE ──────────────────────────────────────────────────────
+
+// failingSystemWriteReader wraps a *fakeConfigReader and fails only
+// SetType calls that write the system config's zonename/timezone
+// options. Every earlier phase (reset wireless/network, hostname —
+// hostname goes through HostnameSetter, not UCI.SetType, in
+// newFullSetupService) succeeds against the same underlying data, so
+// the injected failure is pinned precisely to PHASE_SET_TIMEZONE.
+type failingSystemWriteReader struct {
+	*fakeConfigReader
+}
+
+func (r *failingSystemWriteReader) SetType(config, section, option string, typ uci.OptionType, values ...string) error {
+	if config == "system" && (option == "zonename" || option == "timezone") {
+		return assert.AnError
+	}
+
+	return r.fakeConfigReader.SetType(config, section, option, typ, values...)
+}
+
+// TestApplySetup_TimezoneStageFailureRollsBack asserts a failure
+// writing system.zonename/timezone rolls back UCI and reports
+// PHASE_SET_TIMEZONE as the failed phase — the same invariant every
+// sibling phase pins (see TestApplySetup_HostnameSetterFailureRollsBack
+// and friends).
+func TestApplySetup_TimezoneStageFailureRollsBack(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, deps := newFullSetupService(t, cfg)
+
+	inner, ok := svc.UCI.(*fakeConfigReader)
+	require.True(t, ok, "fakeConfigReader expected on UCI field")
+
+	svc.UCI = &failingSystemWriteReader{fakeConfigReader: inner}
+
+	prof := minimalProfile()
+	prof.Timezone = "America/Denver"
+
+	collector := &streamCollector{}
+	err := svc.ApplySetupForTest(context.Background(), prof, collector)
+
+	requireConnectCode(t, err, connect.CodeInternal)
+
+	// Snapshot was taken; rollback was invoked exactly once.
+	assert.Equal(t, 1, deps.Snap.snapshotCalls)
+	assert.Equal(t, 1, deps.Snap.restoreCalls)
+
+	last := collector.sent[len(collector.sent)-1]
+	assert.Equal(t, setupv1.ApplySetupResponse_PHASE_TERMINAL, last.GetPhase())
+	require.NotNil(t, last.GetResult())
+	assert.Equal(t, setupv1.ApplySetupResponse_PHASE_SET_TIMEZONE,
+		last.GetResult().GetFailedPhase())
+}
+
+// TestApplySetup_EmptyTimezoneLeavesExistingUntouched asserts an empty
+// profile.timezone (the operator cleared the pre-filled select) leaves
+// the device's existing system.timezone value alone and never writes
+// system.zonename.
+func TestApplySetup_EmptyTimezoneLeavesExistingUntouched(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, _ := newFullSetupService(t, cfg)
+
+	reader, ok := svc.UCI.(*fakeConfigReader)
+	require.True(t, ok, "fakeConfigReader expected on UCI field")
+
+	prof := minimalProfile() // Timezone left as the zero value ("")
+
+	require.NoError(t, runApplySetup(t, svc, prof))
+
+	tz, ok := reader.Get("system", "@system[0]", "timezone")
+	require.True(t, ok)
+	assert.Equal(t, []string{"UTC"}, tz, "existing timezone must be untouched when profile.timezone is empty")
+
+	_, ok = reader.Get("system", "@system[0]", "zonename")
+	assert.False(t, ok, "zonename must not be written when profile.timezone is empty")
+}
+
+// TestApplySetup_UnknownTimezoneRejected asserts a timezone name not
+// present in the embedded tzinfo table fails validation with
+// CodeInvalidArgument before any mutation phase runs.
+func TestApplySetup_UnknownTimezoneRejected(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, _ := newFullSetupService(t, cfg)
+
+	prof := minimalProfile()
+	prof.Timezone = "Nowhere/Fake"
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+}
+
+// TestApplySetup_TimezoneClockSync exercises the clock-drift threshold
+// in both directions: a client clock 30s AHEAD of the device (positive
+// driftSecs) and 30s BEHIND the device (negative driftSecs) both
+// trigger exactly one SetTimeFn call with the client's time — pinning
+// both the negated and un-negated paths of syncClock's abs(drift)
+// computation. A 5s drift (below the 10s threshold) never syncs.
+func TestApplySetup_TimezoneClockSync(t *testing.T) {
+	fixedNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		driftSecs  int
+		wantCalled bool
+	}{
+		{name: "30s drift (client ahead of device) triggers sync", driftSecs: 30, wantCalled: true},
+		{name: "30s drift (client behind device) also triggers sync", driftSecs: -30, wantCalled: true},
+		{name: "5s drift does not trigger sync", driftSecs: 5, wantCalled: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+			svc, _ := newFullSetupService(t, cfg)
+			svc.SetNowFnForTest(func() time.Time { return fixedNow })
+
+			calls := 0
+
+			var calledWith time.Time
+
+			svc.SetTimeFn = func(tt time.Time) error {
+				calls++
+				calledWith = tt
+
+				return nil
+			}
+
+			clientTime := fixedNow.Add(time.Duration(tc.driftSecs) * time.Second)
+
+			prof := minimalProfile()
+			prof.Timezone = "America/Denver"
+			prof.ClientTime = timestamppb.New(clientTime)
+
+			require.NoError(t, runApplySetup(t, svc, prof))
+
+			if tc.wantCalled {
+				assert.Equal(t, 1, calls)
+				assert.True(t, calledWith.Equal(clientTime), "SetTimeFn must be called with the client's time")
+
+				return
+			}
+
+			assert.Equal(t, 0, calls)
+		})
+	}
+}
+
+// TestApplySetup_TimezoneClockSyncSetTimeFnErrorStillSucceeds asserts
+// a failing SetTimeFn is best-effort: the phase (and the whole apply)
+// still succeeds.
+func TestApplySetup_TimezoneClockSyncSetTimeFnErrorStillSucceeds(t *testing.T) {
+	fixedNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, _ := newFullSetupService(t, cfg)
+	svc.SetNowFnForTest(func() time.Time { return fixedNow })
+	svc.SetTimeFn = func(time.Time) error { return assert.AnError }
+
+	prof := minimalProfile()
+	prof.Timezone = "America/Denver"
+	prof.ClientTime = timestamppb.New(fixedNow.Add(30 * time.Second))
+
+	require.NoError(t, runApplySetup(t, svc, prof), "SetTimeFn failure must not fail the phase")
+}
+
+func TestApplySetup_RejectsBackhaulChannelWithoutBandwidth(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	entry := backhaulEntry("radio0")
+	entry.MeshBackhaul.Channel = 6
+	prof.Aps = []*setupv1.RadioApProfile{entry}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "channel and bandwidth_mhz must be set together")
+}
+
+func TestApplySetup_RejectsBackhaulBandwidthWithoutChannel(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	entry := backhaulEntry("radio0")
+	entry.MeshBackhaul.BandwidthMhz = 20
+	prof.Aps = []*setupv1.RadioApProfile{entry}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "channel and bandwidth_mhz must be set together")
+}
+
+func TestApplySetup_RejectsBackhaulChannelOutside2G(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc := newSetupService(t, cfg, newSetupReader(), &fakeInterfaceProvider{})
+	svc.Iwinfo, svc.WirelessStatus = backhaulCapableProviders()
+
+	prof := minimalProfile()
+	entry := backhaulEntry("radio0")
+	entry.MeshBackhaul.BandwidthMhz = 20
+	entry.MeshBackhaul.Channel = 14 // runApplySetup bypasses the proto lte 11 rule (no interceptor)
+	prof.Aps = []*setupv1.RadioApProfile{entry}
+
+	err := runApplySetup(t, svc, prof)
+	requireConnectCode(t, err, connect.CodeInvalidArgument)
+	assert.Contains(t, err.Error(), "not a 2.4 GHz channel")
+}
+
+func TestApplySetup_AcceptsBackhaulChannelAndWidth(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, _ := newFullSetupService(t, cfg)
+
+	prof := minimalProfile()
+	entry := backhaulEntry("radio0")
+	entry.MeshBackhaul.BandwidthMhz = 40
+	entry.MeshBackhaul.Channel = 6
+	prof.Aps = []*setupv1.RadioApProfile{entry}
+
+	require.NoError(t, svc.ApplySetupForTest(context.Background(), prof, &streamCollector{}),
+		"a legal channel/width pair must pass validation and apply")
 }

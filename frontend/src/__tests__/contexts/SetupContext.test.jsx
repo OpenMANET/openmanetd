@@ -128,4 +128,147 @@ describe('SetupContext.reducer', () => {
     const next = reducer(initialState, { type: 'NOT_A_REAL_ACTION' });
     expect(next).toBe(initialState);
   });
+
+  it('SET_TIMEZONE stores the zone name', () => {
+    const next = reducer(initialState, { type: SETUP_ACTIONS.SET_TIMEZONE, value: 'America/Denver' });
+    expect(next.timezone).toBe('America/Denver');
+    expect(next.mesh).toBe(initialState.mesh);
+  });
+
+  it('HYDRATE_FROM_STATUS prefers the browser zone when the device offers it', () => {
+    const next = reducer(initialState, {
+      type: SETUP_ACTIONS.HYDRATE_FROM_STATUS,
+      status: { radios: [], timezones: ['America/Denver', 'UTC'] },
+      browserTimezone: 'America/Denver',
+    });
+    expect(next.timezone).toBe('America/Denver');
+  });
+
+  it('HYDRATE_FROM_STATUS falls back to currentTimezone when the browser zone is unknown', () => {
+    const next = reducer(initialState, {
+      type: SETUP_ACTIONS.HYDRATE_FROM_STATUS,
+      status: { radios: [], timezones: ['UTC'], currentTimezone: 'UTC' },
+      browserTimezone: 'Mars/Olympus',
+    });
+    expect(next.timezone).toBe('UTC');
+  });
+
+  it('HYDRATE_FROM_STATUS keeps a user-chosen timezone', () => {
+    const seeded = { ...initialState, timezone: 'Europe/Paris' };
+    const next = reducer(seeded, {
+      type: SETUP_ACTIONS.HYDRATE_FROM_STATUS,
+      status: { radios: [], timezones: ['UTC'] },
+      browserTimezone: 'UTC',
+    });
+    expect(next.timezone).toBe('Europe/Paris');
+  });
+
+  it('SET_RADIO_MODE backhaul disables the AP, seeds the mesh ID, and clears backhaul on other radios', () => {
+    const withAp = reducer(initialState, {
+      type: SETUP_ACTIONS.SET_AP,
+      value: { radioName: 'radio0', enabled: true, ssid: 'home', passphrase: 'longenough' },
+    });
+    const first = reducer(withAp, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'backhaul' });
+    const r0 = first.aps.find(a => a.radioName === 'radio0');
+    expect(r0.enabled).toBe(false);
+    expect(r0.meshBackhaul).toBe(true);
+    expect(r0.backhaulMeshId).toBe(`${initialState.mesh.meshId}-2g`);
+    expect(r0.ssid).toBe('home'); // AP fields survive a mode flip
+
+    const second = reducer(first, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio2', mode: 'backhaul' });
+    expect(second.aps.find(a => a.radioName === 'radio0').meshBackhaul).toBe(false);
+    expect(second.aps.find(a => a.radioName === 'radio2').meshBackhaul).toBe(true);
+    expect(second.aps.filter(a => a.meshBackhaul)).toHaveLength(1);
+  });
+
+  it('SET_RADIO_MODE ap and off flip enabled and clear backhaul', () => {
+    const bh = reducer(initialState, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'backhaul' });
+    const ap = reducer(bh, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'ap' });
+    expect(ap.aps[0].enabled).toBe(true);
+    expect(ap.aps[0].meshBackhaul).toBe(false);
+
+    const off = reducer(ap, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'off' });
+    expect(off.aps[0].enabled).toBe(false);
+    expect(off.aps[0].meshBackhaul).toBe(false);
+    expect(off).not.toBe(ap);
+  });
+
+  it('SET_RADIO_MODE keeps a user-typed backhaul mesh ID across mode flips', () => {
+    const bh = reducer(initialState, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'backhaul' });
+    const typed = reducer(bh, { type: SETUP_ACTIONS.SET_AP, value: { radioName: 'radio0', backhaulMeshId: 'mine' } });
+    const off = reducer(typed, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'off' });
+    const again = reducer(off, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'backhaul' });
+    expect(again.aps[0].backhaulMeshId).toBe('mine');
+  });
+
+  it('SET_AP defaults the backhaul fields on insert', () => {
+    const next = reducer(initialState, { type: SETUP_ACTIONS.SET_AP, value: { radioName: 'radio0' } });
+    expect(next.aps[0]).toMatchObject({ meshBackhaul: false, backhaulMeshId: '', backhaulPassphrase: '' });
+  });
+
+  it('SET_RADIO_MODE clamps the seeded backhaul mesh ID to 32 characters', () => {
+    const longMeshId = 'a'.repeat(32);
+    const withMeshId = reducer(initialState, {
+      type: SETUP_ACTIONS.SET_MESH_FIELD,
+      field: 'meshId',
+      value: longMeshId,
+    });
+    const next = reducer(withMeshId, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio0', mode: 'backhaul' });
+    const seeded = next.aps.find(a => a.radioName === 'radio0').backhaulMeshId;
+    expect(seeded.length).toBeLessThanOrEqual(32);
+    expect(seeded.endsWith('-2g')).toBe(true);
+  });
+
+  const RADIOS = [
+    { name: 'radio1', band: 's1g', isHalow: true },
+    { name: 'radio0', band: '2g', isHalow: false, supportsMeshBackhaul: true },
+    { name: 'radio2', band: '5g', isHalow: false, supportsMeshBackhaul: false },
+  ];
+  const PAYLOAD = {
+    sourceHostname: 'alpha',
+    halow: { meshId: 'field-mesh', passphrase: 'correct-horse', encryption: WifiEncryption.SAE, bandwidthMhz: 8, channel: 44, countryCode: 'US' },
+    backhaul: { meshId: 'field-mesh-2g', passphrase: 'backhaul-pass', encryption: WifiEncryption.SAE, bandwidthMhz: 40, channel: 6, countryCode: 'US' },
+  };
+
+  it('APPLY_MESH_JOIN fills the mesh slice and marks it scanned', () => {
+    const next = reducer(initialState, { type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload: PAYLOAD, radios: RADIOS });
+    expect(next.mesh).toMatchObject({ meshId: 'field-mesh', passphrase: 'correct-horse', bandwidthMhz: 8, channel: 44, countryCode: 'US', fromScan: true });
+    expect(next.mesh.radioName).toBe(initialState.mesh.radioName);
+    expect(next.meshJoin).toEqual({ sourceHostname: 'alpha', backhaulRadio: 'radio0', backhaulSkippedReason: '' });
+  });
+
+  it('APPLY_MESH_JOIN switches the first capable radio to backhaul with the scanned tuning', () => {
+    const next = reducer(initialState, { type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload: PAYLOAD, radios: RADIOS });
+    const ap = next.aps.find(a => a.radioName === 'radio0');
+    expect(ap).toMatchObject({
+      enabled: false, meshBackhaul: true, backhaulMeshId: 'field-mesh-2g', backhaulPassphrase: 'backhaul-pass',
+      backhaulBandwidthMhz: 40, backhaulChannel: 6, backhaulCountryCode: 'US', backhaulFromScan: true,
+    });
+  });
+
+  it('APPLY_MESH_JOIN clears backhaul on other radios and skips the STA uplink radio', () => {
+    const withOther = reducer(initialState, { type: SETUP_ACTIONS.SET_RADIO_MODE, radioName: 'radio2', mode: 'backhaul' });
+    const uplinked = { ...withOther, uplink: { ...withOther.uplink, wireless: { ...withOther.uplink.wireless, radioName: 'radio0' } } };
+    const next = reducer(uplinked, { type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload: PAYLOAD, radios: RADIOS });
+    expect(next.meshJoin.backhaulRadio).toBe('');
+    expect(next.meshJoin.backhaulSkippedReason).toBe('no-capable-radio');
+    expect(next.aps.find(a => a.radioName === 'radio2').meshBackhaul).toBe(true);
+  });
+
+  it('APPLY_MESH_JOIN without a backhaul leaves aps alone', () => {
+    const next = reducer(initialState, { type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload: { ...PAYLOAD, backhaul: undefined }, radios: RADIOS });
+    expect(next.aps).toEqual([]);
+    expect(next.meshJoin.backhaulRadio).toBe('');
+  });
+
+  it('SET_MESH_FIELD clears fromScan except for the radio pick', () => {
+    const scanned = reducer(initialState, { type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload: PAYLOAD, radios: RADIOS });
+    expect(reducer(scanned, { type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'radioName', value: 'radio1' }).mesh.fromScan).toBe(true);
+    expect(reducer(scanned, { type: SETUP_ACTIONS.SET_MESH_FIELD, field: 'channel', value: 28 }).mesh.fromScan).toBe(false);
+  });
+
+  it('RESET drops the scan', () => {
+    const scanned = reducer(initialState, { type: SETUP_ACTIONS.APPLY_MESH_JOIN, payload: PAYLOAD, radios: RADIOS });
+    expect(reducer(scanned, { type: SETUP_ACTIONS.RESET }).meshJoin).toBeNull();
+  });
 });

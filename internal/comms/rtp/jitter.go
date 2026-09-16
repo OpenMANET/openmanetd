@@ -13,7 +13,14 @@ const (
 	// arrival jitter on the mesh. 100 ms tolerates roughly one full packet
 	// of late arrival before the buffer empties and playout falls into PLC.
 	PrebufferPackets = 5
-	MaxDepth         = 24
+
+	// MaxDepth is the jitter ring capacity in frames. It MUST be a power of
+	// two: slots are indexed by seq & (maxDepth-1), and only a power-of-two
+	// depth keeps the seq→slot mapping continuous across the uint16 sequence
+	// wrap (65536 % maxDepth == 0). A non-power-of-two depth makes in-window
+	// frames collide at the wrap and evict each other, which surfaces as an
+	// unattributable PLC glitch every ~22 minutes of continuous talk.
+	MaxDepth = 32
 
 	// MaxOpusPayloadSize is the RFC 6716 §3.2.1 maximum encoded frame size.
 	// Payload pool buffers are sized to this capacity to eliminate per-packet
@@ -43,7 +50,8 @@ type jitterSlot struct {
 // previous talker's frozen sequence cursor.
 //
 // Internally, frames are stored in a fixed-size circular array indexed by
-// (seq % maxDepth), eliminating all map allocations on the hot path.
+// (seq & (maxDepth-1)), eliminating all map allocations on the hot path.
+// maxDepth must be a power of two so the mapping survives uint16 wrap.
 //
 // notifyCh is the optional edge-triggered "frame available" wakeup used by
 // consumers that prefer push-driven scheduling over a polling ticker (see
@@ -79,22 +87,36 @@ type JitterBuffer struct {
 	count         int
 	prebuffer     int
 	maxDepth      int
-	mu            sync.Mutex
-	ssrc          uint32
-	expected      uint16
-	init          bool
-	started       bool
-	haveSSRC      bool
+	// depthMask is maxDepth-1, valid because maxDepth is a power of two.
+	// Slot indexing uses seq & depthMask so the mapping is continuous
+	// across the uint16 sequence wrap (and avoids a hardware divide on
+	// mipsle, where modulo by a non-power-of-two constant is a real DIV).
+	depthMask int
+	mu        sync.Mutex
+	ssrc      uint32
+	expected  uint16
+	init      bool
+	started   bool
+	haveSSRC  bool
 	// inGap is true when the consumer is currently walking through a
 	// contiguous missing-sequence run. Cleared on every successful pop
 	// and on reset. Used to ensure each run is bucketed exactly once.
 	inGap bool
 }
 
+// NewJitterBuffer constructs a jitter buffer. maxDepth must be a power of
+// two no larger than MaxDepth; anything else is an init-time programmer
+// error and panics — a non-power-of-two depth would silently corrupt the
+// seq→slot mapping at every uint16 sequence wrap.
 func NewJitterBuffer(prebuffer, maxDepth int) *JitterBuffer {
+	if maxDepth <= 0 || maxDepth > MaxDepth || maxDepth&(maxDepth-1) != 0 {
+		panic("rtp: jitter buffer maxDepth must be a power of two in [1, MaxDepth]")
+	}
+
 	jb := &JitterBuffer{
 		prebuffer: prebuffer,
 		maxDepth:  maxDepth,
+		depthMask: maxDepth - 1,
 	}
 
 	jb.payloadPool.New = func() any {
@@ -206,12 +228,27 @@ func (jb *JitterBuffer) EnableNotify() <-chan struct{} {
 
 // pushLocked is the internal push implementation; caller must hold jb.mu.
 func (jb *JitterBuffer) pushLocked(seq uint16, payload []byte) bool {
+	// Reject payloads larger than the pool buffer capacity. The receive path
+	// reads datagrams bigger than MaxOpusPayloadSize (its read buffer is MTU
+	// sized), so a malformed or hostile sender could otherwise drive the
+	// reslice below out of bounds. A conforming sender can never hit this:
+	// RFC 6716 caps a single Opus frame at MaxOpusPayloadSize bytes.
+	if len(payload) > MaxOpusPayloadSize {
+		return false
+	}
+
+	// One clock read per push, shared by the idle check below and the
+	// lastPush stamp at the end — pushLocked runs under the mutex the
+	// playback callback contends on, so redundant time.Now calls are
+	// pure added hold time.
+	now := jb.nowFn()
+
 	// Idle-reset safety net: if a long gap has elapsed since the last push,
 	// treat the next packet as the start of a fresh stream regardless of
 	// sequence number. Catches edge cases the SSRC check cannot, e.g. a sender
 	// that resets seq without rotating SSRC, or RFC 3550 §8.2 collision-driven
 	// SSRC rotation that the caller did not propagate.
-	if jb.init && !jb.lastPush.IsZero() && jb.nowFn().Sub(jb.lastPush) > jitterIdleResetThreshold {
+	if jb.init && !jb.lastPush.IsZero() && now.Sub(jb.lastPush) > jitterIdleResetThreshold {
 		jb.resetLocked()
 		jb.IdleResets.Add(1)
 	}
@@ -226,7 +263,7 @@ func (jb *JitterBuffer) pushLocked(seq uint16, payload []byte) bool {
 		return false
 	}
 
-	idx := int(seq) % jb.maxDepth
+	idx := int(seq) & jb.depthMask
 	slot := &jb.slots[idx]
 
 	// Duplicate: same seq already stored in this slot.
@@ -252,7 +289,7 @@ func (jb *JitterBuffer) pushLocked(seq uint16, payload []byte) bool {
 	slot.payload = buf
 	slot.valid = true
 	jb.count++
-	jb.lastPush = jb.nowFn()
+	jb.lastPush = now
 
 	return true
 }
@@ -282,7 +319,7 @@ func (jb *JitterBuffer) popReadyLocked() (payload []byte, ready bool, skippedMis
 		jb.started = true
 	}
 
-	idx := int(jb.expected) % jb.maxDepth
+	idx := int(jb.expected) & jb.depthMask
 	slot := &jb.slots[idx]
 
 	if slot.valid && slot.seq == jb.expected {
@@ -342,7 +379,7 @@ func (jb *JitterBuffer) AdvancePast() {
 
 // advancePastLocked is the lock-free internal implementation.
 func (jb *JitterBuffer) advancePastLocked() {
-	idx := int(jb.expected) % jb.maxDepth
+	idx := int(jb.expected) & jb.depthMask
 	slot := &jb.slots[idx]
 
 	if slot.valid && slot.seq == jb.expected {
@@ -426,7 +463,7 @@ func (jb *JitterBuffer) resetLocked() {
 func (jb *JitterBuffer) measureGapRunLocked() int {
 	for k := 0; k < jb.maxDepth; k++ {
 		seq := jb.expected + uint16(k)
-		idx := int(seq) % jb.maxDepth
+		idx := int(seq) & jb.depthMask
 		slot := &jb.slots[idx]
 
 		if slot.valid && slot.seq == seq {

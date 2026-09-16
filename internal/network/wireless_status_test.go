@@ -226,3 +226,22 @@ func TestGetWirelessStatus_MultipleInterfacesPerRadio(t *testing.T) {
 		t.Errorf("second interface ifname: got %s, want phy0-mesh0", r0.Interfaces[1].Ifname)
 	}
 }
+
+func TestSupportsSecondaryMeshLink(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"MediaTek MT7915AN", true},
+		{"MediaTek MT7916AN", true},
+		{"MT7916", true},
+		{"MediaTek MT7921", false},
+		{"Broadcom BCM43430", false},
+		{"Morse Micro MM6108", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, SupportsSecondaryMeshLink(tc.name), "hardware %q", tc.name)
+	}
+}

@@ -5,6 +5,7 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from './contexts/useAuth.js';
+import SetupDismissBanner from './components/SetupDismissBanner.jsx';
 import './Layout.css';
 
 // Nav items grouped by section. Operations = day-to-day use, System = admin.
@@ -66,6 +67,7 @@ export default function Layout() {
     return (
       <div className="layout-mobile">
         <div className="layout-content">
+          <SetupDismissBanner />
           <Outlet />
         </div>
         {sheetOpen && (
@@ -167,6 +169,7 @@ export default function Layout() {
         </div>
       </nav>
       <main className="layout-main">
+        <SetupDismissBanner />
         <Outlet />
       </main>
     </div>

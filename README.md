@@ -13,6 +13,12 @@ Management and operations daemon for OpenMANET mesh networks. Runs on OpenMANET 
 - System dashboard with quick actions (reboot, restart services)
 - On-device speech-to-text transcription via Whisper (model downloaded on demand)
 
+### Talk Groups
+- Exclusive talk group selection via `SelectTalkGroup` — only one talk group sends/receives at a time
+- Selectable from the RPC/web UI or the Raven's onboard 5-position hardware GPIO selector (`comms.gpioSelector.enable` to disable the hardware path)
+- Selection changes are announced through the local speaker with a short per-channel voice clip
+- Real-time selection events stream to clients via `StreamTalkGroupEvents`
+
 ### Mesh Management (batman-adv / Alfred)
 - Publishes node identity, position, gateway, and IP reservation data across the mesh
 - Receives the same from neighboring nodes for network-wide discovery

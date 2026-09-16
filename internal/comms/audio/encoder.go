@@ -13,6 +13,7 @@ package audio
 
 import (
 	"fmt"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,87 @@ const frameDuration = time.Duration(audiopool.FrameSize) * time.Second /
 // framesDropped and surfaced in the per-cycle Debug log so a regression
 // is loud, not silent.
 const broadcastEncoderChanDepth = 10
+
+// TX mic gain is applied in Q8 fixed point: gainQ8 = round(gain * 256),
+// so the resolution is 1/256 (~0.034 dB steps) and unity is exactly 256.
+// Q8 keeps the per-sample loop integer-only, which matters on the mipsle
+// softfloat production targets (mt7621/mt76x8 have no FPU).
+const (
+	unityGainQ8 int32 = 256
+	gainQ8Shift int32 = 8
+
+	// maxGainQ8 caps the Q8 gain at 256x, the largest value for which
+	// int32(v)*q cannot wrap for any int16 sample: the worst case,
+	// -32768 * 65536, is exactly math.MinInt32. Above this the encode
+	// loop's int32 product would overflow before the soft knee runs,
+	// turning a misconfigured comms.micGain into wrap-around noise
+	// instead of a railed-but-intelligible signal.
+	maxGainQ8 int32 = 65536
+)
+
+// Soft-knee limiter constants. Post-gain samples inside ±kneeStart pass
+// through untouched; beyond it the rational curve
+//
+//	y = knee + r*d/(d+r), d = |s| - knee, r = rail - knee
+//
+// compresses the overshoot smoothly toward the rail instead of
+// flat-topping. The curve is continuous with slope 1 at the knee (no
+// step in level where compression begins) and approaches the rail
+// asymptotically, so square-wave harmonics from hard clipping are gone;
+// above the knee the transfer is still nonlinear — gentle compression,
+// not transparency. Integer-only: the divide runs only on samples past
+// the knee, which is the rare loud-talker case.
+const (
+	kneeStart int32 = 24576             // 0.75 * 32768
+	kneePosR  int32 = 32767 - kneeStart // radius to the positive rail
+	kneeNegR  int32 = 32768 - kneeStart // radius to the negative rail
+)
+
+// softKnee maps a post-gain int32 sample onto int16 range with the
+// soft-knee curve above. The int64 intermediates keep r*d exact for any
+// gain the config can express.
+func softKnee(s int32) int16 {
+	if s > kneeStart {
+		d := int64(s - kneeStart)
+
+		return int16(int64(kneeStart) + int64(kneePosR)*d/(d+int64(kneePosR)))
+	}
+
+	if s < -kneeStart {
+		d := -int64(s) - int64(kneeStart)
+
+		return int16(-(int64(kneeStart) + int64(kneeNegR)*d/(d+int64(kneeNegR))))
+	}
+
+	return int16(s)
+}
+
+// micGainQ8 converts the float config gain to its Q8 representation.
+// Non-positive gains read as unity — MicGain unset (zero value) means "no
+// gain", matching the previous float implementation's gain > 0 guard. A
+// positive gain small enough to round to 0 is clamped to 1 (the smallest
+// non-silent Q8 step) so a configured near-zero gain attenuates instead
+// of muting outright. Gains above 256x clamp to maxGainQ8 so the encode
+// loop's int32 product cannot overflow; the comparison happens in
+// float64 BEFORE the int32 conversion because converting an
+// out-of-range float to int32 is implementation-dependent in Go.
+func micGainQ8(gain float32) int32 {
+	if gain <= 0 {
+		return unityGainQ8
+	}
+
+	scaled := math.Round(float64(gain) * 256)
+	if scaled >= float64(maxGainQ8) {
+		return maxGainQ8
+	}
+
+	q := int32(scaled)
+	if q < 1 {
+		return 1
+	}
+
+	return q
+}
 
 // SendFn delivers an Opus payload to every send-enabled multicast port.
 // The parent comms package binds it to its sendToAllPorts helper at
@@ -301,7 +383,7 @@ func (be *BroadcastEncoder) encodeLoop() {
 }
 
 // encodeOne processes a single captured frame: applies mic gain in the
-// integer domain (clipping to int16 range), encodes via EncodeS16, and
+// integer domain (soft-knee limited to int16 range), encodes via EncodeS16, and
 // ships the payload via Deps.Send. Pool buffers are released via defer so
 // a panic in the encoder still returns them.
 func (be *BroadcastEncoder) encodeOne(fp *[]int16) {
@@ -309,18 +391,14 @@ func (be *BroadcastEncoder) encodeOne(fp *[]int16) {
 
 	pcm := *fp
 
-	gain := be.deps.MicGain
-	if gain != 1.0 && gain > 0 {
-		// Apply gain in int32 space with hard clipping to int16 range.
+	if q := micGainQ8(be.deps.MicGain); q != unityGainQ8 {
+		// Apply gain in Q8 fixed point, limited by the soft knee. The
+		// loop is integer-only: on mipsle softfloat targets the previous
+		// float32 multiply emitted ~4 800 software-float runtime calls
+		// per frame; the one float→Q8 conversion above is per frame,
+		// not per sample.
 		for i, v := range pcm {
-			scaled := float32(v) * gain
-			if scaled > 32767 {
-				scaled = 32767
-			} else if scaled < -32768 {
-				scaled = -32768
-			}
-
-			pcm[i] = int16(scaled)
+			pcm[i] = softKnee((int32(v) * q) >> gainQ8Shift)
 		}
 	}
 

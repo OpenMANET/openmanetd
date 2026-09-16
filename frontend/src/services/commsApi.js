@@ -38,3 +38,27 @@ export async function fetchCommsStatus() {
     return null;
   }
 }
+
+// Fetches the device's hardware mixer state (AudioMixerState message:
+// { available, speakerVolume?, micVolume?, agcEnabled?, speakerControl,
+// micControl, agcControl }). Returns null on transport error.
+export async function fetchAudioMixer() {
+  try {
+    const resp = await commsClient.getAudioMixer({});
+    return resp.state ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Applies a partial device mixer update. fields: { speakerVolume?,
+// micVolume?, agcEnabled? } — omit a field to leave it unchanged.
+// Returns the resulting state, or null on error.
+export async function updateAudioMixer(fields) {
+  try {
+    const resp = await commsClient.updateAudioMixer(fields);
+    return resp.state ?? null;
+  } catch {
+    return null;
+  }
+}

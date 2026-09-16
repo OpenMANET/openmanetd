@@ -121,6 +121,15 @@
       }
     ]
   },
+  "sandbox": {
+    "permissions": {
+      "read": {
+        "allow": [
+          "~/.config/gh"
+        ]
+      }
+    }
+  },
   "enabledPlugins": {
     "gopls-lsp@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true,
@@ -132,13 +141,20 @@
     "github@claude-plugins-official": true,
     "claude-code-setup@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
-    "caveman@caveman": true
+    "caveman@caveman": true,
+    "protobuf@buf-plugins": true
   },
   "extraKnownMarketplaces": {
     "caveman": {
       "source": {
         "source": "github",
         "repo": "JuliusBrussee/caveman"
+      }
+    },
+    "buf-plugins": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/bufbuild/claude-plugins.git"
       }
     }
   }

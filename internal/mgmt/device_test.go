@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/digineo/go-uci/v2"
-	batmanadv "github.com/openmanet/openmanetd/internal/batman-adv"
 	"github.com/openmanet/openmanetd/internal/iwinfo"
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/rs/zerolog"
@@ -271,6 +270,20 @@ func (f *fakeWirelessReader) seedMeshIface(section, device, meshID, key string) 
 	_ = f.SetType("wireless", section, "encryption", uci.TypeOption, "sae")
 }
 
+// seedAPIface seeds a named wifi-iface section with mode=ap bound to
+// ahwlan; disabled is written only when non-empty.
+func (f *fakeWirelessReader) seedAPIface(section, device, disabled string) {
+	_ = f.AddSection("wireless", section, "wifi-iface")
+	_ = f.SetType("wireless", section, "device", uci.TypeOption, device)
+	_ = f.SetType("wireless", section, "mode", uci.TypeOption, "ap")
+	_ = f.SetType("wireless", section, "network", uci.TypeOption, "ahwlan")
+	_ = f.SetType("wireless", section, "ssid", uci.TypeOption, "client-wifi")
+
+	if disabled != "" {
+		_ = f.SetType("wireless", section, "disabled", uci.TypeOption, disabled)
+	}
+}
+
 // ── fakeIwinfo ───────────────────────────────────────────────────────────────
 
 // fakeIwinfo implements iwinfo.IwinfoProvider for test purposes.
@@ -332,6 +345,18 @@ func newTestManagementConfig() *ManagementConfig {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+func TestSetTransportInterfaceMTU_NilWirelessConfigReturnsError(t *testing.T) {
+	m := newTestManagementConfig()
+	m.WirelessConfig = nil
+
+	// NewManager keeps running when nl80211 init fails; Start must not
+	// dereference the nil client on the way to the MTU pass.
+	err := m.setTransportInterfaceMTU()
+	if err == nil {
+		t.Fatal("expected an error for a nil WirelessConfig, got nil")
+	}
+}
 
 func TestSetupBatMesh1Interface_AlreadyConfigured(t *testing.T) {
 	m := newTestManagementConfig()
@@ -543,8 +568,8 @@ func TestSetupBatMesh1Interface_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify new wifi-iface was created as "default_radio1".
-	newIface, ierr := network.GetWirelessIfaceByNameWithReader("default_radio1", wireless)
+	// Verify new wifi-iface was created as "batmesh1_radio1".
+	newIface, ierr := network.GetWirelessIfaceByNameWithReader("batmesh1_radio1", wireless)
 	if ierr != nil {
 		t.Fatalf("failed to read back new iface: %v", ierr)
 	}
@@ -573,8 +598,19 @@ func TestSetupBatMesh1Interface_Success(t *testing.T) {
 		t.Errorf("MeshFwding: got %q, want %q", newIface.MeshFwding, "0")
 	}
 
+	if newIface.MeshRSSIThreshold != "-80" {
+		t.Errorf("MeshRSSIThreshold: got %q, want %q", newIface.MeshRSSIThreshold, "-80")
+	}
+
 	if newIface.Encryption != "sae" {
 		t.Errorf("Encryption: got %q, want %q", newIface.Encryption, "sae")
+	}
+
+	for _, p := range network.SecondaryMeshPolicyOptions() {
+		vals, ok := wireless.Get("wireless", "batmesh1_radio1", p.Option)
+		if !ok || len(vals) != 1 || vals[0] != p.Value {
+			t.Errorf("%s: got %v (ok=%v), want %s", p.Option, vals, ok, p.Value)
+		}
 	}
 
 	// Verify radio1 was updated.
@@ -587,8 +623,8 @@ func TestSetupBatMesh1Interface_Success(t *testing.T) {
 		t.Errorf("Channel: got %q, want %q", radio.Channel, "8")
 	}
 
-	if radio.HTMode != "HE20" {
-		t.Errorf("HTMode: got %q, want %q", radio.HTMode, "HE20")
+	if radio.HTMode != "HE40" {
+		t.Errorf("HTMode: got %q, want %q", radio.HTMode, "HE40")
 	}
 
 	// Verify band=2g is preserved (was set during seed).
@@ -605,6 +641,41 @@ func TestSetupBatMesh1Interface_Success(t *testing.T) {
 	if !configured {
 		t.Error("expected batmesh1configured to be true after success")
 	}
+}
+
+// TestSetupBatMesh1Interface_ClearsStaleDisabledOnLinkSection covers the
+// wizard-rerun scenario: a prior wizard run created batmesh1_radio1, a
+// later wizard re-run's reset phase disabled every wifi-iface (including
+// batmesh1_radio1) and no backhaul was re-chosen, and now the daemon's
+// boot-time fallback rewrites batmesh1_radio1. SetWirelessIfaceConfigWithReader
+// only writes non-empty struct fields, so the stale disabled=1 would
+// otherwise survive the rewrite and the daemon would mark batmesh1 as
+// configured over a permanently-disabled link.
+func TestSetupBatMesh1Interface_ClearsStaleDisabledOnLinkSection(t *testing.T) {
+	m := newTestManagementConfig()
+	openmanet := newFakeOpenMANETReader()
+	openmanet.seedBatMesh1Configured("0")
+
+	wireless := newFakeWirelessReader()
+	wireless.seedMeshIface("existing_mesh0", "radio4", "halowmesh", "secretkey999")
+	wireless.seedWifiDevice("radio1", "2g", "6", "HT20")
+
+	// Pre-existing stale link section from a prior wizard run, left
+	// disabled by a subsequent wizard reset.
+	require.NoError(t, wireless.AddSection("wireless", "batmesh1_radio1", "wifi-iface"))
+	require.NoError(t, wireless.SetType("wireless", "batmesh1_radio1", "disabled", uci.TypeOption, "1"))
+
+	iw := makeIwinfoWithHardware("wlh0", "MediaTek MT7915AN")
+
+	err := m.setupBatMesh1InterfaceWithDeps(context.Background(), openmanet, wireless, iw, wirelessStatusForRadio(t, "radio1", "wlh0"))
+	require.NoError(t, err)
+
+	newIface, ierr := network.GetWirelessIfaceByNameWithReader("batmesh1_radio1", wireless)
+	require.NoError(t, ierr)
+
+	assert.Empty(t, newIface.Disabled, "stale disabled=1 must be cleared on rewrite")
+	assert.Equal(t, "batmesh1", newIface.Network)
+	assert.Equal(t, "mesh", newIface.Mode)
 }
 
 func TestSetupBatMesh1Interface_doesNotTouchUnrelated2gRadio(t *testing.T) {
@@ -628,7 +699,7 @@ func TestSetupBatMesh1Interface_doesNotTouchUnrelated2gRadio(t *testing.T) {
 
 	require.NoError(t, m.setupBatMesh1InterfaceWithDeps(context.Background(), openmanet, wireless, iw, status))
 
-	_, createdOnboardMesh := wireless.Get("wireless", "default_radio0", "device")
+	_, createdOnboardMesh := wireless.Get("wireless", "batmesh1_radio0", "device")
 	assert.False(t, createdOnboardMesh, "must not create batmesh1 on the unrelated onboard radio")
 
 	radio0, err := network.GetWirelessDeviceByNameWithReader("radio0", wireless)
@@ -637,7 +708,7 @@ func TestSetupBatMesh1Interface_doesNotTouchUnrelated2gRadio(t *testing.T) {
 	assert.Equal(t, "HT20", radio0.HTMode)
 	assert.Empty(t, radio0.Disabled)
 
-	iface, err := network.GetWirelessIfaceByNameWithReader("default_radio1", wireless)
+	iface, err := network.GetWirelessIfaceByNameWithReader("batmesh1_radio1", wireless)
 	require.NoError(t, err)
 	assert.Equal(t, "radio1", iface.Device)
 }
@@ -752,194 +823,115 @@ func TestSetupBatMesh1Interface_IdempotentWhenAlreadyConfigured(t *testing.T) {
 	}
 }
 
-// seedNetworkDevice seeds a named network device section in fakeNetworkReader.
-func (f *fakeNetworkReader) seedNetworkDevice(section, name, devType string) {
-	_ = f.AddSection("network", section, "device")
-	_ = f.SetType("network", section, "name", uci.TypeOption, name)
-
-	if devType != "" {
-		_ = f.SetType("network", section, "type", uci.TypeOption, devType)
-	}
-}
-
-// ── configureDeviceMulticast tests ───────────────────────────────────────────
-
-// fakeMeshConfig returns a getMeshConfig stub that reports gateway mode based on gwMode.
-func fakeMeshConfig(gwMode string) func(string) (*batmanadv.MeshConfig, error) {
-	return func(_ string) (*batmanadv.MeshConfig, error) {
-		return &batmanadv.MeshConfig{GwMode: gwMode}, nil
-	}
-}
-
-// fakeMeshConfigErr returns a getMeshConfig stub that always returns an error.
-func fakeMeshConfigErr(err error) func(string) (*batmanadv.MeshConfig, error) {
-	return func(_ string) (*batmanadv.MeshConfig, error) {
-		return nil, err
-	}
-}
-
-func TestConfigureDeviceMulticast_GatewayMode(t *testing.T) {
+func TestSetupBatMesh1Interface_LeavesEnabledAPAlone(t *testing.T) {
 	m := newTestManagementConfig()
-	m.IFace = "br-ahwlan"
-	m.BatInterface = "bat0"
+	openmanet := newFakeOpenMANETReader()
+	openmanet.seedBatMesh1Configured("0")
 
-	reader := newFakeNetworkReader()
-	reader.seedNetworkDevice("dev0", "br-ahwlan", "bridge")
+	wireless := newFakeWirelessReader()
+	wireless.seedMeshIface("existing_mesh0", "radio4", "halowmesh", "secretkey999")
+	wireless.seedWifiDevice("radio1", "2g", "6", "HT20")
+	wireless.seedAPIface("default_radio1", "radio1", "")
 
-	var reloadCalled bool
+	iw := makeIwinfoWithHardware("wlh0", "MediaTek MT7915AN")
 
-	reloadFn := func(_ context.Context) error {
-		reloadCalled = true
+	require.NoError(t, m.setupBatMesh1InterfaceWithDeps(context.Background(), openmanet, wireless, iw, wirelessStatusForRadio(t, "radio1", "wlh0")))
 
-		return nil
-	}
+	_, created := wireless.Get("wireless", "batmesh1_radio1", "device")
+	assert.False(t, created, "no mesh link may be written beside an enabled AP")
 
-	err := m.configureDeviceMulticastWithDeps(context.Background(), reader, fakeMeshConfig("server"), reloadFn)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	radio, err := network.GetWirelessDeviceByNameWithReader("radio1", wireless)
+	require.NoError(t, err)
+	assert.Equal(t, "6", radio.Channel, "the AP's channel must not move")
+	assert.Equal(t, "HT20", radio.HTMode)
 
-	device, derr := network.GetDeviceByNameWithReader("br-ahwlan", reader)
-	if derr != nil {
-		t.Fatalf("failed to read back device: %v", derr)
-	}
+	ap, err := network.GetWirelessIfaceByNameWithReader("default_radio1", wireless)
+	require.NoError(t, err)
+	assert.Equal(t, "ap", ap.Mode)
+	assert.Equal(t, "client-wifi", ap.SSID)
 
-	if device.IgmpSnooping != "1" {
-		t.Errorf("IgmpSnooping: got %q, want %q", device.IgmpSnooping, "1")
-	}
-
-	if device.MulticastQuerier != "1" {
-		t.Errorf("MulticastQuerier: got %q, want %q", device.MulticastQuerier, "1")
-	}
-
-	if !reloadCalled {
-		t.Error("expected reload to be called")
-	}
+	configured, err := network.IsBatMesh1ConfiguredWithReader(openmanet)
+	require.NoError(t, err)
+	assert.False(t, configured, "flag stays 0 so a later boot retries once the AP is off")
+	assert.Zero(t, wireless.commitCalls)
 }
 
-func TestConfigureDeviceMulticast_NonGatewayMode(t *testing.T) {
+func TestSetupBatMesh1Interface_DisabledAPOnRadioGetsLinkAlongside(t *testing.T) {
 	m := newTestManagementConfig()
-	m.IFace = "br-ahwlan"
-	m.BatInterface = "bat0"
+	openmanet := newFakeOpenMANETReader()
+	openmanet.seedBatMesh1Configured("0")
 
-	reader := newFakeNetworkReader()
-	reader.seedNetworkDevice("dev0", "br-ahwlan", "bridge")
+	wireless := newFakeWirelessReader()
+	wireless.seedMeshIface("existing_mesh0", "radio4", "halowmesh", "secretkey999")
+	wireless.seedWifiDevice("radio1", "2g", "6", "HT20")
+	wireless.seedAPIface("default_radio1", "radio1", "1")
 
-	var reloadCalled bool
+	iw := makeIwinfoWithHardware("wlh0", "MediaTek MT7915AN")
 
-	reloadFn := func(_ context.Context) error {
-		reloadCalled = true
+	require.NoError(t, m.setupBatMesh1InterfaceWithDeps(context.Background(), openmanet, wireless, iw, wirelessStatusForRadio(t, "radio1", "wlh0")))
 
-		return nil
-	}
+	link, err := network.GetWirelessIfaceByNameWithReader("batmesh1_radio1", wireless)
+	require.NoError(t, err)
+	assert.Equal(t, "batmesh1", link.Network)
+	assert.Equal(t, "mesh", link.Mode)
 
-	err := m.configureDeviceMulticastWithDeps(context.Background(), reader, fakeMeshConfig("client"), reloadFn)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	device, derr := network.GetDeviceByNameWithReader("br-ahwlan", reader)
-	if derr != nil {
-		t.Fatalf("failed to read back device: %v", derr)
-	}
-
-	if device.IgmpSnooping != "1" {
-		t.Errorf("IgmpSnooping: got %q, want %q", device.IgmpSnooping, "1")
-	}
-
-	if device.MulticastQuerier != "0" {
-		t.Errorf("MulticastQuerier: got %q, want %q", device.MulticastQuerier, "0")
-	}
-
-	if !reloadCalled {
-		t.Error("expected reload to be called")
-	}
+	ap, err := network.GetWirelessIfaceByNameWithReader("default_radio1", wireless)
+	require.NoError(t, err)
+	assert.Equal(t, "ap", ap.Mode, "the disabled AP section is left as it was")
+	assert.Equal(t, "1", ap.Disabled)
+	assert.Equal(t, "client-wifi", ap.SSID)
 }
 
-func TestConfigureDeviceMulticast_DeviceNotFound(t *testing.T) {
+func TestSetupBatMesh1Interface_NeverWritesDefaultSection(t *testing.T) {
 	m := newTestManagementConfig()
-	m.IFace = "br-missing"
-	m.BatInterface = "bat0"
+	openmanet := newFakeOpenMANETReader()
+	openmanet.seedBatMesh1Configured("0")
 
-	reader := newFakeNetworkReader()
-	reloadFn := func(_ context.Context) error { return nil }
+	wireless := newFakeWirelessReader()
+	wireless.seedMeshIface("existing_mesh0", "radio4", "halowmesh", "secretkey999")
+	wireless.seedWifiDevice("radio1", "2g", "6", "HT20")
 
-	err := m.configureDeviceMulticastWithDeps(context.Background(), reader, fakeMeshConfig("server"), reloadFn)
-	if err == nil {
-		t.Fatal("expected error when device not found")
-	}
+	iw := makeIwinfoWithHardware("wlh0", "MediaTek MT7915AN")
 
-	if !strings.Contains(err.Error(), "get device br-missing") {
-		t.Errorf("unexpected error message: %v", err)
-	}
+	require.NoError(t, m.setupBatMesh1InterfaceWithDeps(context.Background(), openmanet, wireless, iw, wirelessStatusForRadio(t, "radio1", "wlh0")))
+
+	_, wroteDefault := wireless.Get("wireless", "default_radio1", "device")
+	assert.False(t, wroteDefault, "default_<radio> belongs to the AP; the daemon must never create it")
+
+	_, wroteLink := wireless.Get("wireless", "batmesh1_radio1", "device")
+	assert.True(t, wroteLink)
 }
 
-func TestConfigureDeviceMulticast_MeshConfigError(t *testing.T) {
+func TestSetupBatMesh1Interface_OptionSetMatchesMeshLink(t *testing.T) {
 	m := newTestManagementConfig()
-	m.IFace = "br-ahwlan"
-	m.BatInterface = "bat0"
+	openmanet := newFakeOpenMANETReader()
+	openmanet.seedBatMesh1Configured("0")
 
-	reader := newFakeNetworkReader()
-	reader.seedNetworkDevice("dev0", "br-ahwlan", "bridge")
+	wireless := newFakeWirelessReader()
+	wireless.seedMeshIface("existing_mesh0", "radio4", "halowmesh", "secretkey999")
+	wireless.seedWifiDevice("radio1", "2g", "6", "HT20")
 
-	reloadFn := func(_ context.Context) error { return nil }
+	iw := makeIwinfoWithHardware("wlh0", "MediaTek MT7915AN")
 
-	err := m.configureDeviceMulticastWithDeps(
-		context.Background(),
-		reader,
-		fakeMeshConfigErr(errors.New("batctl not available")),
-		reloadFn,
-	)
-	if err == nil {
-		t.Fatal("expected error when getMeshConfig fails")
-	}
+	require.NoError(t, m.setupBatMesh1InterfaceWithDeps(context.Background(), openmanet, wireless, iw, wirelessStatusForRadio(t, "radio1", "wlh0")))
 
-	if !strings.Contains(err.Error(), "get mesh config") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
+	want := network.MeshLink{
+		Radio:         "radio1",
+		Network:       network.BatmanSecondaryIface,
+		MeshID:        "halowmesh",
+		Key:           "secretkey999",
+		RSSIThreshold: network.SecondaryMeshRSSIThreshold,
+	}.IfaceConfig()
 
-func TestConfigureDeviceMulticast_SetDeviceConfigError(t *testing.T) {
-	m := newTestManagementConfig()
-	m.IFace = "br-ahwlan"
-	m.BatInterface = "bat0"
+	got, err := network.GetWirelessIfaceByNameWithReader("batmesh1_radio1", wireless)
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "the daemon must write exactly the shared MeshLink option set")
 
-	reader := newFakeNetworkReader()
-	reader.seedNetworkDevice("dev0", "br-ahwlan", "bridge")
-	reader.commitErr = errors.New("commit failure")
-
-	reloadFn := func(_ context.Context) error { return nil }
-
-	err := m.configureDeviceMulticastWithDeps(context.Background(), reader, fakeMeshConfig("server"), reloadFn)
-	if err == nil {
-		t.Fatal("expected error when SetDeviceConfig fails")
-	}
-
-	if !strings.Contains(err.Error(), "set device config br-ahwlan") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestConfigureDeviceMulticast_ReloadError(t *testing.T) {
-	m := newTestManagementConfig()
-	m.IFace = "br-ahwlan"
-	m.BatInterface = "bat0"
-
-	reader := newFakeNetworkReader()
-	reader.seedNetworkDevice("dev0", "br-ahwlan", "bridge")
-
-	reloadFn := func(_ context.Context) error {
-		return errors.New("reload failed")
-	}
-
-	err := m.configureDeviceMulticastWithDeps(context.Background(), reader, fakeMeshConfig("server"), reloadFn)
-	if err == nil {
-		t.Fatal("expected error when reload fails")
-	}
-
-	if !strings.Contains(err.Error(), "reload config") {
-		t.Errorf("unexpected error message: %v", err)
-	}
+	radio, err := network.GetWirelessDeviceByNameWithReader("radio1", wireless)
+	require.NoError(t, err)
+	assert.Equal(t, network.SecondaryMeshChannel2G, radio.Channel)
+	assert.Equal(t, network.SecondaryMeshHTMode2G, radio.HTMode)
+	assert.Equal(t, "0", radio.Disabled)
 }
 
 // ── configureBatmanForceflood tests ─────────────────────────────────────────
@@ -969,8 +961,8 @@ func TestConfigureBatmanForceflood_Enabled(t *testing.T) {
 		t.Fatal("expected multicast_mode to be written to bat0 section")
 	}
 
-	if len(values) != 1 || values[0] != "1" {
-		t.Errorf("multicast_mode: got %v, want [1]", values)
+	if len(values) != 1 || values[0] != "0" {
+		t.Errorf("multicast_mode: got %v, want [0] (forceflood on = classic flooding)", values)
 	}
 
 	if !reloadCalled {
@@ -996,8 +988,8 @@ func TestConfigureBatmanForceflood_Disabled(t *testing.T) {
 		t.Fatal("expected multicast_mode to be written to bat0 section")
 	}
 
-	if len(values) != 1 || values[0] != "0" {
-		t.Errorf("multicast_mode: got %v, want [0]", values)
+	if len(values) != 1 || values[0] != "1" {
+		t.Errorf("multicast_mode: got %v, want [1] (forceflood off = multicast optimisations on)", values)
 	}
 }
 
@@ -1039,5 +1031,388 @@ func TestConfigureBatmanForceflood_ReloadError(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "reload config") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestConfigureBatmanForceflood_UnchangedSkipsCommitAndReload pins ledger
+// row D1: on an already-configured device the boot-time multicast_mode
+// write must be a no-op — no UCI commit, no reload_config — so a reboot
+// does not bounce the network stack for a value that is already there.
+func TestConfigureBatmanForceflood_UnchangedSkipsCommitAndReload(t *testing.T) {
+	m := newTestManagementConfig()
+	m.BatInterface = "bat0"
+	m.BatmanMulticastForceflood = true // maps to multicast_mode "0"
+
+	reader := newFakeNetworkReader()
+	require.NoError(t, reader.AddSection("network", "bat0", "interface"))
+	require.NoError(t, reader.SetType("network", "bat0", "multicast_mode", uci.TypeOption, "0"))
+
+	reloadCalled := false
+	reloadFn := func(_ context.Context) error {
+		reloadCalled = true
+
+		return nil
+	}
+
+	require.NoError(t, m.configureBatmanForcefloodWithDeps(context.Background(), reader, reloadFn))
+
+	assert.Zero(t, reader.commitCalls, "unchanged multicast_mode must not commit")
+	assert.False(t, reloadCalled, "unchanged multicast_mode must not reload the network")
+
+	values, ok := reader.Get("network", "bat0", "multicast_mode")
+	require.True(t, ok)
+	assert.Equal(t, []string{"0"}, values)
+}
+
+// TestConfigureBatmanForceflood_ChangedCommitsAndReloads is the other half
+// of D1: when the persisted value differs from the configured one, the
+// daemon rewrites it, commits exactly once, and reloads.
+func TestConfigureBatmanForceflood_ChangedCommitsAndReloads(t *testing.T) {
+	m := newTestManagementConfig()
+	m.BatInterface = "bat0"
+	m.BatmanMulticastForceflood = true // maps to multicast_mode "0"
+
+	reader := newFakeNetworkReader()
+	require.NoError(t, reader.AddSection("network", "bat0", "interface"))
+	require.NoError(t, reader.SetType("network", "bat0", "multicast_mode", uci.TypeOption, "1"))
+
+	reloadCalled := false
+	reloadFn := func(_ context.Context) error {
+		reloadCalled = true
+
+		return nil
+	}
+
+	require.NoError(t, m.configureBatmanForcefloodWithDeps(context.Background(), reader, reloadFn))
+
+	values, ok := reader.Get("network", "bat0", "multicast_mode")
+	require.True(t, ok)
+	assert.Equal(t, []string{"0"}, values)
+	assert.Equal(t, 1, reader.commitCalls, "changed multicast_mode must commit exactly once")
+	assert.True(t, reloadCalled, "changed multicast_mode must reload the network")
+}
+
+// TestTransportMTUConstants_MatchNetworkPackage pins that the daemon's
+// netlink pass and the wizard's UCI writes agree on the transport MTU
+// (wizard-parity P6): both read internal/network's constants.
+func TestTransportMTUConstants_MatchNetworkPackage(t *testing.T) {
+	assert.Equal(t, network.DefaultBridgeMTU, defaultAhwlanInterfaceMTU)
+	assert.Equal(t, network.DefaultEthernetMTU, defaultEthernetInterfaceMTU)
+	assert.Equal(t, 1460, defaultAhwlanInterfaceMTU, "the shipped value must not drift")
+}
+
+// seedBatMesh1Iface seeds a pre-policy batmesh1 mesh wifi-iface: what a
+// node configured before the tuning options existed carries.
+func (f *fakeWirelessReader) seedBatMesh1Iface(section, device string) {
+	f.seedMeshIface(section, device, "2gmesh", "secret")
+	_ = f.SetType("wireless", section, "network", uci.TypeOption, "batmesh1")
+	_ = f.SetType("wireless", section, "mesh_fwding", uci.TypeOption, "0")
+	_ = f.SetType("wireless", section, "mesh_rssi_threshold", uci.TypeOption, "-80")
+}
+
+// reloadRecorder counts reload calls and returns err.
+type reloadRecorder struct {
+	calls int
+	err   error
+}
+
+func (r *reloadRecorder) fn(context.Context) error {
+	r.calls++
+
+	return r.err
+}
+
+func assertPolicyPresent(t *testing.T, wireless *fakeWirelessReader, section string) {
+	t.Helper()
+
+	for _, p := range network.SecondaryMeshPolicyOptions() {
+		vals, ok := wireless.Get("wireless", section, p.Option)
+		if !ok || len(vals) != 1 || vals[0] != p.Value {
+			t.Errorf("%s.%s: got %v (ok=%v), want %s", section, p.Option, vals, ok, p.Value)
+		}
+	}
+}
+
+func assertPolicyAbsent(t *testing.T, wireless *fakeWirelessReader, section string) {
+	t.Helper()
+
+	for _, p := range network.SecondaryMeshPolicyOptions() {
+		if vals, ok := wireless.Get("wireless", section, p.Option); ok {
+			t.Errorf("%s.%s must not be written, got %v", section, p.Option, vals)
+		}
+	}
+}
+
+func TestReconcileBatMesh1Options_AddsMissingAndReloadsOnce(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyPresent(t, wireless, "batmesh1_radio1")
+
+	if wireless.commitCalls != 1 {
+		t.Errorf("commitCalls: got %d, want 1", wireless.commitCalls)
+	}
+
+	if reload.calls != 1 {
+		t.Errorf("reload calls: got %d, want 1", reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_NoOpWhenPresent(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	for _, p := range network.SecondaryMeshPolicyOptions() {
+		_ = wireless.SetType("wireless", "batmesh1_radio1", p.Option, uci.TypeOption, p.Value)
+	}
+
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if wireless.commitCalls != 0 {
+		t.Errorf("commitCalls: got %d, want 0", wireless.commitCalls)
+	}
+
+	if reload.calls != 0 {
+		t.Errorf("reload calls: got %d, want 0", reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_AddsOnlyMissingAndKeepsOperatorValue(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+	_ = wireless.SetType("wireless", "batmesh1_radio1", "mcast_rate", uci.TypeOption, "12000")
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	vals, _ := wireless.Get("wireless", "batmesh1_radio1", "mcast_rate")
+	if len(vals) != 1 || vals[0] != "12000" {
+		t.Errorf("operator mcast_rate must be preserved, got %v", vals)
+	}
+
+	nolearn, ok := wireless.Get("wireless", "batmesh1_radio1", "mesh_nolearn")
+	if !ok || nolearn[0] != "1" {
+		t.Errorf("mesh_nolearn must be added, got %v (ok=%v)", nolearn, ok)
+	}
+
+	if reload.calls != 1 {
+		t.Errorf("reload calls: got %d, want 1", reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_SkipsUnsupportedRadio(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HT20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "Qualcomm Atheros QCA9880"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyAbsent(t, wireless, "batmesh1_radio1")
+
+	if wireless.commitCalls != 0 || reload.calls != 0 {
+		t.Errorf("no commit/reload expected, got commit=%d reload=%d", wireless.commitCalls, reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_IgnoresPrimaryLinkAndAPs(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio4", "s1g", "42", "")
+	wireless.seedMeshIface("default_radio4", "radio4", "halowmesh", "secret")
+	_ = wireless.SetType("wireless", "default_radio4", "network", uci.TypeOption, "batmesh0")
+	wireless.seedWifiDevice("radio1", "2g", "6", "HE20")
+	wireless.seedAPIface("default_radio1", "radio1", "0")
+
+	reload := &reloadRecorder{}
+
+	// No batmesh1 section at all: the reconcile must not even consult
+	// iwinfo, so pass a provider that would error if called.
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		&fakeIwinfo{infoMapErr: errors.New("must not be called")}, wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyAbsent(t, wireless, "default_radio4")
+	assertPolicyAbsent(t, wireless, "default_radio1")
+
+	if wireless.commitCalls != 0 || reload.calls != 0 {
+		t.Errorf("no commit/reload expected, got commit=%d reload=%d", wireless.commitCalls, reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_SkipsDisabledSection(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE40")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+	_ = wireless.SetType("wireless", "batmesh1_radio1", "disabled", uci.TypeOption, "1")
+
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyAbsent(t, wireless, "batmesh1_radio1")
+
+	if wireless.commitCalls != 0 {
+		t.Errorf("commitCalls: got %d, want 0 (a disabled section must not be touched)", wireless.commitCalls)
+	}
+
+	if reload.calls != 0 {
+		t.Errorf("reload calls: got %d, want 0", reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_SetTypeError(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+	wireless.setTypeErr = errors.New("uci set failed")
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err == nil || !strings.Contains(err.Error(), "uci set failed") {
+		t.Fatalf("expected wrapped set error, got %v", err)
+	}
+
+	if reload.calls != 0 {
+		t.Errorf("reload must not run after a failed write, got %d", reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_ReloadError(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	reload := &reloadRecorder{err: errors.New("reload_config exit 1")}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err == nil || !strings.Contains(err.Error(), "reload_config exit 1") {
+		t.Fatalf("expected wrapped reload error, got %v", err)
+	}
+
+	// The options were committed before the reload failed; a later
+	// boot finds them present and does nothing.
+	assertPolicyPresent(t, wireless, "batmesh1_radio1")
+}
+
+func TestReconcileBatMesh1Options_IfaceSectionsError(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := &sectionErrorReader{ConfigReader: newFakeWirelessReader(), sectionType: "wifi-iface", err: errors.New("uci read failed")}
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"), wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err == nil || !strings.Contains(err.Error(), "uci read failed") {
+		t.Fatalf("expected wrapped sections error, got %v", err)
+	}
+}
+
+func TestReconcileBatMesh1Options_WirelessStatusError_SkipsThisStart(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan1", "MediaTek MT7915AN"),
+		&fakeWirelessStatusProvider{Err: errors.New("ubus down")}, reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyAbsent(t, wireless, "batmesh1_radio1")
+
+	if wireless.commitCalls != 0 || reload.calls != 0 {
+		t.Errorf("no commit/reload expected, got commit=%d reload=%d", wireless.commitCalls, reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_IwinfoError_SkipsThisStart(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	reload := &reloadRecorder{}
+
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		&fakeIwinfo{infoMapErr: errors.New("iwinfo down")},
+		wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyAbsent(t, wireless, "batmesh1_radio1")
+
+	if wireless.commitCalls != 0 || reload.calls != 0 {
+		t.Errorf("no commit/reload expected, got commit=%d reload=%d", wireless.commitCalls, reload.calls)
+	}
+}
+
+func TestReconcileBatMesh1Options_SkipsUnresolvedHardware(t *testing.T) {
+	m := newTestManagementConfig()
+	wireless := newFakeWirelessReader()
+	wireless.seedWifiDevice("radio1", "2g", "8", "HE20")
+	wireless.seedBatMesh1Iface("batmesh1_radio1", "radio1")
+
+	reload := &reloadRecorder{}
+
+	// iwinfo knows only a different ifname (wlan9), so the radio1 ->
+	// wlan1 mapping from wirelessStatusForRadio never resolves to a
+	// hardware name.
+	err := m.reconcileBatMesh1OptionsWithDeps(context.Background(), wireless,
+		makeIwinfoWithHardware("wlan9", "MediaTek MT7915AN"),
+		wirelessStatusForRadio(t, "radio1", "wlan1"), reload.fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertPolicyAbsent(t, wireless, "batmesh1_radio1")
+
+	if wireless.commitCalls != 0 || reload.calls != 0 {
+		t.Errorf("no commit/reload expected, got commit=%d reload=%d", wireless.commitCalls, reload.calls)
 	}
 }

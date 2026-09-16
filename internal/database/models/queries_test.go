@@ -489,3 +489,38 @@ func TestWithTx_RollbackDiscards(t *testing.T) {
 	_, err = q.GetMeshNode(ctx, "ee:00:00:00:00:02")
 	assert.ErrorIs(t, err, sql.ErrNoRows, "rolled-back row must not be visible")
 }
+
+func TestDeleteMeshNodesUpdatedBefore(t *testing.T) {
+	ctx := context.Background()
+	db := newDB(t)
+	q := models.New(db)
+
+	// Seed with explicit ages via SQLite's own clock so the rows carry the
+	// same UTC text format CURRENT_TIMESTAMP writes in production.
+	for _, row := range []struct{ mac, ip, age string }{
+		{"aa:00:00:00:00:01", "10.41.0.1", "-25 hours"},
+		{"aa:00:00:00:00:02", "10.41.0.2", "-23 hours"},
+		{"aa:00:00:00:00:03", "10.41.0.3", "-1 minutes"},
+	} {
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO mesh_nodes (mac_addr, hostname, ip_addr, created_at, updated_at)
+			 VALUES (?, ?, ?, datetime('now', ?), datetime('now', ?))`,
+			row.mac, "host-"+row.mac, row.ip, row.age, row.age,
+		)
+		require.NoError(t, err)
+	}
+
+	// The cutoff must be UTC: go-sqlite3 binds time.Time as text and the
+	// comparison against CURRENT_TIMESTAMP text is lexicographic.
+	err := q.DeleteMeshNodesUpdatedBefore(ctx, time.Now().UTC().Add(-24*time.Hour))
+	require.NoError(t, err)
+
+	nodes, err := q.ListMeshNodes(ctx)
+	require.NoError(t, err)
+	require.Len(t, nodes, 2, "only the 25 h-old row is expired")
+
+	macs := []string{nodes[0].MacAddr, nodes[1].MacAddr}
+	assert.NotContains(t, macs, "aa:00:00:00:00:01")
+	assert.Contains(t, macs, "aa:00:00:00:00:02")
+	assert.Contains(t, macs, "aa:00:00:00:00:03")
+}

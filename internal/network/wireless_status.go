@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/openmanet/openmanetd/internal/iwinfo"
 )
@@ -89,4 +90,12 @@ func (p *UbusWirelessStatusProvider) GetWirelessStatus(ctx context.Context) (map
 	}
 
 	return result, nil
+}
+
+// SupportsSecondaryMeshLink reports whether an iwinfo hardware name
+// names a 2.4 GHz chipset the daemon runs a secondary batman-adv mesh
+// link on. The daemon's boot-time fallback and the wizard's capability
+// flag must agree, so both call this.
+func SupportsSecondaryMeshLink(hardwareName string) bool {
+	return strings.Contains(hardwareName, "MT7915") || strings.Contains(hardwareName, "MT7916")
 }

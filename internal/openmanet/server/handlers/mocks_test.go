@@ -11,6 +11,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdlayher/wifi"
 	"github.com/openmanet/openmanetd/internal/blos"
+	"github.com/openmanet/openmanetd/internal/comms/control/alsa"
 	"github.com/openmanet/openmanetd/internal/database/models"
 	"github.com/openmanet/openmanetd/internal/gpsd"
 	"tailscale.com/ipn"
@@ -304,6 +305,18 @@ func makeStation(macStr string, signal int) *wifi.StationInfo {
 	}
 }
 
+// makeStationWithRate creates a wifi.StationInfo carrying nl80211 rate
+// attributes for both directions.
+func makeStationWithRate(macStr string, signal int, tx, rx wifi.RateInfo) *wifi.StationInfo {
+	st := makeStation(macStr, signal)
+	st.TransmitRateInfo = tx
+	st.ReceiveRateInfo = rx
+	st.TransmitBitrate = tx.Bitrate
+	st.ReceiveBitrate = rx.Bitrate
+
+	return st
+}
+
 // ── fakeGNSSProvider ────────────────────────────────────────────────────────
 
 type fakeGNSSProvider struct {
@@ -324,6 +337,51 @@ func (f *fakeGNSSProvider) GetSatelliteReport() gpsd.SatelliteReport {
 	defer f.mu.Unlock()
 
 	return f.satelliteReport
+}
+
+// ── fakeAudioMixer ────────────────────────────────────────────────────────
+
+// fakeAudioMixer is a hand-written fake for handlers.AudioMixer.
+type fakeAudioMixer struct {
+	mu         sync.Mutex
+	state      alsa.State
+	stateErr   error
+	applyErr   error
+	applyCalls []alsa.Update
+}
+
+func (f *fakeAudioMixer) State(_ context.Context) (alsa.State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.stateErr != nil {
+		return alsa.State{}, f.stateErr
+	}
+
+	return f.state, nil
+}
+
+func (f *fakeAudioMixer) Apply(_ context.Context, u alsa.Update) (alsa.State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.applyCalls = append(f.applyCalls, u)
+
+	if f.applyErr != nil {
+		return alsa.State{}, f.applyErr
+	}
+
+	return f.state, nil
+}
+
+func (f *fakeAudioMixer) getApplyCalls() []alsa.Update {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]alsa.Update, len(f.applyCalls))
+	copy(out, f.applyCalls)
+
+	return out
 }
 
 // ── in-memory SQLite DB helper ───────────────────────────────────────────────

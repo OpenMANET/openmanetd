@@ -204,6 +204,94 @@ func setCommsConfig(doc *yaml.Node, enable bool, controlSource string) error {
 	return nil
 }
 
+// PersistCommsAudio updates the provided comms.audio.* values in the YAML
+// config file and refreshes the in-memory config state. Nil fields are
+// not written. It preserves comments and key ordering by operating on the
+// yaml.Node tree.
+func (c *Config) PersistCommsAudio(speakerVolume, micVolume *int, agc *bool) error {
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
+	filePath := c.v.ConfigFileUsed()
+	if filePath == "" {
+		return fmt.Errorf("no config file path configured")
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("reading config file: %w", err)
+	}
+
+	var doc yaml.Node
+
+	err = yaml.Unmarshal(data, &doc)
+	if err != nil {
+		return fmt.Errorf("parsing config file: %w", err)
+	}
+
+	if err = setCommsAudio(&doc, speakerVolume, micVolume, agc); err != nil {
+		return fmt.Errorf("updating comms.audio config: %w", err)
+	}
+
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	//nolint:gosec // config file permissions match the original file
+	err = os.WriteFile(filePath, out, 0644)
+	if err != nil {
+		return fmt.Errorf("writing config file: %w", err)
+	}
+
+	// Update in-memory state immediately without waiting for fsnotify.
+	if speakerVolume != nil {
+		c.v.Set("comms.audio.speakerVolume", *speakerVolume)
+	}
+
+	if micVolume != nil {
+		c.v.Set("comms.audio.micVolume", *micVolume)
+	}
+
+	if agc != nil {
+		c.v.Set("comms.audio.agc", *agc)
+	}
+
+	c.reload()
+
+	return nil
+}
+
+// setCommsAudio finds or creates the comms.audio mapping in the YAML
+// document node tree and sets the provided values.
+func setCommsAudio(doc *yaml.Node, speakerVolume, micVolume *int, agc *bool) error {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return fmt.Errorf("unexpected YAML structure: expected document node")
+	}
+
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return fmt.Errorf("unexpected YAML structure: expected mapping node at root")
+	}
+
+	commsMapping := findOrCreateMapping(root, "comms")
+	audioMapping := findOrCreateMapping(commsMapping, "audio")
+
+	if speakerVolume != nil {
+		setScalarWithTag(audioMapping, "speakerVolume", strconv.Itoa(*speakerVolume), "!!int")
+	}
+
+	if micVolume != nil {
+		setScalarWithTag(audioMapping, "micVolume", strconv.Itoa(*micVolume), "!!int")
+	}
+
+	if agc != nil {
+		setScalarWithTag(audioMapping, "agc", fmt.Sprintf("%t", *agc), "!!bool")
+	}
+
+	return nil
+}
+
 // PersistGNSSConfig updates the GNSS configuration in the YAML config file
 // and refreshes the in-memory config state. It preserves comments and key
 // ordering in the YAML file by operating on the yaml.Node tree.

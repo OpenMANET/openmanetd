@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,9 @@ import (
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/openmanet/openmanetd/internal/openmanet/server/handlers"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -63,6 +68,7 @@ type fakeConfigReader struct {
 	sectionTypes map[string]map[string]string
 	commitCalled bool
 	reloadCalled bool
+	reloadCalls  int
 	commitError  error
 	reloadError  error
 	setTypeError error
@@ -168,6 +174,7 @@ func (f *fakeConfigReader) Commit() error {
 
 func (f *fakeConfigReader) ReloadConfig() error {
 	f.reloadCalled = true
+	f.reloadCalls++
 
 	return f.reloadError
 }
@@ -193,6 +200,7 @@ func newTestWifiConfigService(t *testing.T) *handlers.WifiConfigService {
 		WirelessStatus: &fakeWirelessStatusProvider{status: map[string]*network.WirelessRadioStatus{}},
 		ConfigReader:   newWifiConfigMockReader(),
 		DHCPLeases:     &fakeDHCPLeaseProvider{leases: &network.DHCPLeasesResponse{}},
+		ReloadServices: func(context.Context) error { return nil },
 		GetMeshNeighbors: func() (*batmanadv.Neighbors, error) {
 			return &batmanadv.Neighbors{}, nil
 		},
@@ -243,6 +251,13 @@ func newWifiConfigMockReader() *fakeConfigReader {
 					"encryption": {"sae"},
 				},
 			},
+			// A wizard-configured node: bat0 plus the primary hardif.
+			// batmesh1 is deliberately absent so mesh-mode tests can
+			// prove the handler creates it.
+			"network": {
+				"bat0":     {"proto": {"batadv"}},
+				"batmesh0": {"proto": {"batadv_hardif"}, "master": {"bat0"}},
+			},
 		},
 		sectionTypes: map[string]map[string]string{
 			"wireless": {
@@ -251,8 +266,37 @@ func newWifiConfigMockReader() *fakeConfigReader {
 				"default_radio2": "wifi-iface",
 				"default_radio3": "wifi-iface",
 			},
+			"network": {
+				"bat0":     "interface",
+				"batmesh0": "interface",
+			},
 		},
 	}
+}
+
+// fakeRadioReloader stands in for WifiConfigService.ReloadServices.
+type fakeRadioReloader struct {
+	mu       sync.Mutex
+	calls    int
+	err      error
+	lastLive bool // ctx.Err() == nil when invoked
+}
+
+func (f *fakeRadioReloader) Reload(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	f.lastLive = ctx.Err() == nil
+
+	return f.err
+}
+
+func (f *fakeRadioReloader) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.calls
 }
 
 func newTestWirelessStatus() map[string]*network.WirelessRadioStatus {
@@ -977,8 +1021,9 @@ func TestListMeshPeers_WithPeers(t *testing.T) {
 	}
 
 	batNeighbors := batmanadv.Neighbors{
-		{HardIfname: "phy1-mesh0", NeighAddress: "c8:3e:1a:7b:00:a3", Throughput: 42, LastSeenMsecs: 200},
-		{HardIfname: "phy1-mesh0", NeighAddress: "c8:3e:1a:7b:00:d7", Throughput: 28, LastSeenMsecs: 400},
+		// Throughput is what `batctl nj` prints: kbit/s.
+		{HardIfname: "phy1-mesh0", NeighAddress: "c8:3e:1a:7b:00:a3", Throughput: 22200, LastSeenMsecs: 200},
+		{HardIfname: "phy1-mesh0", NeighAddress: "c8:3e:1a:7b:00:d7", Throughput: 7100, LastSeenMsecs: 400},
 	}
 	svc.GetMeshNeighbors = func() (*batmanadv.Neighbors, error) {
 		return &batNeighbors, nil
@@ -1032,9 +1077,10 @@ func TestListMeshPeers_WithPeers(t *testing.T) {
 		t.Errorf("peer 1 signal: got %d, want %d", p1.GetSignalDbm(), -61)
 	}
 
-	// Throughput: batman-adv reports in 100kbit/s units → /10 = Mbps
-	if p1.GetThroughputMbps() != 4.2 {
-		t.Errorf("peer 1 throughput: got %f, want %f", p1.GetThroughputMbps(), 4.2)
+	// Throughput: batctl nj reports kbit/s → /1000 = Mbps. A 2.4 GHz
+	// HT20 link reads ~22 Mbps; the old /10 showed it as 2220 Mbps.
+	if p1.GetThroughputMbps() != 22.2 {
+		t.Errorf("peer 1 throughput: got %f, want %f", p1.GetThroughputMbps(), 22.2)
 	}
 
 	p2 := peerMap["c8:3e:1a:7b:00:d7"]
@@ -1046,8 +1092,8 @@ func TestListMeshPeers_WithPeers(t *testing.T) {
 		t.Errorf("peer 2 hostname: got %q, want %q", p2.GetHostname(), "HaLowLink2-d7e4")
 	}
 
-	if p2.GetThroughputMbps() != 2.8 {
-		t.Errorf("peer 2 throughput: got %f, want %f", p2.GetThroughputMbps(), 2.8)
+	if p2.GetThroughputMbps() != 7.1 {
+		t.Errorf("peer 2 throughput: got %f, want %f", p2.GetThroughputMbps(), 7.1)
 	}
 }
 
@@ -1281,6 +1327,7 @@ func TestWifiEncryptionRoundTrip(t *testing.T) {
 		{"psk2", wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_PSK2},
 		{"psk", wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_PSK},
 		{"psk-mixed", wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_PSK_MIXED},
+		{"sae-mixed", wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_SAE_MIXED},
 		{"none", wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_NONE},
 		{"owe", wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_OWE},
 	}
@@ -1541,6 +1588,94 @@ func TestUpdateRadioSettings_UnspecifiedModeSkipped(t *testing.T) {
 	}
 }
 
+// A type=morse (HaLow) wifi-device only ever carries mesh-mode
+// ifaces: the settings API must refuse to flip one to any other mode
+// and leave the iface untouched.
+func TestUpdateRadioSettings_RejectsNonMeshModeOnMorseRadio(t *testing.T) {
+	modes := []wificonfigv1.WifiMode{
+		wificonfigv1.WifiMode_WIFI_MODE_AP,
+		wificonfigv1.WifiMode_WIFI_MODE_STA,
+		wificonfigv1.WifiMode_WIFI_MODE_ADHOC,
+		wificonfigv1.WifiMode_WIFI_MODE_MONITOR,
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.String(), func(t *testing.T) {
+			reader := newWifiConfigMockReader()
+			if err := reader.SetType("wireless", "radio2", "type", uci.TypeOption, "morse"); err != nil {
+				t.Fatalf("seed radio2 type: %v", err)
+			}
+
+			if err := reader.SetType("wireless", "default_radio2", "mode", uci.TypeOption, "mesh"); err != nil {
+				t.Fatalf("seed default_radio2 mode: %v", err)
+			}
+
+			svc := newTestWifiConfigService(t)
+			svc.ConfigReader = reader
+
+			_, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+				RadioName: "radio2",
+				Settings: &wificonfigv1.RadioSettings{
+					Ssid:    "client-ap",
+					Channel: "42",
+					Mode:    mode,
+				},
+			})
+			requireConnectCode(t, err, connect.CodeInvalidArgument)
+
+			if !strings.Contains(err.Error(), "type=morse") {
+				t.Errorf("error should name the type=morse rule, got %q", err.Error())
+			}
+
+			vals, ok := reader.Get("wireless", "default_radio2", "mode")
+			if !ok || len(vals) == 0 || vals[0] != "mesh" {
+				t.Errorf("default_radio2 mode must stay mesh, got %v", vals)
+			}
+
+			if reader.commitCalled {
+				t.Error("nothing may be committed on a rejected request")
+			}
+		})
+	}
+}
+
+// Mesh and mode-less (channel/txpower-only) edits on a HaLow radio
+// still go through; the rule only forbids non-mesh modes.
+func TestUpdateRadioSettings_MorseRadioAcceptsMeshAndUnspecifiedMode(t *testing.T) {
+	modes := map[string]wificonfigv1.WifiMode{
+		"mesh":        wificonfigv1.WifiMode_WIFI_MODE_MESH,
+		"unspecified": wificonfigv1.WifiMode_WIFI_MODE_UNSPECIFIED,
+	}
+
+	for name, mode := range modes {
+		t.Run(name, func(t *testing.T) {
+			reader := newWifiConfigMockReader()
+			if err := reader.SetType("wireless", "radio2", "type", uci.TypeOption, "morse"); err != nil {
+				t.Fatalf("seed radio2 type: %v", err)
+			}
+
+			svc := newTestWifiConfigService(t)
+			svc.ConfigReader = reader
+
+			resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+				RadioName: "radio2",
+				Settings: &wificonfigv1.RadioSettings{
+					Ssid:    "halowmesh",
+					Channel: "42",
+					Mode:    mode,
+				},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !resp.GetSuccess() {
+				t.Errorf("expected success, got message: %v", resp.GetMessage())
+			}
+		})
+	}
+}
+
 func TestUpdateRadioSettings_MeshModeSetsMeshFwdingZero(t *testing.T) {
 	reader := newWifiConfigMockReader()
 	svc := newTestWifiConfigService(t)
@@ -1782,5 +1917,778 @@ func TestWifiModeRoundTrip(t *testing.T) {
 
 	if got := handlers.ProtoToWifiMode(wificonfigv1.WifiMode_WIFI_MODE_UNSPECIFIED); got != "" {
 		t.Errorf("ProtoToWifiMode(UNSPECIFIED) = %q, want empty string", got)
+	}
+}
+
+func TestCurrentRadioSettings_MatchesGetRadioSettings(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = meshRSSIFixture(t, "default_radio3", "-75")
+
+	viaRPC, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio3"})
+	require.NoError(t, err)
+
+	cur, err := svc.CurrentRadioSettings("radio3")
+	require.NoError(t, err)
+
+	assert.Equal(t, viaRPC.GetSettings().GetMeshId(), cur.GetMeshId())
+	assert.Equal(t, viaRPC.GetSettings().GetChannel(), cur.GetChannel())
+	assert.Equal(t, viaRPC.GetSettings().GetTxPower(), cur.GetTxPower())
+	assert.Equal(t, viaRPC.GetSettings().GetMode(), cur.GetMode())
+	assert.Equal(t, viaRPC.GetSettings().GetMeshRssiThreshold(), cur.GetMeshRssiThreshold())
+	assert.Equal(t, int32(-75), cur.GetMeshRssiThreshold())
+	assert.Nil(t, cur.Password, "passwords are never read back")
+}
+
+func TestCurrentRadioSettings_UnknownRadio(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+
+	_, err := svc.CurrentRadioSettings("radio9")
+
+	var cerr *connect.Error
+	require.ErrorAs(t, err, &cerr)
+	assert.Equal(t, connect.CodeNotFound, cerr.Code())
+}
+
+func TestApplyRadioSettingsBatch_TwoRadiosOneReload(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	rl := &fakeRadioReloader{}
+	svc.ReloadServices = rl.Reload
+
+	err := svc.ApplyRadioSettingsBatch(context.Background(), []handlers.RadioSettingsUpdate{
+		{RadioName: "radio2", Settings: &wificonfigv1.RadioSettings{Ssid: "ap-new", Channel: "6", TxPower: 15}},
+		{RadioName: "radio3", Settings: &wificonfigv1.RadioSettings{Ssid: "mesh-new", MeshId: strPtr("mesh-new"), Channel: "28", TxPower: 14}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, reader.reloadCalls, "one reload for the whole batch")
+	assert.Equal(t, 1, rl.count(), "one service reload for the whole batch")
+
+	ch, _ := reader.Get("wireless", "radio2", "channel")
+	assert.Equal(t, []string{"6"}, ch)
+
+	meshID, _ := reader.Get("wireless", "default_radio3", "mesh_id")
+	assert.Equal(t, []string{"mesh-new"}, meshID)
+}
+
+func TestApplyRadioSettingsBatch_StageErrorSkipsReload(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	rl := &fakeRadioReloader{}
+	svc.ReloadServices = rl.Reload
+
+	err := svc.ApplyRadioSettingsBatch(context.Background(), []handlers.RadioSettingsUpdate{
+		{RadioName: "radio2", Settings: &wificonfigv1.RadioSettings{Ssid: "ap-new", Channel: "6", TxPower: 15}},
+		{RadioName: "radio9", Settings: &wificonfigv1.RadioSettings{Ssid: "ghost", Channel: "1", TxPower: 15}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "radio9")
+	assert.Equal(t, 0, rl.count(), "no service reload when staging fails")
+	assert.Equal(t, 0, reader.reloadCalls, "a failed batch must not reload")
+}
+
+func TestApplyRadioSettingsBatch_ReloadErrorSurfaces(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	reader.reloadError = errors.New("wifi reload failed")
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	err := svc.ApplyRadioSettingsBatch(context.Background(), []handlers.RadioSettingsUpdate{
+		{RadioName: "radio2", Settings: &wificonfigv1.RadioSettings{Ssid: "ap-new", Channel: "6", TxPower: 15}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "wifi reload failed")
+}
+
+func TestUpdateRadioSettings_ZeroTxPowerLeavesUCIUntouched(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "ap-new", Channel: "6", TxPower: 0},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess())
+
+	tx, _ := reader.Get("wireless", "radio2", "txpower")
+	assert.Equal(t, []string{"20"}, tx, "tx_power 0 means 'unset' and must not force 0 dBm")
+}
+
+// A mode=mesh wifi-iface must carry mesh_id only. The frontend mirrors
+// mesh_id into ssid to satisfy the proto's ssid min_len, and the AP
+// section being converted already has an ssid; either one left in the
+// section keeps the radio from coming up.
+func TestUpdateRadioSettings_MeshMode_WritesMeshIDNotSSID(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:       "backhaul",
+			MeshId:     strPtr("backhaul"),
+			Password:   strPtr("meshsecret"),
+			Channel:    "6",
+			Mode:       wificonfigv1.WifiMode_WIFI_MODE_MESH,
+			Encryption: wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_SAE,
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+
+	mode, _ := reader.Get("wireless", "default_radio2", "mode")
+	assert.Equal(t, []string{"mesh"}, mode)
+
+	meshID, _ := reader.Get("wireless", "default_radio2", "mesh_id")
+	assert.Equal(t, []string{"backhaul"}, meshID)
+
+	ssid, hasSSID := reader.Get("wireless", "default_radio2", "ssid")
+	assert.False(t, hasSSID, "ssid must not be written on a mesh iface, got %v", ssid)
+}
+
+// An edit that leaves mode unspecified on an iface already in mesh mode
+// (channel/txpower change) still carries an ssid because the proto
+// requires one; it must not be written, and a stale ssid already on
+// the section must be cleared.
+func TestUpdateRadioSettings_MeshIface_UnspecifiedMode_DropsStaleSSID(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	// Fixture default_radio3 is mode=mesh with both ssid and mesh_id.
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio3",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:    "openmanet-mesh",
+			MeshId:  strPtr("openmanet-mesh"),
+			Channel: "28",
+			TxPower: 14,
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+
+	mode, _ := reader.Get("wireless", "default_radio3", "mode")
+	assert.Equal(t, []string{"mesh"}, mode, "mode must be left alone when unspecified")
+
+	meshID, _ := reader.Get("wireless", "default_radio3", "mesh_id")
+	assert.Equal(t, []string{"openmanet-mesh"}, meshID)
+
+	ssid, hasSSID := reader.Get("wireless", "default_radio3", "ssid")
+	assert.False(t, hasSSID, "stale ssid must be cleared from a mesh iface, got %v", ssid)
+}
+
+// The inverse: switching a mesh iface back to AP drops the stale
+// mesh_id so the AP section only carries its ssid.
+func TestUpdateRadioSettings_APMode_DropsStaleMeshID(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	// Turn default_radio2 into a mesh iface first (radio3 is HaLow and
+	// rejects AP mode, so the round trip has to happen on radio2).
+	require.NoError(t, reader.SetType("wireless", "default_radio2", "mode", uci.TypeOption, "mesh"))
+	require.NoError(t, reader.SetType("wireless", "default_radio2", "mesh_id", uci.TypeOption, "backhaul"))
+	require.NoError(t, reader.SetType("wireless", "default_radio2", "network", uci.TypeOption, "batmesh1"))
+	require.NoError(t, reader.Del("wireless", "default_radio2", "ssid"))
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:       "openmanet",
+			Password:   strPtr("testsecret"),
+			Channel:    "6",
+			Mode:       wificonfigv1.WifiMode_WIFI_MODE_AP,
+			Encryption: wificonfigv1.WifiEncryption_WIFI_ENCRYPTION_PSK2,
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+
+	mode, _ := reader.Get("wireless", "default_radio2", "mode")
+	assert.Equal(t, []string{"ap"}, mode)
+
+	ssid, _ := reader.Get("wireless", "default_radio2", "ssid")
+	assert.Equal(t, []string{"openmanet"}, ssid)
+
+	meshID, hasMeshID := reader.Get("wireless", "default_radio2", "mesh_id")
+	assert.False(t, hasMeshID, "stale mesh_id must be cleared from an AP iface, got %v", meshID)
+}
+
+// A client that only knows ssid still gets a usable mesh iface: the
+// network name lands in mesh_id, never in ssid.
+func TestUpdateRadioSettings_MeshMode_SSIDOnlyBecomesMeshID(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:    "backhaul",
+			Channel: "6",
+			Mode:    wificonfigv1.WifiMode_WIFI_MODE_MESH,
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+
+	meshID, _ := reader.Get("wireless", "default_radio2", "mesh_id")
+	assert.Equal(t, []string{"backhaul"}, meshID)
+
+	ssid, hasSSID := reader.Get("wireless", "default_radio2", "ssid")
+	assert.False(t, hasSSID, "ssid must not be written on a mesh iface, got %v", ssid)
+}
+
+// The committed config has to reach netifd: a UCI commit alone leaves
+// the radio on its old settings until reboot.
+func TestUpdateRadioSettings_ReloadsServicesAfterCommit(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	rl := &fakeRadioReloader{}
+	svc.ReloadServices = rl.Reload
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "openmanet", Channel: "6"},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+	assert.Equal(t, 1, rl.count())
+}
+
+func TestUpdateRadioSettings_ReloadFailureReportsMessage(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	rl := &fakeRadioReloader{err: errors.New("reload_config: exit status 1")}
+	svc.ReloadServices = rl.Reload
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "openmanet", Channel: "6"},
+	})
+	require.NoError(t, err)
+	assert.False(t, resp.GetSuccess())
+	assert.Contains(t, resp.GetMessage(), "reload_config: exit status 1")
+}
+
+// The reload can drop the operator's own connection, which cancels the
+// request context; the reload must still run to completion on a live
+// context rather than being killed midway.
+func TestUpdateRadioSettings_ReloadSurvivesCancelledContext(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	rl := &fakeRadioReloader{}
+	svc.ReloadServices = rl.Reload
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resp, err := svc.UpdateRadioSettings(ctx, &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "openmanet", Channel: "6"},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+	assert.Equal(t, 1, rl.count())
+	assert.True(t, rl.lastLive, "reload must run on a context detached from the request")
+}
+
+func TestUpdateRadioSettings_UnspecifiedModeSkipsHardifGuard(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	delete(reader.data["network"], "bat0")
+	delete(reader.sectionTypes["network"], "bat0")
+
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	// A channel-only edit on the AP radio never touches batman.
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "openmanet", Channel: "6"},
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+}
+
+// Binding a mesh iface to batmesh1 is useless unless network.batmesh1
+// exists as a batadv_hardif on bat0; the wizard creates both, a
+// factory image has neither.
+func TestUpdateRadioSettings_MeshMode_CreatesMissingBatmeshHardif(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	_, has := reader.Get("wireless", "network", "batmesh1")
+	require.False(t, has)
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:    "backhaul",
+			MeshId:  strPtr("backhaul"),
+			Channel: "6",
+			Mode:    wificonfigv1.WifiMode_WIFI_MODE_MESH,
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), "message: %v", resp.GetMessage())
+
+	net, _ := reader.Get("wireless", "default_radio2", "network")
+	assert.Equal(t, []string{"batmesh1"}, net)
+
+	proto, _ := reader.Get("network", "batmesh1", "proto")
+	assert.Equal(t, []string{"batadv_hardif"}, proto)
+
+	master, _ := reader.Get("network", "batmesh1", "master")
+	assert.Equal(t, []string{"bat0"}, master)
+
+	assert.Equal(t, "interface", reader.sectionTypes["network"]["batmesh1"])
+}
+
+func TestUpdateRadioSettings_MeshMode_NoBatmanDevice_FailedPrecondition(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	delete(reader.data["network"], "bat0")
+	delete(reader.sectionTypes["network"], "bat0")
+
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	rl := &fakeRadioReloader{}
+	svc.ReloadServices = rl.Reload
+
+	_, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:    "backhaul",
+			MeshId:  strPtr("backhaul"),
+			Channel: "6",
+			Mode:    wificonfigv1.WifiMode_WIFI_MODE_MESH,
+		},
+	})
+
+	var cerr *connect.Error
+	require.ErrorAs(t, err, &cerr)
+	assert.Equal(t, connect.CodeFailedPrecondition, cerr.Code())
+	assert.Contains(t, cerr.Message(), "bat0")
+
+	// Precondition failures must not leave partial writes or reload.
+	ch, _ := reader.Get("wireless", "radio2", "channel")
+	assert.Equal(t, []string{"1"}, ch, "device config must not be written")
+
+	mode, _ := reader.Get("wireless", "default_radio2", "mode")
+	assert.Equal(t, []string{"ap"}, mode)
+	assert.Equal(t, 0, rl.count())
+}
+
+// secondaryMeshCapableProviders returns iwinfo + wireless status fakes
+// that report radio2 as an MT7915 with runtime interface phy2-ap0.
+func secondaryMeshCapableProviders(hardware string) (*fakeIwinfoProvider, *fakeWirelessStatusProvider) {
+	iw := &fakeIwinfoProvider{infoByDevice: map[string]*iwinfo.InterfaceInfo{
+		"phy2-ap0": {Hardware: iwinfo.HardwareInfo{Name: hardware}},
+	}}
+	ws := &fakeWirelessStatusProvider{status: map[string]*network.WirelessRadioStatus{
+		"radio2": {Interfaces: []network.WirelessRadioInterface{{Ifname: "phy2-ap0"}}},
+	}}
+
+	return iw, ws
+}
+
+func assertSecondaryMeshPolicy(t *testing.T, reader *fakeConfigReader, section string, want bool) {
+	t.Helper()
+
+	for _, p := range network.SecondaryMeshPolicyOptions() {
+		vals, ok := reader.Get("wireless", section, p.Option)
+		if want {
+			if !ok || len(vals) != 1 || vals[0] != p.Value {
+				t.Errorf("%s: got %v (ok=%v), want %s", p.Option, vals, ok, p.Value)
+			}
+
+			continue
+		}
+
+		if ok {
+			t.Errorf("%s must not be written, got %v", p.Option, vals)
+		}
+	}
+}
+
+func TestUpdateRadioSettings_MeshOnBatmesh1_MT7915_WritesSecondaryPolicy(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	svc.IwinfoClient, svc.WirelessStatus = secondaryMeshCapableProviders("MediaTek MT7915AN")
+
+	// default_radio2 moves from ahwlan to the only free hardif, batmesh1.
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:    "mesh-ssid",
+			Channel: "6",
+			Mode:    wificonfigv1.WifiMode_WIFI_MODE_MESH,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !resp.GetSuccess() {
+		t.Fatalf("expected success, got message: %v", resp.GetMessage())
+	}
+
+	assertSecondaryMeshPolicy(t, reader, "default_radio2", true)
+}
+
+func TestUpdateRadioSettings_MeshOnBatmesh1_MT7916_WritesSecondaryPolicy(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	svc.IwinfoClient, svc.WirelessStatus = secondaryMeshCapableProviders("MediaTek MT7916")
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "mesh-ssid", Channel: "6", Mode: wificonfigv1.WifiMode_WIFI_MODE_MESH},
+	})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("expected success, err=%v msg=%v", err, resp.GetMessage())
+	}
+
+	assertSecondaryMeshPolicy(t, reader, "default_radio2", true)
+}
+
+func TestUpdateRadioSettings_MeshOnBatmesh1_UnsupportedChipset_SkipsPolicy(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	svc.IwinfoClient, svc.WirelessStatus = secondaryMeshCapableProviders("Qualcomm Atheros QCA9880")
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "mesh-ssid", Channel: "6", Mode: wificonfigv1.WifiMode_WIFI_MODE_MESH},
+	})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("expected success, err=%v msg=%v", err, resp.GetMessage())
+	}
+
+	vals, ok := reader.Get("wireless", "default_radio2", "network")
+	if !ok || vals[0] != "batmesh1" {
+		t.Fatalf("radio2 must still bind to batmesh1, got %v (ok=%v)", vals, ok)
+	}
+
+	assertSecondaryMeshPolicy(t, reader, "default_radio2", false)
+}
+
+func TestUpdateRadioSettings_MeshOnBatmesh0_SkipsPolicy(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	// default_radio3 already sits on batmesh0 (the HaLow primary); the
+	// policy is for the secondary link only, whatever the chipset.
+	iw := &fakeIwinfoProvider{infoByDevice: map[string]*iwinfo.InterfaceInfo{
+		"wlan3": {Hardware: iwinfo.HardwareInfo{Name: "MediaTek MT7915AN"}},
+	}}
+	svc.IwinfoClient = iw
+	svc.WirelessStatus = &fakeWirelessStatusProvider{status: map[string]*network.WirelessRadioStatus{
+		"radio3": {Interfaces: []network.WirelessRadioInterface{{Ifname: "wlan3"}}},
+	}}
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio3",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "mesh-ssid", Channel: "42", Mode: wificonfigv1.WifiMode_WIFI_MODE_MESH},
+	})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("expected success, err=%v msg=%v", err, resp.GetMessage())
+	}
+
+	assertSecondaryMeshPolicy(t, reader, "default_radio3", false)
+}
+
+func TestUpdateRadioSettings_MeshOnBatmesh1_IwinfoError_SkipsPolicyButSucceeds(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	svc.IwinfoClient = &fakeIwinfoProvider{infoErr: errors.New("iwinfo down")}
+	_, svc.WirelessStatus = secondaryMeshCapableProviders("MediaTek MT7915AN")
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "mesh-ssid", Channel: "6", Mode: wificonfigv1.WifiMode_WIFI_MODE_MESH},
+	})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("a telemetry failure must not fail the mode change, err=%v msg=%v", err, resp.GetMessage())
+	}
+
+	assertSecondaryMeshPolicy(t, reader, "default_radio2", false)
+}
+
+func TestUpdateRadioSettings_APMode_SkipsPolicy(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+	svc.IwinfoClient, svc.WirelessStatus = secondaryMeshCapableProviders("MediaTek MT7915AN")
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings:  &wificonfigv1.RadioSettings{Ssid: "test-ap", Channel: "6", Mode: wificonfigv1.WifiMode_WIFI_MODE_AP},
+	})
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("expected success, err=%v msg=%v", err, resp.GetMessage())
+	}
+
+	assertSecondaryMeshPolicy(t, reader, "default_radio2", false)
+}
+
+// meshRSSIFixture returns the standard mock reader with mesh_rssi_threshold
+// set on the given wifi-iface section.
+func meshRSSIFixture(t *testing.T, section, value string) *fakeConfigReader {
+	t.Helper()
+
+	reader := newWifiConfigMockReader()
+	require.NoError(t, reader.SetType("wireless", section, "mesh_rssi_threshold", uci.TypeOption, value))
+
+	return reader
+}
+
+func TestGetRadioSettings_MeshRSSIThreshold(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = meshRSSIFixture(t, "default_radio3", "-75")
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio3"})
+	require.NoError(t, err)
+
+	settings := resp.GetSettings()
+	require.NotNil(t, settings.MeshRssiThreshold, "stored floor must be reported for a mesh iface")
+	assert.Equal(t, int32(-75), settings.GetMeshRssiThreshold())
+}
+
+func TestGetRadioSettings_MeshRSSIThreshold_AbsentOmitted(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio3"})
+	require.NoError(t, err)
+	assert.Nil(t, resp.GetSettings().MeshRssiThreshold, "no UCI option means the field stays unset")
+}
+
+func TestGetRadioSettings_MeshRSSIThreshold_UnparsableOmitted(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = meshRSSIFixture(t, "default_radio3", "auto")
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio3"})
+	require.NoError(t, err)
+	assert.Nil(t, resp.GetSettings().MeshRssiThreshold, "a non-numeric option is not reported")
+}
+
+func TestGetRadioSettings_MeshRSSIThreshold_OverflowOmitted(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = meshRSSIFixture(t, "default_radio3", "2147483648")
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio3"})
+	require.NoError(t, err)
+	assert.Nil(t, resp.GetSettings().MeshRssiThreshold, "a value outside int32 is not reported (never wrapped)")
+}
+
+func TestGetRadioSettings_TxPowerOverflowReadsAsUnset(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	require.NoError(t, reader.SetType("wireless", "radio2", "txpower", uci.TypeOption, "2147483648"))
+
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio2"})
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), resp.GetSettings().GetTxPower(), "a value outside int32 reads as unset, never wrapped")
+}
+
+func TestGetRadioSettings_MeshRSSIThreshold_OutOfRangeReported(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = meshRSSIFixture(t, "default_radio3", "-90")
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio3"})
+	require.NoError(t, err)
+
+	settings := resp.GetSettings()
+	require.NotNil(t, settings.MeshRssiThreshold, "the read reports what UCI holds; only updates are range-checked")
+	assert.Equal(t, int32(-90), settings.GetMeshRssiThreshold())
+}
+
+func TestGetRadioSettings_APMode_OmitsMeshRSSIThreshold(t *testing.T) {
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = meshRSSIFixture(t, "default_radio2", "-80")
+
+	resp, err := svc.GetRadioSettings(context.Background(), &wificonfigv1.GetRadioSettingsRequest{RadioName: "radio2"})
+	require.NoError(t, err)
+	assert.Nil(t, resp.GetSettings().MeshRssiThreshold, "a stale option on an AP iface is not reported")
+}
+
+func TestUpdateRadioSettings_MeshMode_WritesMeshRSSIThreshold(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:              "mesh-ssid",
+			Channel:           "6",
+			Mode:              wificonfigv1.WifiMode_WIFI_MODE_MESH,
+			MeshRssiThreshold: proto.Int32(-75),
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), resp.GetMessage())
+
+	vals, ok := reader.Get("wireless", "default_radio2", "mesh_rssi_threshold")
+	require.True(t, ok, "mesh_rssi_threshold must be written on the mesh iface")
+	assert.Equal(t, []string{"-75"}, vals)
+}
+
+func TestUpdateRadioSettings_MeshIface_UnspecifiedMode_WritesMeshRSSIThreshold(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	// Make default_radio2 a stored mesh iface first, then send an
+	// update without Mode: the effective mode still resolves to mesh
+	// from UCI, so the floor is staged.
+	require.NoError(t, reader.SetType("wireless", "default_radio2", "mode", uci.TypeOption, "mesh"))
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:              "mesh-ssid",
+			Channel:           "6",
+			MeshRssiThreshold: proto.Int32(-70),
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), resp.GetMessage())
+
+	vals, ok := reader.Get("wireless", "default_radio2", "mesh_rssi_threshold")
+	require.True(t, ok, "effective mode comes from UCI when the request omits it")
+	assert.Equal(t, []string{"-70"}, vals)
+}
+
+func TestUpdateRadioSettings_MeshMode_UnsetLeavesMeshRSSIThreshold(t *testing.T) {
+	reader := meshRSSIFixture(t, "default_radio3", "-80")
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio3",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:    "mesh-ssid",
+			Channel: "44",
+			Mode:    wificonfigv1.WifiMode_WIFI_MODE_MESH,
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), resp.GetMessage())
+
+	vals, ok := reader.Get("wireless", "default_radio3", "mesh_rssi_threshold")
+	require.True(t, ok, "an update without the field must not remove the option")
+	assert.Equal(t, []string{"-80"}, vals)
+}
+
+func TestUpdateRadioSettings_APMode_IgnoresMeshRSSIThreshold(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio2",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:              "openmanet",
+			Channel:           "6",
+			Mode:              wificonfigv1.WifiMode_WIFI_MODE_AP,
+			MeshRssiThreshold: proto.Int32(-75),
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), resp.GetMessage())
+
+	_, ok := reader.Get("wireless", "default_radio2", "mesh_rssi_threshold")
+	assert.False(t, ok, "the floor is meaningless on an AP iface and must not be written")
+}
+
+func TestUpdateRadioSettings_MorseRadio_IgnoresMeshRSSIThreshold(t *testing.T) {
+	reader := newWifiConfigMockReader()
+	svc := newTestWifiConfigService(t)
+	svc.ConfigReader = reader
+
+	resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+		RadioName: "radio3",
+		Settings: &wificonfigv1.RadioSettings{
+			Ssid:              "mesh-ssid",
+			Channel:           "42",
+			Mode:              wificonfigv1.WifiMode_WIFI_MODE_MESH,
+			MeshRssiThreshold: proto.Int32(-75),
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.GetSuccess(), resp.GetMessage())
+
+	_, ok := reader.Get("wireless", "default_radio3", "mesh_rssi_threshold")
+	assert.False(t, ok, "the HaLow floor is not operator-tunable; the field is ignored on a morse radio")
+}
+
+func TestUpdateRadioSettings_MeshToAPOrSTA_ClearsMeshOnlyOptions(t *testing.T) {
+	modes := map[string]wificonfigv1.WifiMode{
+		"ap":  wificonfigv1.WifiMode_WIFI_MODE_AP,
+		"sta": wificonfigv1.WifiMode_WIFI_MODE_STA,
+	}
+
+	for name, mode := range modes {
+		t.Run(name, func(t *testing.T) {
+			reader := newWifiConfigMockReader()
+
+			// default_radio2 lived a mesh life: hardif binding plus every
+			// mesh-only option the daemon writes.
+			seed := map[string]string{
+				"mode":                "mesh",
+				"network":             "batmesh1",
+				"mesh_id":             "old-mesh",
+				"mesh_fwding":         "0",
+				"mesh_rssi_threshold": "-80",
+			}
+			for _, p := range network.SecondaryMeshPolicyOptions() {
+				seed[p.Option] = p.Value
+			}
+
+			for k, v := range seed {
+				require.NoError(t, reader.SetType("wireless", "default_radio2", k, uci.TypeOption, v))
+			}
+
+			svc := newTestWifiConfigService(t)
+			svc.ConfigReader = reader
+
+			resp, err := svc.UpdateRadioSettings(context.Background(), &wificonfigv1.UpdateRadioSettingsRequest{
+				RadioName: "radio2",
+				Settings: &wificonfigv1.RadioSettings{
+					Ssid:    "openmanet",
+					Channel: "6",
+					Mode:    mode,
+				},
+			})
+			require.NoError(t, err)
+			require.True(t, resp.GetSuccess(), resp.GetMessage())
+
+			for _, opt := range []string{
+				"mesh_id", "mesh_fwding", "mesh_rssi_threshold",
+				"mcast_rate", "mesh_nolearn", "mesh_retry_timeout", "mesh_confirm_timeout", "mesh_holding_timeout",
+			} {
+				_, ok := reader.Get("wireless", "default_radio2", opt)
+				assert.False(t, ok, "%s must be cleared when the iface leaves mesh mode", opt)
+			}
+
+			vals, ok := reader.Get("wireless", "default_radio2", "network")
+			require.True(t, ok)
+			assert.Equal(t, []string{"ahwlan"}, vals)
+
+			vals, ok = reader.Get("wireless", "default_radio2", "ssid")
+			require.True(t, ok)
+			assert.Equal(t, []string{"openmanet"}, vals)
+		})
 	}
 }

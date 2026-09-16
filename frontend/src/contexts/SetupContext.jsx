@@ -21,6 +21,7 @@ import {
   UplinkType,
 } from '../gen/openmanet/setup/v1/setup_pb.js';
 import { WifiEncryption } from '../gen/openmanet/wifi_config/v1/wifi_config_pb.js';
+import { apDefaults } from './apDefaults.js';
 
 // initialState mirrors the MeshNodeProfile shape with Mesh Point selected
 // by default (plan: "Mesh Point should be selected by default") and the
@@ -39,6 +40,7 @@ export const initialState = {
     bandwidthMhz: 2,
     channel:      42,
     countryCode:  '',
+    fromScan:     false,
   },
   uplink: {
     type:           UplinkType.UNSPECIFIED,
@@ -54,6 +56,14 @@ export const initialState = {
   // adminPasswordConfirm is UI-only — never sent to the backend; just
   // forces the user to type the same password twice.
   adminPasswordConfirm: '',
+  // IANA zone name (e.g. "America/Denver"). Empty until HYDRATE_FROM_STATUS
+  // seeds it from the browser or the device's current zone, or the user
+  // picks one on the Identity step.
+  timezone: '',
+  // Set by APPLY_MESH_JOIN when a scanned code was applied; null until
+  // then. Drives the "Scanned from X" review row and the backhaul-skip
+  // notice on StepMesh.
+  meshJoin: null,
 };
 
 export const SETUP_ACTIONS = {
@@ -62,13 +72,16 @@ export const SETUP_ACTIONS = {
   SET_MESHPOINT_MODE:     'SET_MESHPOINT_MODE',
   SET_MESHGATE_MODE:      'SET_MESHGATE_MODE',
   SET_MESH_FIELD:         'SET_MESH_FIELD',
+  APPLY_MESH_JOIN:        'APPLY_MESH_JOIN',
   SET_UPLINK_TYPE:        'SET_UPLINK_TYPE',
   SET_UPLINK_FIELD:       'SET_UPLINK_FIELD',
   SET_UPLINK_WIRELESS:    'SET_UPLINK_WIRELESS',
   SET_AP:                 'SET_AP',
   REMOVE_AP:              'REMOVE_AP',
+  SET_RADIO_MODE:         'SET_RADIO_MODE',
   SET_ADMIN_PASSWORD:     'SET_ADMIN_PASSWORD',
   SET_ADMIN_PASSWORD_CONFIRM: 'SET_ADMIN_PASSWORD_CONFIRM',
+  SET_TIMEZONE:           'SET_TIMEZONE',
   RESET:                  'RESET',
   HYDRATE_FROM_STATUS:    'HYDRATE_FROM_STATUS',
 };
@@ -106,8 +119,12 @@ export function reducer(state, action) {
     case SETUP_ACTIONS.SET_MESHGATE_MODE:
       return { ...state, meshgateMode: action.value };
 
-    case SETUP_ACTIONS.SET_MESH_FIELD:
-      return { ...state, mesh: { ...state.mesh, [action.field]: action.value } };
+    case SETUP_ACTIONS.SET_MESH_FIELD: {
+      // Any manual edit (other than picking the radio) ends the
+      // scanned-values hold so the snap-to-legal effects resume.
+      const fromScan = action.field === 'radioName' ? state.mesh.fromScan : false;
+      return { ...state, mesh: { ...state.mesh, [action.field]: action.value, fromScan } };
+    }
 
     case SETUP_ACTIONS.SET_UPLINK_TYPE:
       return { ...state, uplink: { ...state.uplink, type: action.value } };
@@ -129,19 +146,44 @@ export function reducer(state, action) {
       // — fields not in `value` are merged with the existing entry, or
       // defaulted on insert.
       const idx = state.aps.findIndex(ap => ap.radioName === action.value.radioName);
-      const baseDefaults = {
-        radioName:  action.value.radioName,
-        enabled:    false,
-        ssid:       '',
-        passphrase: '',
-        encryption: WifiEncryption.PSK2,
-      };
+      const baseDefaults = apDefaults(action.value.radioName);
       const merged = idx >= 0
         ? { ...state.aps[idx], ...action.value }
         : { ...baseDefaults, ...action.value };
       const aps = [...state.aps];
       if (idx >= 0) aps[idx] = merged;
       else aps.push(merged);
+      return { ...state, aps };
+    }
+
+    case SETUP_ACTIONS.SET_RADIO_MODE: {
+      // One control per radio: 'off' | 'ap' | 'backhaul'. Only one
+      // radio may be the backhaul (the daemon runs a single batmesh1
+      // hardif), so choosing it on one radio clears it on every other.
+      // AP and backhaul fields both survive a mode flip so the user can
+      // change their mind without retyping.
+      const { radioName, mode } = action;
+      const isBackhaul = mode === 'backhaul';
+      const idx = state.aps.findIndex(ap => ap.radioName === radioName);
+      const existing = idx >= 0 ? state.aps[idx] : apDefaults(radioName);
+      const updated = {
+        ...existing,
+        enabled:      mode === 'ap',
+        meshBackhaul: isBackhaul,
+        // The Step-2 mesh-ID input allows up to 32 chars, but
+        // MeshBackhaulProfile.mesh_id caps at 32 — clamp the seed so
+        // appending "-2g" can never push it past the proto limit.
+        backhaulMeshId: isBackhaul && !existing.backhaulMeshId
+          ? `${state.mesh.meshId.slice(0, 29)}-2g`
+          : existing.backhaulMeshId,
+      };
+      const aps = state.aps.map(ap => (
+        isBackhaul && ap.radioName !== radioName && ap.meshBackhaul
+          ? { ...ap, meshBackhaul: false }
+          : ap
+      ));
+      if (idx >= 0) aps[idx] = updated;
+      else aps.push(updated);
       return { ...state, aps };
     }
 
@@ -153,6 +195,9 @@ export function reducer(state, action) {
 
     case SETUP_ACTIONS.SET_ADMIN_PASSWORD_CONFIRM:
       return { ...state, adminPasswordConfirm: action.value };
+
+    case SETUP_ACTIONS.SET_TIMEZONE:
+      return { ...state, timezone: action.value };
 
     case SETUP_ACTIONS.RESET:
       return { ...initialState };
@@ -191,6 +236,73 @@ export function reducer(state, action) {
         }
       }
 
+      // Pre-fill the timezone: prefer the browser's own zone (rides on
+      // the action so the reducer stays pure — the dispatch site
+      // supplies it via Intl.DateTimeFormat) when the device's zone
+      // list actually offers it, otherwise fall back to the device's
+      // current zone. Never overwrite a zone the user already picked.
+      if (!state.timezone) {
+        const zones = action.status?.timezones ?? [];
+        if (action.browserTimezone && zones.includes(action.browserTimezone)) {
+          next.timezone = action.browserTimezone;
+        } else if (action.status?.currentTimezone) {
+          next.timezone = action.status.currentTimezone;
+        }
+      }
+
+      return next;
+    }
+
+    case SETUP_ACTIONS.APPLY_MESH_JOIN: {
+      // A scanned code fills the mesh slice and, when it carries a
+      // backhaul, switches the first capable 2.4 GHz radio (never the
+      // STA uplink radio) to backhaul with the scanned tuning. Values
+      // are marked fromScan so StepMesh/StepAPs do not snap them.
+      const { payload, radios = [] } = action;
+      const h = payload.halow;
+      const next = {
+        ...state,
+        mesh: {
+          ...state.mesh,
+          meshId:       h.meshId,
+          passphrase:   h.passphrase,
+          encryption:   h.encryption,
+          bandwidthMhz: h.bandwidthMhz,
+          channel:      h.channel,
+          countryCode:  h.countryCode || state.mesh.countryCode,
+          fromScan:     true,
+        },
+      };
+      const meshJoin = { sourceHostname: payload.sourceHostname ?? '', backhaulRadio: '', backhaulSkippedReason: '' };
+
+      if (payload.backhaul) {
+        const uplinkRadio = state.uplink.wireless.radioName;
+        const target = radios.find(r => r.supportsMeshBackhaul && !r.isHalow && r.name !== uplinkRadio);
+        if (target) {
+          const b = payload.backhaul;
+          const existing = state.aps.find(ap => ap.radioName === target.name) ?? apDefaults(target.name);
+          const updated = {
+            ...existing,
+            enabled:              false,
+            meshBackhaul:         true,
+            backhaulMeshId:       b.meshId,
+            backhaulPassphrase:   b.passphrase,
+            backhaulBandwidthMhz: b.bandwidthMhz,
+            backhaulChannel:      b.channel,
+            backhaulCountryCode:  b.countryCode || h.countryCode || '',
+            backhaulFromScan:     true,
+          };
+          next.aps = state.aps
+            .filter(ap => ap.radioName !== target.name)
+            .map(ap => (ap.meshBackhaul ? { ...ap, meshBackhaul: false } : ap));
+          next.aps.push(updated);
+          meshJoin.backhaulRadio = target.name;
+        } else {
+          meshJoin.backhaulSkippedReason = 'no-capable-radio';
+        }
+      }
+
+      next.meshJoin = meshJoin;
       return next;
     }
 

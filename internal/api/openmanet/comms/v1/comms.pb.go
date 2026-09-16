@@ -7,6 +7,7 @@
 package commsv1
 
 import (
+	_ "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -180,7 +181,11 @@ type StreamAudioRxResponse struct {
 	Sequence uint32 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
 	// Callsign of the remote peer whose audio this frame belongs to.
 	// Empty if the sender did not include a callsign extension.
-	Callsign      string `protobuf:"bytes,3,opt,name=callsign,proto3" json:"callsign,omitempty"`
+	Callsign string `protobuf:"bytes,3,opt,name=callsign,proto3" json:"callsign,omitempty"`
+	// 1-based talk group channel this frame was received on. 0 when the
+	// server predates this field or the receiving port has no talk group
+	// mapping; consumers should treat 0 as channel 1 for compatibility.
+	Talkgroup     int32 `protobuf:"varint,4,opt,name=talkgroup,proto3" json:"talkgroup,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -234,6 +239,13 @@ func (x *StreamAudioRxResponse) GetCallsign() string {
 		return x.Callsign
 	}
 	return ""
+}
+
+func (x *StreamAudioRxResponse) GetTalkgroup() int32 {
+	if x != nil {
+		return x.Talkgroup
+	}
+	return 0
 }
 
 // StreamAudioTxResponse is returned when the client closes the TX stream.
@@ -319,25 +331,313 @@ func (*StreamAudioRxRequest) Descriptor() ([]byte, []int) {
 	return file_openmanet_comms_v1_comms_proto_rawDescGZIP(), []int{5}
 }
 
+// AudioMixerState is a point-in-time reading of the hardware mixer on the
+// device's sound card (the OpenVLM / CM108B in production). Optional
+// fields are absent when the corresponding ALSA control does not exist on
+// the card.
+type AudioMixerState struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether an ALSA card was resolved. When false every other field is
+	// absent/empty.
+	Available bool `protobuf:"varint,1,opt,name=available,proto3" json:"available,omitempty"`
+	// Playback (speaker) volume percent.
+	SpeakerVolume *int32 `protobuf:"varint,2,opt,name=speaker_volume,json=speakerVolume,proto3,oneof" json:"speaker_volume,omitempty"`
+	// Capture (microphone) volume percent.
+	MicVolume *int32 `protobuf:"varint,3,opt,name=mic_volume,json=micVolume,proto3,oneof" json:"mic_volume,omitempty"`
+	// Auto Gain Control switch. When enabled the CM108B adjusts capture
+	// gain itself and manual mic_volume changes may appear ineffective.
+	AgcEnabled *bool `protobuf:"varint,4,opt,name=agc_enabled,json=agcEnabled,proto3,oneof" json:"agc_enabled,omitempty"`
+	// Resolved raw ALSA element name backing speaker_volume ("" if absent).
+	SpeakerControl string `protobuf:"bytes,5,opt,name=speaker_control,json=speakerControl,proto3" json:"speaker_control,omitempty"`
+	// Resolved raw ALSA element name backing mic_volume ("" if absent).
+	MicControl string `protobuf:"bytes,6,opt,name=mic_control,json=micControl,proto3" json:"mic_control,omitempty"`
+	// Resolved raw ALSA element name backing agc_enabled ("" if absent).
+	AgcControl    string `protobuf:"bytes,7,opt,name=agc_control,json=agcControl,proto3" json:"agc_control,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AudioMixerState) Reset() {
+	*x = AudioMixerState{}
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AudioMixerState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AudioMixerState) ProtoMessage() {}
+
+func (x *AudioMixerState) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AudioMixerState.ProtoReflect.Descriptor instead.
+func (*AudioMixerState) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_comms_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *AudioMixerState) GetAvailable() bool {
+	if x != nil {
+		return x.Available
+	}
+	return false
+}
+
+func (x *AudioMixerState) GetSpeakerVolume() int32 {
+	if x != nil && x.SpeakerVolume != nil {
+		return *x.SpeakerVolume
+	}
+	return 0
+}
+
+func (x *AudioMixerState) GetMicVolume() int32 {
+	if x != nil && x.MicVolume != nil {
+		return *x.MicVolume
+	}
+	return 0
+}
+
+func (x *AudioMixerState) GetAgcEnabled() bool {
+	if x != nil && x.AgcEnabled != nil {
+		return *x.AgcEnabled
+	}
+	return false
+}
+
+func (x *AudioMixerState) GetSpeakerControl() string {
+	if x != nil {
+		return x.SpeakerControl
+	}
+	return ""
+}
+
+func (x *AudioMixerState) GetMicControl() string {
+	if x != nil {
+		return x.MicControl
+	}
+	return ""
+}
+
+func (x *AudioMixerState) GetAgcControl() string {
+	if x != nil {
+		return x.AgcControl
+	}
+	return ""
+}
+
+// GetAudioMixerResponse carries the current hardware mixer state.
+type GetAudioMixerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         *AudioMixerState       `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAudioMixerResponse) Reset() {
+	*x = GetAudioMixerResponse{}
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAudioMixerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAudioMixerResponse) ProtoMessage() {}
+
+func (x *GetAudioMixerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAudioMixerResponse.ProtoReflect.Descriptor instead.
+func (*GetAudioMixerResponse) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_comms_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *GetAudioMixerResponse) GetState() *AudioMixerState {
+	if x != nil {
+		return x.State
+	}
+	return nil
+}
+
+// UpdateAudioMixerRequest applies a partial hardware mixer update: only
+// fields that are set are written. Volumes are persisted to the daemon
+// config and re-applied at startup; hardware VOL+/VOL- button presses are
+// deliberately not persisted.
+type UpdateAudioMixerRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SpeakerVolume *int32                 `protobuf:"varint,1,opt,name=speaker_volume,json=speakerVolume,proto3,oneof" json:"speaker_volume,omitempty"`
+	MicVolume     *int32                 `protobuf:"varint,2,opt,name=mic_volume,json=micVolume,proto3,oneof" json:"mic_volume,omitempty"`
+	AgcEnabled    *bool                  `protobuf:"varint,3,opt,name=agc_enabled,json=agcEnabled,proto3,oneof" json:"agc_enabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateAudioMixerRequest) Reset() {
+	*x = UpdateAudioMixerRequest{}
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateAudioMixerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateAudioMixerRequest) ProtoMessage() {}
+
+func (x *UpdateAudioMixerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateAudioMixerRequest.ProtoReflect.Descriptor instead.
+func (*UpdateAudioMixerRequest) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_comms_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *UpdateAudioMixerRequest) GetSpeakerVolume() int32 {
+	if x != nil && x.SpeakerVolume != nil {
+		return *x.SpeakerVolume
+	}
+	return 0
+}
+
+func (x *UpdateAudioMixerRequest) GetMicVolume() int32 {
+	if x != nil && x.MicVolume != nil {
+		return *x.MicVolume
+	}
+	return 0
+}
+
+func (x *UpdateAudioMixerRequest) GetAgcEnabled() bool {
+	if x != nil && x.AgcEnabled != nil {
+		return *x.AgcEnabled
+	}
+	return false
+}
+
+// UpdateAudioMixerResponse carries the mixer state after the update.
+type UpdateAudioMixerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         *AudioMixerState       `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateAudioMixerResponse) Reset() {
+	*x = UpdateAudioMixerResponse{}
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateAudioMixerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateAudioMixerResponse) ProtoMessage() {}
+
+func (x *UpdateAudioMixerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_openmanet_comms_v1_comms_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateAudioMixerResponse.ProtoReflect.Descriptor instead.
+func (*UpdateAudioMixerResponse) Descriptor() ([]byte, []int) {
+	return file_openmanet_comms_v1_comms_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *UpdateAudioMixerResponse) GetState() *AudioMixerState {
+	if x != nil {
+		return x.State
+	}
+	return nil
+}
+
 var File_openmanet_comms_v1_comms_proto protoreflect.FileDescriptor
 
 const file_openmanet_comms_v1_comms_proto_rawDesc = "" +
 	"\n" +
-	"\x1eopenmanet/comms/v1/comms.proto\x12\x12openmanet.comms.v1\"+\n" +
+	"\x1eopenmanet/comms/v1/comms.proto\x12\x12openmanet.comms.v1\x1a\x1bbuf/validate/validate.proto\"+\n" +
 	"\x13SendPTTEventRequest\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\x05R\x05event\"0\n" +
 	"\x14SendPTTEventResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"O\n" +
 	"\x14StreamAudioTxRequest\x12\x1b\n" +
 	"\topus_data\x18\x01 \x01(\fR\bopusData\x12\x1a\n" +
-	"\bsequence\x18\x02 \x01(\rR\bsequence\"l\n" +
+	"\bsequence\x18\x02 \x01(\rR\bsequence\"\x8a\x01\n" +
 	"\x15StreamAudioRxResponse\x12\x1b\n" +
 	"\topus_data\x18\x01 \x01(\fR\bopusData\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\rR\bsequence\x12\x1a\n" +
-	"\bcallsign\x18\x03 \x01(\tR\bcallsign\"@\n" +
+	"\bcallsign\x18\x03 \x01(\tR\bcallsign\x12\x1c\n" +
+	"\ttalkgroup\x18\x04 \x01(\x05R\ttalkgroup\"@\n" +
 	"\x15StreamAudioTxResponse\x12'\n" +
 	"\x0fframes_received\x18\x01 \x01(\rR\x0eframesReceived\"\x16\n" +
-	"\x14StreamAudioRxRequestB\xd7\x01\n" +
+	"\x14StreamAudioRxRequest\"\xc2\x02\n" +
+	"\x0fAudioMixerState\x12\x1c\n" +
+	"\tavailable\x18\x01 \x01(\bR\tavailable\x12*\n" +
+	"\x0espeaker_volume\x18\x02 \x01(\x05H\x00R\rspeakerVolume\x88\x01\x01\x12\"\n" +
+	"\n" +
+	"mic_volume\x18\x03 \x01(\x05H\x01R\tmicVolume\x88\x01\x01\x12$\n" +
+	"\vagc_enabled\x18\x04 \x01(\bH\x02R\n" +
+	"agcEnabled\x88\x01\x01\x12'\n" +
+	"\x0fspeaker_control\x18\x05 \x01(\tR\x0espeakerControl\x12\x1f\n" +
+	"\vmic_control\x18\x06 \x01(\tR\n" +
+	"micControl\x12\x1f\n" +
+	"\vagc_control\x18\a \x01(\tR\n" +
+	"agcControlB\x11\n" +
+	"\x0f_speaker_volumeB\r\n" +
+	"\v_mic_volumeB\x0e\n" +
+	"\f_agc_enabled\"R\n" +
+	"\x15GetAudioMixerResponse\x129\n" +
+	"\x05state\x18\x01 \x01(\v2#.openmanet.comms.v1.AudioMixerStateR\x05state\"\xd7\x01\n" +
+	"\x17UpdateAudioMixerRequest\x125\n" +
+	"\x0espeaker_volume\x18\x01 \x01(\x05B\t\xbaH\x06\x1a\x04\x18d(\x00H\x00R\rspeakerVolume\x88\x01\x01\x12-\n" +
+	"\n" +
+	"mic_volume\x18\x02 \x01(\x05B\t\xbaH\x06\x1a\x04\x18d(\x00H\x01R\tmicVolume\x88\x01\x01\x12$\n" +
+	"\vagc_enabled\x18\x03 \x01(\bH\x02R\n" +
+	"agcEnabled\x88\x01\x01B\x11\n" +
+	"\x0f_speaker_volumeB\r\n" +
+	"\v_mic_volumeB\x0e\n" +
+	"\f_agc_enabled\"U\n" +
+	"\x18UpdateAudioMixerResponse\x129\n" +
+	"\x05state\x18\x01 \x01(\v2#.openmanet.comms.v1.AudioMixerStateR\x05stateB\xd7\x01\n" +
 	"\x16com.openmanet.comms.v1B\n" +
 	"CommsProtoP\x01ZGgithub.com/openmanet/openmanetd/internal/api/openmanet/comms/v1;commsv1\xa2\x02\x03OCX\xaa\x02\x12Openmanet.Comms.V1\xca\x02\x12Openmanet\\Comms\\V1\xe2\x02\x1eOpenmanet\\Comms\\V1\\GPBMetadata\xea\x02\x14Openmanet::Comms::V1b\x06proto3"
 
@@ -353,21 +653,27 @@ func file_openmanet_comms_v1_comms_proto_rawDescGZIP() []byte {
 	return file_openmanet_comms_v1_comms_proto_rawDescData
 }
 
-var file_openmanet_comms_v1_comms_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_openmanet_comms_v1_comms_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_openmanet_comms_v1_comms_proto_goTypes = []any{
-	(*SendPTTEventRequest)(nil),   // 0: openmanet.comms.v1.SendPTTEventRequest
-	(*SendPTTEventResponse)(nil),  // 1: openmanet.comms.v1.SendPTTEventResponse
-	(*StreamAudioTxRequest)(nil),  // 2: openmanet.comms.v1.StreamAudioTxRequest
-	(*StreamAudioRxResponse)(nil), // 3: openmanet.comms.v1.StreamAudioRxResponse
-	(*StreamAudioTxResponse)(nil), // 4: openmanet.comms.v1.StreamAudioTxResponse
-	(*StreamAudioRxRequest)(nil),  // 5: openmanet.comms.v1.StreamAudioRxRequest
+	(*SendPTTEventRequest)(nil),      // 0: openmanet.comms.v1.SendPTTEventRequest
+	(*SendPTTEventResponse)(nil),     // 1: openmanet.comms.v1.SendPTTEventResponse
+	(*StreamAudioTxRequest)(nil),     // 2: openmanet.comms.v1.StreamAudioTxRequest
+	(*StreamAudioRxResponse)(nil),    // 3: openmanet.comms.v1.StreamAudioRxResponse
+	(*StreamAudioTxResponse)(nil),    // 4: openmanet.comms.v1.StreamAudioTxResponse
+	(*StreamAudioRxRequest)(nil),     // 5: openmanet.comms.v1.StreamAudioRxRequest
+	(*AudioMixerState)(nil),          // 6: openmanet.comms.v1.AudioMixerState
+	(*GetAudioMixerResponse)(nil),    // 7: openmanet.comms.v1.GetAudioMixerResponse
+	(*UpdateAudioMixerRequest)(nil),  // 8: openmanet.comms.v1.UpdateAudioMixerRequest
+	(*UpdateAudioMixerResponse)(nil), // 9: openmanet.comms.v1.UpdateAudioMixerResponse
 }
 var file_openmanet_comms_v1_comms_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	6, // 0: openmanet.comms.v1.GetAudioMixerResponse.state:type_name -> openmanet.comms.v1.AudioMixerState
+	6, // 1: openmanet.comms.v1.UpdateAudioMixerResponse.state:type_name -> openmanet.comms.v1.AudioMixerState
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_openmanet_comms_v1_comms_proto_init() }
@@ -375,13 +681,15 @@ func file_openmanet_comms_v1_comms_proto_init() {
 	if File_openmanet_comms_v1_comms_proto != nil {
 		return
 	}
+	file_openmanet_comms_v1_comms_proto_msgTypes[6].OneofWrappers = []any{}
+	file_openmanet_comms_v1_comms_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openmanet_comms_v1_comms_proto_rawDesc), len(file_openmanet_comms_v1_comms_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

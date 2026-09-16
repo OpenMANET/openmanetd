@@ -1,0 +1,31 @@
+/* =============================================================================
+ * QrScanInput.css — photo / paste input for a "share mesh" QR code
+ * ============================================================================= */
+
+.qr-scan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Visually hidden but still focusable/clickable by the button. */
+.qr-scan-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.qr-scan-row {
+  display: flex;
+  gap: 8px;
+}
+
+/* Primary mobile action: 44 px touch target. */
+.qr-scan-row .lat-btn,
+.qr-scan .qr-scan-use {
+  flex: 1;
+  min-height: 44px;
+}

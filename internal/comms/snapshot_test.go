@@ -6,6 +6,7 @@ import (
 	"github.com/openmanet/openmanetd/internal/comms/audio"
 	"github.com/openmanet/openmanetd/internal/comms/control"
 	"github.com/openmanet/openmanetd/internal/comms/rtp"
+	"github.com/openmanet/openmanetd/internal/comms/talkgroup"
 	"github.com/openmanet/openmanetd/internal/comms/webaudio"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -55,8 +56,8 @@ func TestService_Snapshot_Populated(t *testing.T) {
 
 	bridge := webaudio.NewBridge(zerolog.Nop(), nil)
 	// Drive the bridge counters so the snapshot has non-zero values.
-	bridge.PushRxFrame([]byte{0x01})
-	bridge.PushRxFrame([]byte{0x02})
+	bridge.PushRxFrame(1, []byte{0x01})
+	bridge.PushRxFrame(1, []byte{0x02})
 
 	port0 := &PortChannel{
 		cfg:    McastPortConfig{Address: "239.0.0.1", Port: 5000},
@@ -243,6 +244,27 @@ func TestCommsSnapshotter_RefreshReadsDefault(t *testing.T) {
 	SetDefault(nil)
 	a.Refresh()
 	assert.False(t, data.Enabled)
+}
+
+// TestSnapshot_TalkGroupFields verifies the talk group section of
+// CommsSnapshot: the active channel and dropped-events counter reflect the
+// runtime, and the nil-receiver-safe Announcer/GPIOSel fills read as zero
+// when neither subsystem is wired into the test runtime.
+func TestSnapshot_TalkGroupFields(t *testing.T) {
+	t.Parallel()
+
+	svc := newSelectTestService(t, 3)
+	require.NoError(t, svc.SelectTalkGroup(2, talkgroup.SourceRPC))
+	svc.Rt.Events.NoteDropped()
+
+	var dst CommsSnapshot
+
+	svc.Snapshot(&dst)
+
+	assert.Equal(t, 2, dst.ActiveTalkgroup)
+	assert.Equal(t, uint64(1), dst.TalkgroupEventsDropped)
+	assert.Zero(t, dst.Announcer.Plays, "nil announcer reads as zero")
+	assert.Zero(t, dst.GPIOSelector.Transitions, "nil selector reads as zero")
 }
 
 // TestBroadcastEncoderAudioSnapshot_ZeroAlloc exercises the audio encoder

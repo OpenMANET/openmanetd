@@ -14,6 +14,7 @@ import (
 	dashboardconnect "github.com/openmanet/openmanetd/internal/api/openmanet/dashboard/v1/dashboardv1connect"
 	gnssconnect "github.com/openmanet/openmanetd/internal/api/openmanet/gnss/v1/gnssv1connect"
 	logsconnect "github.com/openmanet/openmanetd/internal/api/openmanet/logs/v1/logsv1connect"
+	meshjoinconnect "github.com/openmanet/openmanetd/internal/api/openmanet/mesh_join/v1/mesh_joinv1connect"
 	meshtopoconnect "github.com/openmanet/openmanetd/internal/api/openmanet/mesh_topology/v1/mesh_topologyv1connect"
 	niconnect "github.com/openmanet/openmanetd/internal/api/openmanet/network_interface/v1/network_interfacev1connect"
 	services "github.com/openmanet/openmanetd/internal/api/openmanet/service/v1/servicev1connect"
@@ -44,10 +45,11 @@ type APIServer struct {
 	Log                   zerolog.Logger
 	DB                    *models.Queries
 	ApiServer             *http.Server
-	Wifi                  *mgmt.WirelessConfig
+	Wifi                  mgmt.WirelessProvider
 	GPS                   *gpsd.GPSService
 	BLOSManager           blos.BLOSLifecycle
 	CommsManager          comms.CommsLifecycle
+	Mixer                 handlers.AudioMixer
 	Interfaces            handlers.InterfaceProvider
 	DHCP                  handlers.DHCPConfigProvider
 	Leases                handlers.LeaseProvider
@@ -99,11 +101,10 @@ func NewAPIServer(cfg APIServer) *APIServer {
 
 	// Wrap the wireless netlink provider with a TTL cache so
 	// Interfaces() + per-iface StationInfo() are fetched once per TTL
-	// and shared across all handlers that read wifi state.
-	var wifi mgmt.WirelessProvider
-	if cfg.Wifi != nil {
-		wifi = handlers.NewCachedWirelessProvider(cfg.Wifi, handlers.DefaultWirelessCacheTTL)
-	}
+	// and shared across all handlers that read wifi state. The daemon
+	// normally passes an already-cached provider (shared with the
+	// instrumentation snapshotter), which is reused as is.
+	wifi := handlers.EnsureCachedWireless(cfg.Wifi)
 
 	nodeSvc := &handlers.NodeService{
 		DB:  cfg.DB,
@@ -146,6 +147,7 @@ func NewAPIServer(cfg APIServer) *APIServer {
 		Log:          cfg.Log,
 		CommsManager: cfg.CommsManager,
 		Service:      comms.Default,
+		Mixer:        cfg.Mixer,
 	}, connect.WithInterceptors(validateInterceptor)))
 
 	api.Handle(blosconnect.NewBLOSServiceHandler(&handlers.BLOSService{
@@ -207,6 +209,7 @@ func NewAPIServer(cfg APIServer) *APIServer {
 		HostnameSetter: cfg.SetupHostnameSetter,
 		Reloader:       cfg.SetupReloader,
 		Iwinfo:         iwinfo.NewClient(),
+		WirelessStatus: network.NewDefaultWirelessStatusProvider(),
 		Interfaces:     interfaces,
 		RNG:            cfg.SetupRNG,
 	}, connect.WithInterceptors(validateInterceptor)))
@@ -244,6 +247,16 @@ func NewAPIServer(cfg APIServer) *APIServer {
 	}
 
 	api.Handle(wificonfigconnect.NewWifiConfigServiceHandler(wifiSvc, connect.WithInterceptors(validateInterceptor)))
+
+	// MeshJoinService shares this node's mesh credentials as a QR code
+	// and joins the node from a scanned code. It reads the same UCI
+	// wireless tree the wifi service does. Session-gated like every
+	// other settings RPC (not in isAPISkipPath).
+	api.Handle(meshjoinconnect.NewMeshJoinServiceHandler(&handlers.MeshJoinService{
+		Log:          cfg.Log.With().Str("service", "mesh_join").Logger(),
+		ConfigReader: wifiSvc.ConfigReader,
+		Radios:       wifiSvc,
+	}, connect.WithInterceptors(validateInterceptor)))
 
 	api.Handle(logsconnect.NewLogsServiceHandler(&handlers.LogsService{
 		Log:     cfg.Log,

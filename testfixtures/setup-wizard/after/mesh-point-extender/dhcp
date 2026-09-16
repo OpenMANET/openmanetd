@@ -1,4 +1,3 @@
-
 config dnsmasq
         option domainneeded '1'
         option localise_queries '1'
@@ -12,19 +11,13 @@ config dnsmasq
         option localservice '1'
         option ednspacket_max '1232'
 
-config dhcp 'lan'
-        option interface 'lan'
-        option start '100'
-        option limit '150'
-        option leasetime '12h'
-        option ignore '1'
-
 config dhcp 'wan'
         option interface 'wan'
         option ignore '1'
 
 config dhcp 'ahwlan'
-        option start '415'
+        option start '132'
         option limit '16'
-        option leasetime '3m'
+        option leasetime '12h'
         option interface 'ahwlan'
+        option force '1'

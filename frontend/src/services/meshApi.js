@@ -47,12 +47,30 @@ function mapNodes(nodes) {
   return (nodes ?? []).map((n) => ({ hostname: n.hostname, ip: n.ipaddr }));
 }
 
+// mapLinkRate flattens a MeshNeighbor.LinkRate; null when the daemon
+// predates the field. phy is the numeric LinkRate.Phy enum
+// (0 unspecified, 1 legacy, 2 HT, 3 VHT, 4 HE, 5 EHT); mcs/nss are -1
+// when the driver did not report them.
+function mapLinkRate(r) {
+  if (!r) return null;
+  return {
+    bitrateKbps: r.bitrateKbps ?? 0,
+    phy: r.phy ?? 0,
+    widthMhz: r.widthMhz ?? 0,
+    mcs: r.mcs ?? -1,
+    nss: r.nss ?? -1,
+  };
+}
+
 function mapNeighbors(neighbors) {
   return (neighbors ?? []).map((n) => ({
     name: n.neighbor,
     mac: n.hardwareAddress,
     signal: n.signal,
     throughput: n.throughput,
+    iface: n.interface ?? '',
+    tx: mapLinkRate(n.tx),
+    rx: mapLinkRate(n.rx),
   }));
 }
 

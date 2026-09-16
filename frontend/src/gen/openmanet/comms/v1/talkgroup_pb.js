@@ -2,14 +2,15 @@
 // @generated from file openmanet/comms/v1/talkgroup.proto (package openmanet.comms.v1, syntax proto3)
 /* eslint-disable */
 
-import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, tsEnum } from "@bufbuild/protobuf/codegenv2";
 import { file_buf_validate_validate } from "../../../buf/validate/validate_pb";
+import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 
 /**
  * Describes the file openmanet/comms/v1/talkgroup.proto.
  */
 export const file_openmanet_comms_v1_talkgroup = /*@__PURE__*/
-  fileDesc("CiJvcGVubWFuZXQvY29tbXMvdjEvdGFsa2dyb3VwLnByb3RvEhJvcGVubWFuZXQuY29tbXMudjEiigEKDlRhbGtHcm91cFN0YXRlEhEKCXRhbGtncm91cBgBIAEoBRIPCgdhZGRyZXNzGAIgASgJEgwKBHBvcnQYAyABKAUSFAoMc2VuZF9lbmFibGVkGAQgASgIEhcKD3JlY2VpdmVfZW5hYmxlZBgFIAEoCBIXCg9yZW1vdGVfY2FsbHNpZ24YBiABKAkiUgoXU2V0U2VuZFRhbGtHcm91cFJlcXVlc3QSJgoJdGFsa2dyb3VwGAEgASgFQhO6SBAaDkABQANABUAHQAkYICgBEg8KB2VuYWJsZWQYAiABKAgiPAoYU2V0U2VuZFRhbGtHcm91cFJlc3BvbnNlEg8KB3N1Y2Nlc3MYASABKAgSDwoHbWVzc2FnZRgCIAEoCSJVChpTZXRSZWNlaXZlVGFsa0dyb3VwUmVxdWVzdBImCgl0YWxrZ3JvdXAYASABKAVCE7pIEBoOQAFAA0AFQAdACRggKAESDwoHZW5hYmxlZBgCIAEoCCI/ChtTZXRSZWNlaXZlVGFsa0dyb3VwUmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJQtsBChZjb20ub3Blbm1hbmV0LmNvbW1zLnYxQg5UYWxrZ3JvdXBQcm90b1ABWkdnaXRodWIuY29tL29wZW5tYW5ldC9vcGVubWFuZXRkL2ludGVybmFsL2FwaS9vcGVubWFuZXQvY29tbXMvdjE7Y29tbXN2MaICA09DWKoCEk9wZW5tYW5ldC5Db21tcy5WMcoCEk9wZW5tYW5ldFxDb21tc1xWMeICHk9wZW5tYW5ldFxDb21tc1xWMVxHUEJNZXRhZGF0YeoCFE9wZW5tYW5ldDo6Q29tbXM6OlYxYgZwcm90bzM", [file_buf_validate_validate]);
+  fileDesc("CiJvcGVubWFuZXQvY29tbXMvdjEvdGFsa2dyb3VwLnByb3RvEhJvcGVubWFuZXQuY29tbXMudjEiigEKDlRhbGtHcm91cFN0YXRlEhEKCXRhbGtncm91cBgBIAEoBRIPCgdhZGRyZXNzGAIgASgJEgwKBHBvcnQYAyABKAUSFAoMc2VuZF9lbmFibGVkGAQgASgIEhcKD3JlY2VpdmVfZW5hYmxlZBgFIAEoCBIXCg9yZW1vdGVfY2FsbHNpZ24YBiABKAkiUgoXU2V0U2VuZFRhbGtHcm91cFJlcXVlc3QSJgoJdGFsa2dyb3VwGAEgASgFQhO6SBAaDkABQANABUAHQAkYICgBEg8KB2VuYWJsZWQYAiABKAgiPAoYU2V0U2VuZFRhbGtHcm91cFJlc3BvbnNlEg8KB3N1Y2Nlc3MYASABKAgSDwoHbWVzc2FnZRgCIAEoCSJVChpTZXRSZWNlaXZlVGFsa0dyb3VwUmVxdWVzdBImCgl0YWxrZ3JvdXAYASABKAVCE7pIEBoOQAFAA0AFQAdACRggKAESDwoHZW5hYmxlZBgCIAEoCCI/ChtTZXRSZWNlaXZlVGFsa0dyb3VwUmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJIjYKFlNlbGVjdFRhbGtHcm91cFJlcXVlc3QSHAoJdGFsa2dyb3VwGAEgASgFQgm6SAYaBBggKAEiOwoXU2VsZWN0VGFsa0dyb3VwUmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIPCgdtZXNzYWdlGAIgASgJIoICCg5UYWxrR3JvdXBFdmVudBI0CgRraW5kGAEgASgOMiYub3Blbm1hbmV0LmNvbW1zLnYxLlRhbGtHcm91cEV2ZW50S2luZBIRCgl0YWxrZ3JvdXAYAiABKAUSFgoOcHJldl90YWxrZ3JvdXAYAyABKAUSFAoMc2VuZF9lbmFibGVkGAQgASgIEhcKD3JlY2VpdmVfZW5hYmxlZBgFIAEoCBI4CgZzb3VyY2UYBiABKA4yKC5vcGVubWFuZXQuY29tbXMudjEuVGFsa0dyb3VwRXZlbnRTb3VyY2USJgoCYXQYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIlIKHVN0cmVhbVRhbGtHcm91cEV2ZW50c1Jlc3BvbnNlEjEKBWV2ZW50GAEgASgLMiIub3Blbm1hbmV0LmNvbW1zLnYxLlRhbGtHcm91cEV2ZW50KoQBChJUYWxrR3JvdXBFdmVudEtpbmQSJQohVEFMS19HUk9VUF9FVkVOVF9LSU5EX1VOU1BFQ0lGSUVEEAASIgoeVEFMS19HUk9VUF9FVkVOVF9LSU5EX1NFTEVDVEVEEAESIwofVEFMS19HUk9VUF9FVkVOVF9LSU5EX0RJUkVDVElPThACKqQBChRUYWxrR3JvdXBFdmVudFNvdXJjZRInCiNUQUxLX0dST1VQX0VWRU5UX1NPVVJDRV9VTlNQRUNJRklFRBAAEh8KG1RBTEtfR1JPVVBfRVZFTlRfU09VUkNFX1JQQxABEiAKHFRBTEtfR1JPVVBfRVZFTlRfU09VUkNFX0dQSU8QAhIgChxUQUxLX0dST1VQX0VWRU5UX1NPVVJDRV9JTklUEANC2wEKFmNvbS5vcGVubWFuZXQuY29tbXMudjFCDlRhbGtncm91cFByb3RvUAFaR2dpdGh1Yi5jb20vb3Blbm1hbmV0L29wZW5tYW5ldGQvaW50ZXJuYWwvYXBpL29wZW5tYW5ldC9jb21tcy92MTtjb21tc3YxogIDT0NYqgIST3Blbm1hbmV0LkNvbW1zLlYxygIST3Blbm1hbmV0XENvbW1zXFYx4gIeT3Blbm1hbmV0XENvbW1zXFYxXEdQQk1ldGFkYXRh6gIUT3Blbm1hbmV0OjpDb21tczo6VjFiBnByb3RvMw", [file_buf_validate_validate, file_google_protobuf_timestamp]);
 
 /**
  * Describes the message openmanet.comms.v1.TalkGroupState.
@@ -45,4 +46,62 @@ export const SetReceiveTalkGroupRequestSchema = /*@__PURE__*/
  */
 export const SetReceiveTalkGroupResponseSchema = /*@__PURE__*/
   messageDesc(file_openmanet_comms_v1_talkgroup, 4);
+
+/**
+ * Describes the message openmanet.comms.v1.SelectTalkGroupRequest.
+ * Use `create(SelectTalkGroupRequestSchema)` to create a new message.
+ */
+export const SelectTalkGroupRequestSchema = /*@__PURE__*/
+  messageDesc(file_openmanet_comms_v1_talkgroup, 5);
+
+/**
+ * Describes the message openmanet.comms.v1.SelectTalkGroupResponse.
+ * Use `create(SelectTalkGroupResponseSchema)` to create a new message.
+ */
+export const SelectTalkGroupResponseSchema = /*@__PURE__*/
+  messageDesc(file_openmanet_comms_v1_talkgroup, 6);
+
+/**
+ * Describes the message openmanet.comms.v1.TalkGroupEvent.
+ * Use `create(TalkGroupEventSchema)` to create a new message.
+ */
+export const TalkGroupEventSchema = /*@__PURE__*/
+  messageDesc(file_openmanet_comms_v1_talkgroup, 7);
+
+/**
+ * Describes the message openmanet.comms.v1.StreamTalkGroupEventsResponse.
+ * Use `create(StreamTalkGroupEventsResponseSchema)` to create a new message.
+ */
+export const StreamTalkGroupEventsResponseSchema = /*@__PURE__*/
+  messageDesc(file_openmanet_comms_v1_talkgroup, 8);
+
+/**
+ * Describes the enum openmanet.comms.v1.TalkGroupEventKind.
+ */
+export const TalkGroupEventKindSchema = /*@__PURE__*/
+  enumDesc(file_openmanet_comms_v1_talkgroup, 0);
+
+/**
+ * TalkGroupEventKind distinguishes exclusive selections from single
+ * direction toggles. Values mirror the daemon's internal talkgroup.Kind.
+ *
+ * @generated from enum openmanet.comms.v1.TalkGroupEventKind
+ */
+export const TalkGroupEventKind = /*@__PURE__*/
+  tsEnum(TalkGroupEventKindSchema);
+
+/**
+ * Describes the enum openmanet.comms.v1.TalkGroupEventSource.
+ */
+export const TalkGroupEventSourceSchema = /*@__PURE__*/
+  enumDesc(file_openmanet_comms_v1_talkgroup, 1);
+
+/**
+ * TalkGroupEventSource identifies which control surface produced the
+ * change. Values mirror the daemon's internal talkgroup.Source.
+ *
+ * @generated from enum openmanet.comms.v1.TalkGroupEventSource
+ */
+export const TalkGroupEventSource = /*@__PURE__*/
+  tsEnum(TalkGroupEventSourceSchema);
 

@@ -39,6 +39,12 @@ type CommsServiceClient interface {
 	SetSendTalkGroup(ctx context.Context, in *SetSendTalkGroupRequest, opts ...grpc.CallOption) (*SetSendTalkGroupResponse, error)
 	// Enables or disables RTP reception on the specified talkgroup.
 	SetReceiveTalkGroup(ctx context.Context, in *SetReceiveTalkGroupRequest, opts ...grpc.CallOption) (*SetReceiveTalkGroupResponse, error)
+	// SelectTalkGroup makes the requested talk group the single active
+	// channel: RX+TX enabled on it, all other groups disabled.
+	SelectTalkGroup(ctx context.Context, in *SelectTalkGroupRequest, opts ...grpc.CallOption) (*SelectTalkGroupResponse, error)
+	// StreamTalkGroupEvents streams talk group selection and direction
+	// toggle changes to the client.
+	StreamTalkGroupEvents(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (CommsService_StreamTalkGroupEventsClient, error)
 	// SendPTTEvent sends a PTT state change from the web client.
 	SendPTTEvent(ctx context.Context, in *SendPTTEventRequest, opts ...grpc.CallOption) (*SendPTTEventResponse, error)
 	// StreamAudioTx is a client-streaming RPC: the web client streams
@@ -48,6 +54,12 @@ type CommsServiceClient interface {
 	// StreamAudioRx is a server-streaming RPC: the server streams
 	// Opus-encoded audio frames received from the mesh back to the web client.
 	StreamAudioRx(ctx context.Context, in *StreamAudioRxRequest, opts ...grpc.CallOption) (CommsService_StreamAudioRxClient, error)
+	// Reads the device's hardware audio mixer state. Never fails on a
+	// missing sound card — available=false is the "no card" signal.
+	GetAudioMixer(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetAudioMixerResponse, error)
+	// Applies the provided fields to the hardware mixer and persists
+	// volumes and AGC so the levels survive a reboot.
+	UpdateAudioMixer(ctx context.Context, in *UpdateAudioMixerRequest, opts ...grpc.CallOption) (*UpdateAudioMixerResponse, error)
 }
 
 type commsServiceClient struct {
@@ -103,6 +115,47 @@ func (c *commsServiceClient) SetReceiveTalkGroup(ctx context.Context, in *SetRec
 	return out, nil
 }
 
+func (c *commsServiceClient) SelectTalkGroup(ctx context.Context, in *SelectTalkGroupRequest, opts ...grpc.CallOption) (*SelectTalkGroupResponse, error) {
+	out := new(SelectTalkGroupResponse)
+	err := c.cc.Invoke(ctx, "/openmanet.comms.v1.CommsService/SelectTalkGroup", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *commsServiceClient) StreamTalkGroupEvents(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (CommsService_StreamTalkGroupEventsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &CommsService_ServiceDesc.Streams[0], "/openmanet.comms.v1.CommsService/StreamTalkGroupEvents", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &commsServiceStreamTalkGroupEventsClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type CommsService_StreamTalkGroupEventsClient interface {
+	Recv() (*StreamTalkGroupEventsResponse, error)
+	grpc.ClientStream
+}
+
+type commsServiceStreamTalkGroupEventsClient struct {
+	grpc.ClientStream
+}
+
+func (x *commsServiceStreamTalkGroupEventsClient) Recv() (*StreamTalkGroupEventsResponse, error) {
+	m := new(StreamTalkGroupEventsResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (c *commsServiceClient) SendPTTEvent(ctx context.Context, in *SendPTTEventRequest, opts ...grpc.CallOption) (*SendPTTEventResponse, error) {
 	out := new(SendPTTEventResponse)
 	err := c.cc.Invoke(ctx, "/openmanet.comms.v1.CommsService/SendPTTEvent", in, out, opts...)
@@ -113,7 +166,7 @@ func (c *commsServiceClient) SendPTTEvent(ctx context.Context, in *SendPTTEventR
 }
 
 func (c *commsServiceClient) StreamAudioTx(ctx context.Context, opts ...grpc.CallOption) (CommsService_StreamAudioTxClient, error) {
-	stream, err := c.cc.NewStream(ctx, &CommsService_ServiceDesc.Streams[0], "/openmanet.comms.v1.CommsService/StreamAudioTx", opts...)
+	stream, err := c.cc.NewStream(ctx, &CommsService_ServiceDesc.Streams[1], "/openmanet.comms.v1.CommsService/StreamAudioTx", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +200,7 @@ func (x *commsServiceStreamAudioTxClient) CloseAndRecv() (*StreamAudioTxResponse
 }
 
 func (c *commsServiceClient) StreamAudioRx(ctx context.Context, in *StreamAudioRxRequest, opts ...grpc.CallOption) (CommsService_StreamAudioRxClient, error) {
-	stream, err := c.cc.NewStream(ctx, &CommsService_ServiceDesc.Streams[1], "/openmanet.comms.v1.CommsService/StreamAudioRx", opts...)
+	stream, err := c.cc.NewStream(ctx, &CommsService_ServiceDesc.Streams[2], "/openmanet.comms.v1.CommsService/StreamAudioRx", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +231,24 @@ func (x *commsServiceStreamAudioRxClient) Recv() (*StreamAudioRxResponse, error)
 	return m, nil
 }
 
+func (c *commsServiceClient) GetAudioMixer(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetAudioMixerResponse, error) {
+	out := new(GetAudioMixerResponse)
+	err := c.cc.Invoke(ctx, "/openmanet.comms.v1.CommsService/GetAudioMixer", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *commsServiceClient) UpdateAudioMixer(ctx context.Context, in *UpdateAudioMixerRequest, opts ...grpc.CallOption) (*UpdateAudioMixerResponse, error) {
+	out := new(UpdateAudioMixerResponse)
+	err := c.cc.Invoke(ctx, "/openmanet.comms.v1.CommsService/UpdateAudioMixer", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CommsServiceServer is the server API for CommsService service.
 // All implementations must embed UnimplementedCommsServiceServer
 // for forward compatibility
@@ -192,6 +263,12 @@ type CommsServiceServer interface {
 	SetSendTalkGroup(context.Context, *SetSendTalkGroupRequest) (*SetSendTalkGroupResponse, error)
 	// Enables or disables RTP reception on the specified talkgroup.
 	SetReceiveTalkGroup(context.Context, *SetReceiveTalkGroupRequest) (*SetReceiveTalkGroupResponse, error)
+	// SelectTalkGroup makes the requested talk group the single active
+	// channel: RX+TX enabled on it, all other groups disabled.
+	SelectTalkGroup(context.Context, *SelectTalkGroupRequest) (*SelectTalkGroupResponse, error)
+	// StreamTalkGroupEvents streams talk group selection and direction
+	// toggle changes to the client.
+	StreamTalkGroupEvents(*emptypb.Empty, CommsService_StreamTalkGroupEventsServer) error
 	// SendPTTEvent sends a PTT state change from the web client.
 	SendPTTEvent(context.Context, *SendPTTEventRequest) (*SendPTTEventResponse, error)
 	// StreamAudioTx is a client-streaming RPC: the web client streams
@@ -201,6 +278,12 @@ type CommsServiceServer interface {
 	// StreamAudioRx is a server-streaming RPC: the server streams
 	// Opus-encoded audio frames received from the mesh back to the web client.
 	StreamAudioRx(*StreamAudioRxRequest, CommsService_StreamAudioRxServer) error
+	// Reads the device's hardware audio mixer state. Never fails on a
+	// missing sound card — available=false is the "no card" signal.
+	GetAudioMixer(context.Context, *emptypb.Empty) (*GetAudioMixerResponse, error)
+	// Applies the provided fields to the hardware mixer and persists
+	// volumes and AGC so the levels survive a reboot.
+	UpdateAudioMixer(context.Context, *UpdateAudioMixerRequest) (*UpdateAudioMixerResponse, error)
 	mustEmbedUnimplementedCommsServiceServer()
 }
 
@@ -223,6 +306,12 @@ func (UnimplementedCommsServiceServer) SetSendTalkGroup(context.Context, *SetSen
 func (UnimplementedCommsServiceServer) SetReceiveTalkGroup(context.Context, *SetReceiveTalkGroupRequest) (*SetReceiveTalkGroupResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetReceiveTalkGroup not implemented")
 }
+func (UnimplementedCommsServiceServer) SelectTalkGroup(context.Context, *SelectTalkGroupRequest) (*SelectTalkGroupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SelectTalkGroup not implemented")
+}
+func (UnimplementedCommsServiceServer) StreamTalkGroupEvents(*emptypb.Empty, CommsService_StreamTalkGroupEventsServer) error {
+	return status.Errorf(codes.Unimplemented, "method StreamTalkGroupEvents not implemented")
+}
 func (UnimplementedCommsServiceServer) SendPTTEvent(context.Context, *SendPTTEventRequest) (*SendPTTEventResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SendPTTEvent not implemented")
 }
@@ -231,6 +320,12 @@ func (UnimplementedCommsServiceServer) StreamAudioTx(CommsService_StreamAudioTxS
 }
 func (UnimplementedCommsServiceServer) StreamAudioRx(*StreamAudioRxRequest, CommsService_StreamAudioRxServer) error {
 	return status.Errorf(codes.Unimplemented, "method StreamAudioRx not implemented")
+}
+func (UnimplementedCommsServiceServer) GetAudioMixer(context.Context, *emptypb.Empty) (*GetAudioMixerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAudioMixer not implemented")
+}
+func (UnimplementedCommsServiceServer) UpdateAudioMixer(context.Context, *UpdateAudioMixerRequest) (*UpdateAudioMixerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateAudioMixer not implemented")
 }
 func (UnimplementedCommsServiceServer) mustEmbedUnimplementedCommsServiceServer() {}
 
@@ -335,6 +430,45 @@ func _CommsService_SetReceiveTalkGroup_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CommsService_SelectTalkGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelectTalkGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CommsServiceServer).SelectTalkGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/openmanet.comms.v1.CommsService/SelectTalkGroup",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CommsServiceServer).SelectTalkGroup(ctx, req.(*SelectTalkGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CommsService_StreamTalkGroupEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(emptypb.Empty)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(CommsServiceServer).StreamTalkGroupEvents(m, &commsServiceStreamTalkGroupEventsServer{stream})
+}
+
+type CommsService_StreamTalkGroupEventsServer interface {
+	Send(*StreamTalkGroupEventsResponse) error
+	grpc.ServerStream
+}
+
+type commsServiceStreamTalkGroupEventsServer struct {
+	grpc.ServerStream
+}
+
+func (x *commsServiceStreamTalkGroupEventsServer) Send(m *StreamTalkGroupEventsResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
 func _CommsService_SendPTTEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SendPTTEventRequest)
 	if err := dec(in); err != nil {
@@ -400,6 +534,42 @@ func (x *commsServiceStreamAudioRxServer) Send(m *StreamAudioRxResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
+func _CommsService_GetAudioMixer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CommsServiceServer).GetAudioMixer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/openmanet.comms.v1.CommsService/GetAudioMixer",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CommsServiceServer).GetAudioMixer(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CommsService_UpdateAudioMixer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateAudioMixerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CommsServiceServer).UpdateAudioMixer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/openmanet.comms.v1.CommsService/UpdateAudioMixer",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CommsServiceServer).UpdateAudioMixer(ctx, req.(*UpdateAudioMixerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CommsService_ServiceDesc is the grpc.ServiceDesc for CommsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -428,11 +598,28 @@ var CommsService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CommsService_SetReceiveTalkGroup_Handler,
 		},
 		{
+			MethodName: "SelectTalkGroup",
+			Handler:    _CommsService_SelectTalkGroup_Handler,
+		},
+		{
 			MethodName: "SendPTTEvent",
 			Handler:    _CommsService_SendPTTEvent_Handler,
 		},
+		{
+			MethodName: "GetAudioMixer",
+			Handler:    _CommsService_GetAudioMixer_Handler,
+		},
+		{
+			MethodName: "UpdateAudioMixer",
+			Handler:    _CommsService_UpdateAudioMixer_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamTalkGroupEvents",
+			Handler:       _CommsService_StreamTalkGroupEvents_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "StreamAudioTx",
 			Handler:       _CommsService_StreamAudioTx_Handler,

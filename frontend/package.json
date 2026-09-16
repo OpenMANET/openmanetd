@@ -15,7 +15,7 @@
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.12.1",
+    "@bufbuild/protobuf": "^2.13.0",
     "@connectrpc/connect": "^2.1.2",
     "@connectrpc/connect-web": "^2.1.2",
     "@xterm/addon-fit": "^0.11.0",
@@ -23,6 +23,7 @@
     "@xterm/xterm": "^6.0.0",
     "d3-selection": "^3.0.0",
     "d3-zoom": "^3.0.0",
+    "jsqr": "^1.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.2"
@@ -38,7 +39,7 @@
     "eslint": "^9.0.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "eslint-plugin-react-refresh": "^0.5.3",
+    "eslint-plugin-react-refresh": "^0.5.4",
     "globals": "^17.7.0",
     "jsdom": "^30.0.1",
     "vite": "^8.2.1",

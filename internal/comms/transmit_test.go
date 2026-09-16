@@ -9,7 +9,9 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/openmanet/openmanetd/internal/comms/audiopool"
 	"github.com/openmanet/openmanetd/internal/comms/control"
 	"github.com/openmanet/openmanetd/internal/comms/rtp"
 	"github.com/openmanet/openmanetd/internal/comms/webaudio"
@@ -32,7 +34,6 @@ func newTestRuntime(stream BroadcastCapture) *CommsRuntime {
 		Ports:           []*PortChannel{pc},
 		BeepBufferStart: []int16{100, 200},
 		BeepBufferStop:  []int16{300, 400},
-		Decoder:         &mockDecoder{},
 	}
 	rt.SetBroadcast(stream)
 
@@ -642,10 +643,10 @@ func TestRun_AuxEvents_IgnoredWhenSourceLacksAuxInterface(t *testing.T) {
 
 // ─── Additional beginTransmission / endTransmission edge cases ────────────────
 
-// TestEndTransmission_QueuesStopBeepToAllPorts verifies that endTransmission
-// queues beepBufferStop to every configured port, mirroring the multi-port
-// start-beep behavior tested by TestBeginTransmission_BeepSentToAllPorts.
-func TestEndTransmission_QueuesStopBeepToAllPorts(t *testing.T) {
+// TestEndTransmission_QueuesStopBeepToOnePort verifies that endTransmission
+// queues beepBufferStop to exactly one port, mirroring the single-beep
+// start-beep contract tested by TestBeginTransmission_BeepSentToOnePort.
+func TestEndTransmission_QueuesStopBeepToOnePort(t *testing.T) {
 	pc0 := &PortChannel{cfg: McastPortConfig{Send: true, Receive: true}}
 	pc0.PlaybackBuffer = make(chan []int16, 16)
 
@@ -656,7 +657,6 @@ func TestEndTransmission_QueuesStopBeepToAllPorts(t *testing.T) {
 		Ports:           []*PortChannel{pc0, pc1},
 		BeepBufferStart: []int16{100, 200},
 		BeepBufferStop:  []int16{300, 400},
-		Decoder:         &mockDecoder{},
 	}
 	rt.SetBroadcast(&mockStream{})
 
@@ -675,16 +675,18 @@ func TestEndTransmission_QueuesStopBeepToAllPorts(t *testing.T) {
 
 	cfg.endTransmission(rt)
 
-	// Both ports must have received a stop beep.
-	for i, pc := range []*PortChannel{pc0, pc1} {
-		select {
-		case frame := <-pc.PlaybackBuffer:
-			if len(frame) != 2 {
-				t.Errorf("port %d: stop-beep frame len=%d, want 2", i, len(frame))
-			}
-		default:
-			t.Errorf("port %d: expected stop beep in buffer", i)
+	// Exactly one port (the first) receives the stop beep.
+	select {
+	case frame := <-pc0.PlaybackBuffer:
+		if len(frame) != 2 {
+			t.Errorf("port 0: stop-beep frame len=%d, want 2", len(frame))
 		}
+	default:
+		t.Error("port 0: expected stop beep in buffer")
+	}
+
+	if got := len(pc1.PlaybackBuffer); got != 0 {
+		t.Errorf("port 1: beeps queued = %d, want 0 (single-beep contract)", got)
 	}
 }
 
@@ -992,4 +994,63 @@ func TestTryAudioRecovery_DetectionGate(t *testing.T) {
 			assert.Equal(t, wantCalls, detectCalls, "detection seam call count")
 		})
 	}
+}
+
+// ─── queueLocalAudioFrame ────────────────────────────────────────────────────
+
+func TestQueueLocalAudioFrame_PrefersActivePort(t *testing.T) {
+	svc := newSelectTestService(t, 3)
+	rt := svc.Rt
+
+	for _, pc := range rt.Ports {
+		pc.PlaybackBuffer = make(chan []int16, 4)
+		pc.setPlaybackStream(&fakeAudioStream{}) // existing mocks_test fake
+	}
+
+	// Ports 0 and 2 running; active channel = 3 (port index 2).
+	rt.Ports[0].markPlaybackRunning()
+	rt.Ports[2].markPlaybackRunning()
+	rt.ActiveChannel.Store(3)
+
+	frame := make([]int16, audiopool.FrameSize)
+	require.True(t, svc.Cfg.queueLocalAudioFrame(rt, frame))
+
+	assert.Empty(t, rt.Ports[0].PlaybackBuffer, "active port preferred over first running port")
+	assert.Len(t, rt.Ports[2].PlaybackBuffer, 1)
+}
+
+func TestQueueLocalAudioFrame_FallsBackToFirstRunning(t *testing.T) {
+	svc := newSelectTestService(t, 2)
+	rt := svc.Rt
+
+	for _, pc := range rt.Ports {
+		pc.PlaybackBuffer = make(chan []int16, 4)
+		pc.setPlaybackStream(&fakeAudioStream{})
+	}
+
+	rt.Ports[1].markPlaybackRunning()
+	// No active channel recorded.
+
+	require.True(t, svc.Cfg.queueLocalAudioFrame(rt, make([]int16, audiopool.FrameSize)))
+	assert.Len(t, rt.Ports[1].PlaybackBuffer, 1)
+}
+
+func TestQueueLocalAudioFrame_DropsWhenFull(t *testing.T) {
+	svc := newSelectTestService(t, 1)
+	rt := svc.Rt
+	pc := rt.Ports[0]
+	pc.PlaybackBuffer = make(chan []int16, 1)
+	pc.setPlaybackStream(&fakeAudioStream{})
+	pc.markPlaybackRunning()
+	rt.ActiveChannel.Store(1)
+
+	require.True(t, svc.Cfg.queueLocalAudioFrame(rt, make([]int16, audiopool.FrameSize)))
+	assert.False(t, svc.Cfg.queueLocalAudioFrame(rt, make([]int16, audiopool.FrameSize)),
+		"full buffer drops, never blocks")
+}
+
+func TestQueueLocalAudioFrame_NoBuffers(t *testing.T) {
+	svc := newSelectTestService(t, 1)
+
+	assert.False(t, svc.Cfg.queueLocalAudioFrame(svc.Rt, make([]int16, audiopool.FrameSize)))
 }

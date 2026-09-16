@@ -43,13 +43,16 @@ type ManagementConfig struct {
 	gatewayWorkerSendInterval               time.Duration
 	gatewayWorkerRecvInterval               time.Duration
 	addressReservationWorkerReserveInterval time.Duration
-	NodeDataType                            bool
-	PositionDataType                        bool
-	AddressReservationDataType              bool
-	MeshNeighborsDataType                   bool
-	BatmanMulticastEnhancementsEnabled      bool
-	BatmanMulticastForceflood               bool
-	GatewayDataType                         bool
+	// NodeExpiry drops mesh_nodes rows not refreshed by gossip within this
+	// window so departed peers stop reserving addresses (ledger D4). Zero
+	// disables expiry.
+	NodeExpiry                 time.Duration
+	NodeDataType               bool
+	PositionDataType           bool
+	AddressReservationDataType bool
+	MeshNeighborsDataType      bool
+	BatmanMulticastForceflood  bool
+	GatewayDataType            bool
 }
 
 func NewManager(cfg ManagementConfig) (*ManagementConfig, error) {
@@ -75,6 +78,8 @@ func NewManager(cfg ManagementConfig) (*ManagementConfig, error) {
 		PositionDataType:           cfg.PositionDataType,
 		AddressReservationDataType: cfg.AddressReservationDataType,
 		MeshNeighborsDataType:      cfg.MeshNeighborsDataType,
+		BatmanMulticastForceflood:  cfg.BatmanMulticastForceflood,
+		NodeExpiry:                 cfg.NodeExpiry,
 		WirelessConfig:             wirelessConfig,
 		DB:                         cfg.DB,
 		GPS:                        cfg.GPS,
@@ -96,18 +101,16 @@ func (m *ManagementConfig) Start(ctx context.Context) {
 		m.Log.Error().Err(err).Msg("Failed to set MTU for transport interface")
 	}
 
-	if m.BatmanMulticastEnhancementsEnabled {
-		if err := m.configureDeviceMulticast(ctx); err != nil {
-			m.Log.Error().Err(err).Msg("Failed to configure device multicast settings")
-		}
-	}
-
 	if err := m.configureBatmanForceflood(ctx); err != nil {
 		m.Log.Error().Err(err).Msg("Failed to configure batman-adv multicast forceflood")
 	}
 
 	if err := m.setupBatMesh1Interface(ctx); err != nil {
 		m.Log.Error().Err(err).Msg("Failed to setup batmesh1 interface")
+	}
+
+	if err := m.reconcileBatMesh1Options(ctx); err != nil {
+		m.Log.Error().Err(err).Msg("Failed to reconcile batmesh1 tuning options")
 	}
 
 	client, err := alfred.NewClient(alfred.WithSocketPath(m.SocketPath))

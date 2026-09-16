@@ -3,6 +3,8 @@ package network
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -1292,6 +1294,22 @@ func TestGetUCINetworkByNameWithReader_IPv6Fields(t *testing.T) {
 	}
 }
 
+func TestMulticastModeWithReader(t *testing.T) {
+	seeded := &mockConfigReader{
+		data: map[string]map[string]map[string][]string{
+			"network": {
+				"bat0": {"multicast_mode": {"0"}},
+			},
+		},
+	}
+	assert.Equal(t, "0", MulticastModeWithReader(seeded, "bat0"),
+		"must return the persisted multicast_mode value")
+
+	empty := &mockConfigReader{data: map[string]map[string]map[string][]string{}}
+	assert.Equal(t, "", MulticastModeWithReader(empty, "bat0"),
+		"must return empty string when the option is unset")
+}
+
 func TestSetNetworkIPV6AssignmentWithReader_CommitError(t *testing.T) {
 	reader := &mockConfigReader{
 		data:        make(map[string]map[string]map[string][]string),
@@ -1958,6 +1976,7 @@ func TestSetDeviceConfigWithReader_AllFields(t *testing.T) {
 		Table:            "20",
 		IgmpSnooping:     "1",
 		MulticastQuerier: "0",
+		MTU:              "1460",
 	}
 
 	err := SetDeviceConfigWithReader("full-device", device, mock)
@@ -2021,6 +2040,10 @@ func TestSetDeviceConfigWithReader_AllFields(t *testing.T) {
 
 	if readDevice.MulticastQuerier != device.MulticastQuerier {
 		t.Errorf("MulticastQuerier: got %v, expected %v", readDevice.MulticastQuerier, device.MulticastQuerier)
+	}
+
+	if readDevice.MTU != device.MTU {
+		t.Errorf("MTU: got %v, expected %v", readDevice.MTU, device.MTU)
 	}
 }
 
@@ -2521,7 +2544,7 @@ func freshNetworkMock(t *testing.T) *mockConfigReader {
 func TestSetupBatmanDeviceOnNetwork_CreatesAndPopulatesBat0(t *testing.T) {
 	m := freshNetworkMock(t)
 
-	require.NoError(t, SetupBatmanDeviceOnNetwork(m, "server", BatmanDeviceName))
+	require.NoError(t, SetupBatmanDeviceOnNetwork(m, "server", BatmanDeviceName, "1"))
 
 	v, ok := m.Get("network", "bat0", "proto")
 	require.True(t, ok)
@@ -2538,24 +2561,47 @@ func TestSetupBatmanDeviceOnNetwork_CreatesAndPopulatesBat0(t *testing.T) {
 	v, ok = m.Get("network", "bat0", "isolation_mark")
 	require.True(t, ok)
 	assert.Equal(t, "0x00000000/0x00000000", v[0])
+
+	v, ok = m.Get("network", "bat0", "multicast_mode")
+	require.True(t, ok)
+	assert.Equal(t, "1", v[0])
 }
 
 func TestSetupBatmanDeviceOnNetwork_DefaultsAppliedOnEmptyArgs(t *testing.T) {
 	m := freshNetworkMock(t)
 
-	require.NoError(t, SetupBatmanDeviceOnNetwork(m, "", ""))
+	require.NoError(t, SetupBatmanDeviceOnNetwork(m, "", "", ""))
 
 	// Default gw_mode is "client".
 	v, ok := m.Get("network", "bat0", "gw_mode")
 	require.True(t, ok)
 	assert.Equal(t, "client", v[0])
+
+	// Default multicast_mode is "0" (classic flooding, forceflood on).
+	v, ok = m.Get("network", "bat0", "multicast_mode")
+	require.True(t, ok)
+	assert.Equal(t, "0", v[0])
+}
+
+// TestMulticastModeForForceflood pins the kernel's semantics for the
+// batadv multicast_mode option: it is the negation of forceflood
+// (BATADV_ATTR_MULTICAST_FORCEFLOOD_ENABLED = !multicast_mode), so the
+// config flag and the UCI value read as opposites. Both writers — the
+// runtime daemon and the setup wizard — go through this one function.
+func TestMulticastModeForForceflood(t *testing.T) {
+	assert.Equal(t, "0", MulticastModeForForceflood(true),
+		"forceflood on = classic flooding = multicast_mode 0")
+	assert.Equal(t, "1", MulticastModeForForceflood(false),
+		"forceflood off = multicast optimisations on = multicast_mode 1")
+	assert.Equal(t, MulticastModeForceflood, MulticastModeForForceflood(true))
+	assert.Equal(t, MulticastModeOptimised, MulticastModeForForceflood(false))
 }
 
 func TestSetupBatmanDeviceOnNetwork_IdempotentOnExistingSection(t *testing.T) {
 	m := freshNetworkMock(t)
 	require.NoError(t, m.AddSection("network", "bat0", "interface"))
 
-	require.NoError(t, SetupBatmanDeviceOnNetwork(m, "server", "bat0"))
+	require.NoError(t, SetupBatmanDeviceOnNetwork(m, "server", "bat0", "0"))
 
 	// Section still exists and options were written.
 	v, ok := m.Get("network", "bat0", "proto")
@@ -2626,6 +2672,158 @@ func TestRemoveAllBridgeDevices_DeletesBridgesOnly(t *testing.T) {
 
 	_, ok = m.Get("network", "veth0", "type")
 	assert.True(t, ok, "non-bridge device should be preserved")
+}
+
+// ── Device MTU (wizard-parity P6) ────────────────────────────────────────────
+
+func TestSetDeviceMTUWithReader_CreatesNamedSection(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	section, err := SetDeviceMTUWithReader(m, "eth1", DefaultEthernetMTU)
+	require.NoError(t, err)
+	assert.Equal(t, "wizard_device_eth1", section)
+	assert.Equal(t, "device", m.sectionTypes["network"][section])
+
+	v, ok := m.Get("network", section, "name")
+	require.True(t, ok)
+	assert.Equal(t, "eth1", v[0])
+
+	v, ok = m.Get("network", section, "mtu")
+	require.True(t, ok)
+	assert.Equal(t, "1460", v[0])
+
+	assert.False(t, m.commitCalled, "wizard helpers stage; the wizard commits in its own phase")
+}
+
+func TestSetDeviceMTUWithReader_ReusesVendorSectionByName(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	// OpenWrt board.d emits an anonymous device section carrying the
+	// port's macaddr. netifd keeps one settings block per device name,
+	// so a second section for eth0 would make it drop that macaddr.
+	require.NoError(t, m.AddSection("network", "", "device"))
+	require.NoError(t, m.SetType("network", "@device[0]", "name", uci.TypeOption, "eth0"))
+	require.NoError(t, m.SetType("network", "@device[0]", "macaddr", uci.TypeOption, "aa:bb:cc:dd:ee:ff"))
+
+	section, err := SetDeviceMTUWithReader(m, "eth0", DefaultEthernetMTU)
+	require.NoError(t, err)
+	assert.Equal(t, "@device[0]", section)
+
+	sections, err := m.GetSections("network", "device")
+	require.NoError(t, err)
+	assert.Len(t, sections, 1, "must not create a duplicate device section")
+
+	v, ok := m.Get("network", "@device[0]", "mtu")
+	require.True(t, ok)
+	assert.Equal(t, "1460", v[0])
+
+	v, ok = m.Get("network", "@device[0]", "macaddr")
+	require.True(t, ok)
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", v[0], "vendor options must survive")
+}
+
+func TestSetDeviceMTUWithReader_UpdatesBridgeSection(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	bridge, err := CreateBridgeDevice(m, DefaultBridgeInterfaceName, []string{"eth1"}, "F2:00:00:00:00:01")
+	require.NoError(t, err)
+
+	section, err := SetDeviceMTUWithReader(m, DefaultBridgeInterfaceName, DefaultBridgeMTU)
+	require.NoError(t, err)
+	assert.Equal(t, bridge, section, "the bridge's own section must be reused")
+
+	v, ok := m.Get("network", bridge, "mtu")
+	require.True(t, ok)
+	assert.Equal(t, "1460", v[0])
+
+	v, ok = m.Get("network", bridge, "ports")
+	require.True(t, ok)
+	assert.Equal(t, []string{"eth1"}, v, "ports must be untouched")
+}
+
+func TestSetDeviceMTUWithReader_RejectsBadInput(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	_, err := SetDeviceMTUWithReader(m, "", DefaultBridgeMTU)
+	require.Error(t, err, "empty device name")
+
+	_, err = SetDeviceMTUWithReader(m, "eth0", 67)
+	require.Error(t, err, "netifd ignores mtu below 68")
+
+	sections, err := m.GetSections("network", "device")
+	require.NoError(t, err)
+	assert.Empty(t, sections, "rejected calls must stage nothing")
+}
+
+func TestUnsetDeviceMTU_StripsOptionAndRemovesWizardSections(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	// Vendor section: keeps its macaddr, loses mtu.
+	require.NoError(t, m.AddSection("network", "", "device"))
+	require.NoError(t, m.SetType("network", "@device[0]", "name", uci.TypeOption, "eth0"))
+	require.NoError(t, m.SetType("network", "@device[0]", "macaddr", uci.TypeOption, "aa:bb:cc:dd:ee:ff"))
+	require.NoError(t, m.SetType("network", "@device[0]", "mtu", uci.TypeOption, "1460"))
+
+	// Wizard-owned port section: removed outright.
+	_, err := SetDeviceMTUWithReader(m, "eth1", DefaultEthernetMTU)
+	require.NoError(t, err)
+
+	// Unrelated device without mtu: untouched.
+	require.NoError(t, m.AddSection("network", "veth0", "device"))
+	require.NoError(t, m.SetType("network", "veth0", "type", uci.TypeOption, "veth"))
+
+	require.NoError(t, UnsetDeviceMTU(m, []string{DefaultBridgeInterfaceName, "eth0", "eth1"}))
+
+	_, ok := m.Get("network", "@device[0]", "mtu")
+	assert.False(t, ok, "vendor section mtu must be stripped")
+
+	v, ok := m.Get("network", "@device[0]", "macaddr")
+	require.True(t, ok)
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", v[0], "vendor macaddr must survive")
+
+	_, ok = m.Get("network", "wizard_device_eth1", "name")
+	assert.False(t, ok, "wizard_device_* sections must be deleted")
+
+	v, ok = m.Get("network", "veth0", "type")
+	require.True(t, ok)
+	assert.Equal(t, "veth", v[0])
+
+	assert.False(t, m.commitCalled, "reset helpers stage; the wizard commits in its own phase")
+}
+
+func TestUnsetDeviceMTU_NoDevicesIsNoop(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	require.NoError(t, UnsetDeviceMTU(m, []string{DefaultBridgeInterfaceName, "eth0"}))
+	assert.False(t, m.commitCalled)
+}
+
+// TestUnsetDeviceMTU_LeavesUnrelatedDeviceAlone pins the fix for the
+// over-broad strip: a device section the wizard never manages (br-lan
+// here, with an operator-set jumbo mtu) keeps its mtu, while the
+// wizard's own br-ahwlan section is cleared. The earlier build stripped
+// every device section's mtu and would fail this.
+func TestUnsetDeviceMTU_LeavesUnrelatedDeviceAlone(t *testing.T) {
+	m := freshNetworkMock(t)
+
+	// Operator/vendor device the wizard does not manage.
+	require.NoError(t, m.AddSection("network", "vendor_brlan", "device"))
+	require.NoError(t, m.SetType("network", "vendor_brlan", "name", uci.TypeOption, "br-lan"))
+	require.NoError(t, m.SetType("network", "vendor_brlan", "mtu", uci.TypeOption, "9000"))
+
+	// Wizard-managed bridge with a stale mtu from a prior run.
+	require.NoError(t, m.AddSection("network", "wizard_bridge_br_ahwlan", "device"))
+	require.NoError(t, m.SetType("network", "wizard_bridge_br_ahwlan", "name", uci.TypeOption, DefaultBridgeInterfaceName))
+	require.NoError(t, m.SetType("network", "wizard_bridge_br_ahwlan", "mtu", uci.TypeOption, "1460"))
+
+	require.NoError(t, UnsetDeviceMTU(m, []string{DefaultBridgeInterfaceName, "eth0"}))
+
+	v, ok := m.Get("network", "vendor_brlan", "mtu")
+	require.True(t, ok, "unrelated device section must survive")
+	assert.Equal(t, "9000", v[0], "an operator's mtu on br-lan must not be wiped by the wizard reset")
+
+	_, ok = m.Get("network", "wizard_bridge_br_ahwlan", "mtu")
+	assert.False(t, ok, "the wizard's own br-ahwlan mtu must still be stripped")
 }
 
 func TestUnsetGatewayAndDeviceOnInterfaces_SkipsLoopback(t *testing.T) {
@@ -2700,4 +2898,82 @@ func TestSetNetworkDevices_RejectsEmptyName(t *testing.T) {
 	m := freshNetworkMock(t)
 	err := SetNetworkDevices(m, "", []string{"eth0"})
 	assert.Error(t, err)
+}
+
+// TestUnsetDeviceMTU_OnRealUCITree_AnonymousSectionAfterWizardSection
+// runs against the real digineo/go-uci tree because its anonymous refs
+// (@device[N]) count every section of the type, named ones included:
+// deleting wizard_device_eth1 shifts the ref of the anonymous section
+// that follows it. A single-pass strip that reuses its pre-deletion
+// section list then misses that section (or fails with
+// ErrSectionNotFound); mockConfigReader indexes anonymous sections
+// only and cannot show this.
+func TestUnsetDeviceMTU_OnRealUCITree_AnonymousSectionAfterWizardSection(t *testing.T) {
+	dir := t.TempDir()
+
+	const networkContent = `config device
+	option name 'eth0'
+	option macaddr 'aa:bb:cc:dd:ee:00'
+	option mtu '1460'
+
+config device 'wizard_device_eth1'
+	option name 'eth1'
+	option mtu '1460'
+
+config device
+	option name 'dummy0'
+	option mtu '1400'
+
+config device 'wizard_device_eth2'
+	option name 'eth2'
+	option mtu '1460'
+
+config device
+	option name 'dummy1'
+	option mtu '1400'
+`
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "network"),
+		[]byte(networkContent), 0o644))
+
+	reader := &UCINetworkConfigReader{tree: uci.NewTree(dir)}
+
+	require.NoError(t, UnsetDeviceMTU(reader, []string{DefaultBridgeInterfaceName, "eth0", "eth1", "eth2"}),
+		"stripping must survive anonymous device sections ordered after wizard-owned ones")
+
+	sections, err := reader.GetSections("network", "device")
+	require.NoError(t, err)
+	assert.Len(t, sections, 3, "both wizard_device_* sections deleted, the three anonymous ones kept")
+
+	// eth0 is a managed port, so its mtu is cleared; dummy0 and dummy1
+	// are devices the wizard never manages and keep their mtu — that
+	// is the scoped-strip fix.
+	wantMTU := map[string]string{"eth0": "", "dummy0": "1400", "dummy1": "1400"}
+
+	for _, s := range sections {
+		name, ok := reader.Get("network", s, "name")
+		require.Truef(t, ok, "%s must keep its name", s)
+
+		want, known := wantMTU[name[0]]
+		require.Truef(t, known, "unexpected surviving device %s (%s)", s, name[0])
+
+		// digineo/go-uci's Get reports ok=true whenever the section
+		// exists, regardless of whether the option does — its second
+		// return value answers "section found", not "option found".
+		// The values slice is the only real signal of deletion.
+		mtu, _ := reader.Get("network", s, "mtu")
+
+		if want == "" {
+			assert.Emptyf(t, mtu, "%s (%s) must have no mtu left", s, name[0])
+
+			continue
+		}
+
+		require.NotEmptyf(t, mtu, "%s (%s) must keep its mtu", s, name[0])
+		assert.Equalf(t, want, mtu[0], "%s (%s) mtu", s, name[0])
+	}
+
+	mac, ok := reader.Get("network", "@device[0]", "macaddr")
+	require.True(t, ok)
+	assert.Equal(t, "aa:bb:cc:dd:ee:00", mac[0], "vendor options must survive")
 }

@@ -2,7 +2,7 @@ package rtp
 
 import (
 	"errors"
-	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 )
@@ -78,7 +78,7 @@ type trackingReader struct {
 	mu     sync.Mutex
 }
 
-func (r *trackingReader) ReadFromUDP(_ []byte) (int, *net.UDPAddr, error) {
+func (r *trackingReader) ReadFromUDPAddrPort(_ []byte) (int, netip.AddrPort, error) {
 	select {} //nolint:staticcheck
 }
 
@@ -97,14 +97,14 @@ type safeCountingReader struct {
 	calls atomic.Int64
 }
 
-func (r *safeCountingReader) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+func (r *safeCountingReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
 	r.calls.Add(1)
 
 	if len(b) > 0 {
 		b[0] = 0xAB
 	}
 
-	return 1, &net.UDPAddr{}, nil
+	return 1, netip.AddrPort{}, nil
 }
 
 func (r *safeCountingReader) Close() error { return nil }
@@ -114,7 +114,7 @@ func (r *safeCountingReader) count() int64 { return r.calls.Load() }
 // ─── mockReader (minimal version for rtp tests) ──────────────────────────────
 
 type mockPacket struct {
-	src  *net.UDPAddr
+	src  netip.AddrPort
 	data []byte
 }
 
@@ -130,7 +130,7 @@ func newMockReader(pkts ...mockPacket) *mockReader {
 	return &mockReader{packets: pkts, closed: make(chan struct{})}
 }
 
-func (m *mockReader) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
+func (m *mockReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
 	for {
 		m.mu.Lock()
 		if len(m.packets) > 0 {
@@ -145,7 +145,7 @@ func (m *mockReader) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 
 		select {
 		case <-m.closed:
-			return 0, nil, errors.New("reader closed")
+			return 0, netip.AddrPort{}, errors.New("reader closed")
 		default:
 		}
 	}

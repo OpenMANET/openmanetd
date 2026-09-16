@@ -395,6 +395,25 @@ body:has(.layout-desktop), body:has(.layout-mobile) {
   flex-wrap: wrap;
 }
 
+/* ── Setup dismiss banner (Layout shell, above <Outlet/>) ─────────────── */
+.setup-dismiss-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  flex-wrap: wrap;
+}
+/* Resume is the banner's primary action — bump the ghost-btn touch
+   target to 44px per the mobile field-usability rule (padding only,
+   the .lat-btn primitive itself is untouched). */
+.setup-dismiss-banner .lat-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 14px;
+}
+
 /* ── Body grid shared ────────────────────────────────────────────────── */
 .lat-body {
   padding: 18px 20px;

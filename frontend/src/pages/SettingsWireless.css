@@ -63,11 +63,19 @@
   border: 1px solid var(--border-subtle);
 }
 
+/* Key column is fixed-width so the value sits right after its label instead
+   of being pushed to the far edge of a stretched grid cell (which read as
+   the value belonging to the *next* key on wide screens). Mirrors the
+   firmware page's strip. */
 .radio-card .status-strip .kv {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: baseline;
+  gap: 8px;
   font-size: 11px;
+  border-bottom: none;
+  padding: 2px 0;
+  min-width: 0;
 }
 
 .radio-card .status-strip .kv .k {
@@ -75,10 +83,13 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-size: 10px;
+  white-space: nowrap;
 }
 
 .radio-card .status-strip .kv .v {
   color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .radio-card .status-strip .kv .v.accent {
@@ -233,6 +244,28 @@
   color: var(--muted);
 }
 
+/* share mesh ------------------------------------------------------------- */
+.share-mesh .share-mesh-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.share-mesh .share-mesh-join {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.share-mesh .share-mesh-help {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.share-mesh .share-mesh-join-btn {
+  min-height: 44px;
+}
+
 /* mobile ----------------------------------------------------------------- */
 @media (max-width: 640px) {
   .settings-wireless-list {
@@ -251,7 +284,7 @@
     grid-template-columns: 1fr;
   }
   .radio-card .status-strip {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
   .power-selector button .dbm {
     font-size: 8px;
@@ -259,5 +292,8 @@
   .power-hint {
     flex-direction: column;
     gap: 2px;
+  }
+  .share-mesh .share-mesh-grid {
+    grid-template-columns: 1fr;
   }
 }

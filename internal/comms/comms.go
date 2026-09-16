@@ -40,9 +40,9 @@ const (
 	defaultCtrlSrc    string = "openvlm"
 )
 
-// ─── buildCodec ───────────────────────────────────────────────────────────────
+// ─── codec construction ──────────────────────────────────────────────────────
 
-func (cfg *CommsConfig) buildCodec() (codec.AudioEncoder, codec.AudioDecoder, error) {
+func (cfg *CommsConfig) buildEncoder() (codec.AudioEncoder, error) {
 	complexity := cfg.EncoderComplexity
 	if complexity <= 0 || complexity > 10 {
 		complexity = encoderComplexity
@@ -55,15 +55,33 @@ func (cfg *CommsConfig) buildCodec() (codec.AudioEncoder, codec.AudioDecoder, er
 
 	enc, err := codec.NewOpusEncoder(audiopool.SampleRate, audiopool.Channels, targetBitrate, complexity, perc)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	dec, err := codec.NewOpusDecoder(audiopool.SampleRate, audiopool.Channels)
-	if err != nil {
-		return nil, nil, err
+	return enc, nil
+}
+
+// buildPortDecoders allocates a private Opus decoder for every receive-capable
+// port. Decoders are stateful and NOT safe for concurrent use, and any number
+// of ports can be receive-enabled at once (each with its own playback thread),
+// so one decoder per port is a correctness requirement, not an optimization.
+// libopus decoder state is ~27 KB per instance — affordable even on the MIPS
+// targets at the default five talk groups.
+func buildPortDecoders(ports []*PortChannel) error {
+	for _, pc := range ports {
+		if pc.Receiver == nil {
+			continue
+		}
+
+		dec, err := codec.NewOpusDecoder(audiopool.SampleRate, audiopool.Channels)
+		if err != nil {
+			return fmt.Errorf("port decoder: %w", err)
+		}
+
+		pc.Decoder = dec
 	}
 
-	return enc, dec, nil
+	return nil
 }
 
 // sendToAllPorts sends an encoded RTP payload to every port where sendEnabled

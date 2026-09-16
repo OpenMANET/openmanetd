@@ -1,4 +1,21 @@
 logLevel: info
+alfred:
+  # Peers gossip their mesh address and DHCP window over Alfred; the daemon
+  # keeps them in its database and never reuses what a known peer holds.
+  # nodeExpiry drops a peer not heard for this long so a node that left the
+  # mesh releases its address and pool. Go duration string ("24h", "30m");
+  # 0 keeps rows until resetDBOnStart. Default 24h.
+  nodeExpiry: 24h
+batman:
+  # batman-adv multicast handling on bat0. multicastForceflood=true (the
+  # default and the shipped state) writes bat0.multicast_mode=0, so every
+  # node classic-floods every multicast frame — comms RTP stays audible
+  # without listeners gossiping IGMP/MLD membership across the mesh. Set it
+  # to false to write multicast_mode=1 and turn on batman-adv's
+  # IGMP/MLD-snooping optimisations, which deliver each multicast group only
+  # to nodes that announced membership. The daemon reconciles bat0's
+  # multicast_mode from this value on every boot. Default true.
+  multicastForceflood: true
 gnss:
   enable: true
   # source selects which position provider feeds the GNSS subsystem:
@@ -11,6 +28,43 @@ comms:
   enable: false
   debug: false
   controlSource: openvlm
+  # DSCP marking for outgoing voice (RTP/RTCP). 46 = EF (default): voice
+  # rides the elevated WMM video class end-to-end on the mesh. 48 = CS6:
+  # full WMM voice class (validate the radio's EDCA behavior on-air
+  # first). 0 = unmarked best-effort (pre-1.4 behavior). Out-of-range
+  # values clamp into [0, 63].
+  # dscp: 46
+  # Playback device buffer depth in ms. The value becomes the ALSA period
+  # size; the playback ring holds 3 periods, so device latency scales at
+  # roughly 3x this value (USB audio devices round each period up to the
+  # next power of two). Smaller values cut receive latency and PTT settle
+  # time but shrink the margin against scheduling stalls before an
+  # audible underrun. Default 60.
+  # playbackLatencyMs: 60
+  # Capture ring headroom in ms. The capture period is fixed at 20 ms
+  # (one Opus frame); this value only sets the ring depth in periods
+  # (ceil(value/20), clamped to 3..16), so 60 and below are all
+  # equivalent to the 3-period floor. Raise above 60 only if a slow
+  # device drops capture samples. Default 60.
+  # captureLatencyMs: 60
+  # Hardware audio mixer levels applied to the OpenVLM sound card at comms
+  # startup and adjustable at runtime via the CommsService audio-mixer API.
+  # Both volume keys default to 100 so hardware levels do not depend on
+  # the EEPROM image a unit was provisioned with: speaker 100 is the
+  # CM108B DAC's 0 dB maximum (no positive gain, cannot over-drive); mic
+  # 100 is the ADC's +23 dB maximum. Values set through the API are
+  # persisted here.
+  # audio:
+  #   speakerVolume: 100    # playback volume percent [0-100]; default 100
+  #   micVolume: 100        # capture volume percent [0-100]; default 100
+  #   agc: false            # CM108B Auto Gain Control; when on, the chip
+  #                         # adjusts capture gain itself and manual
+  #                         # micVolume changes may appear ineffective.
+  #                         # Like the volume keys, AGC is enforced every
+  #                         # startup: unset means disabled
+  #   speakerControl: ""    # raw ALSA element-name overrides; leave unset
+  #   micControl: ""        # to use the built-in candidate lists
+  #   agcControl: ""
 # Periodic instrumentation snapshot. When enable is true the daemon writes a
 # JSON snapshot of every runtime counter/metric to snapshotDir every
 # intervalSecs. See docs/instrumentation-snapshot.md for the field reference.

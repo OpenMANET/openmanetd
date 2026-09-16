@@ -1,0 +1,1 @@
+.qr-scan{flex-direction:column;gap:8px;display:flex}.qr-scan-hidden{opacity:0;pointer-events:none;width:1px;height:1px;position:absolute;overflow:hidden}.qr-scan-row{gap:8px;display:flex}.qr-scan-row .lat-btn,.qr-scan .qr-scan-use{flex:1;min-height:44px}

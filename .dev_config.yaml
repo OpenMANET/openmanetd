@@ -6,16 +6,21 @@ gnss:
   sendAsExternalGNSSSource:
     sendAsNMEA: false
     sendAsCoT: false
-batman:
-  multicastEnhancementsEnabled: false
 alfred:
   mode: primary
   batInterface: bat0
   socketPath: /var/run/alfred.sock
+  # Drop peers not heard over Alfred for this long so their mesh address and
+  # DHCP window are released. Go duration string; 0 disables expiry.
+  nodeExpiry: 24h
   dataTypes:
     gateway: true
     node: true
     addressReservation: true
+batman:
+  # true (default) => bat0.multicast_mode=0 (classic flooding, shipped state);
+  # false => multicast_mode=1 (batman-adv IGMP/MLD-snooping optimisations on).
+  multicastForceflood: true
 blos:
   enable: false
 comms:

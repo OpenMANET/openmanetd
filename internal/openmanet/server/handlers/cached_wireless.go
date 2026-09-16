@@ -58,6 +58,25 @@ func NewCachedWirelessProvider(inner mgmt.WirelessProvider, ttl time.Duration) *
 	return &CachedWirelessProvider{Inner: inner, TTL: ttl}
 }
 
+// EnsureCachedWireless returns p wrapped in a TTL cache unless it is
+// nil or already a *CachedWirelessProvider. The daemon builds one
+// cache up front and shares it with the instrumentation snapshotter;
+// re-wrapping it here would double the netlink traffic.
+func EnsureCachedWireless(p mgmt.WirelessProvider) mgmt.WirelessProvider {
+	switch v := p.(type) {
+	case nil:
+		return nil
+	case *CachedWirelessProvider:
+		if v == nil {
+			return nil
+		}
+
+		return v
+	default:
+		return NewCachedWirelessProvider(p, DefaultWirelessCacheTTL)
+	}
+}
+
 // Interfaces returns the cached wifi-interface list.
 func (p *CachedWirelessProvider) Interfaces() ([]*wifi.Interface, error) {
 	entry := p.getOrRefresh()

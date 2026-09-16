@@ -19,6 +19,7 @@ import { getReplayPcm } from '../services/replayBuffer.js';
 import ChannelGrid from '../components/ChannelGrid.jsx';
 import AudioControls from '../components/AudioControls.jsx';
 import AudioFileTxPanel from '../components/AudioFileTx.jsx';
+import DeviceAudioPanel from './DeviceAudioPanel.jsx';
 import Transcript from '../components/Transcript.jsx';
 import RxWaveform from '../components/RxWaveform.jsx';
 import MicMeter from '../components/MicMeter.jsx';
@@ -744,29 +745,32 @@ export default function CommsPage() {
             />
           </div>
           {audioExpanded && (
-            <div className="lat-panel comms-audio-panel">
-              <div className="panel-head"><h3>Audio</h3></div>
-              <AudioControls
-                speakerVol={speakerVol}
-                micVol={micVol}
-                onSpeakerChange={handleSpeakerChange}
-                onMicChange={handleMicChange}
-                voxEnabled={voxEnabled}
-                voxThreshold={voxThreshold}
-                onVoxToggle={handleVoxToggle}
-                onVoxThresholdChange={setVoxThreshold}
-                audioDevices={audioDevices}
-                selectedOutput={selectedOutput}
-                selectedMic={selectedMic}
-                onOutputChange={handleOutputChange}
-                onMicDeviceChange={handleMicDeviceChange}
-              />
-              <AudioFileTxPanel
-                onLog={addLog}
-                onPttSet={handleFilePttSet}
-                txEnabled={txEnabled}
-              />
-            </div>
+            <>
+              <div className="lat-panel comms-audio-panel">
+                <div className="panel-head"><h3>Web Audio</h3></div>
+                <AudioControls
+                  speakerVol={speakerVol}
+                  micVol={micVol}
+                  onSpeakerChange={handleSpeakerChange}
+                  onMicChange={handleMicChange}
+                  voxEnabled={voxEnabled}
+                  voxThreshold={voxThreshold}
+                  onVoxToggle={handleVoxToggle}
+                  onVoxThresholdChange={setVoxThreshold}
+                  audioDevices={audioDevices}
+                  selectedOutput={selectedOutput}
+                  selectedMic={selectedMic}
+                  onOutputChange={handleOutputChange}
+                  onMicDeviceChange={handleMicDeviceChange}
+                />
+                <AudioFileTxPanel
+                  onLog={addLog}
+                  onPttSet={handleFilePttSet}
+                  txEnabled={txEnabled}
+                />
+              </div>
+              <DeviceAudioPanel />
+            </>
           )}
         </div>
 

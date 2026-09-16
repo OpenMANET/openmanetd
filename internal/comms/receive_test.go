@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 
 	"github.com/openmanet/openmanetd/internal/comms/audiopool"
+	"github.com/openmanet/openmanetd/internal/comms/control"
 	"github.com/openmanet/openmanetd/internal/comms/rtp"
 	"github.com/openmanet/openmanetd/internal/comms/webaudio"
 )
@@ -23,9 +25,9 @@ func newReceiveRuntime() (*CommsRuntime, *PortChannel) {
 	pc.SendEnabled.Store(true)
 	pc.ReceiveEnabled.Store(true)
 	pc.PlaybackBuffer = make(chan []int16, 4)
+	pc.Decoder = &mockDecoder{returnN: int(rtp.FrameSamples)}
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 
 	return rt, pc
@@ -54,11 +56,47 @@ func driveOneFrame(cfg *CommsConfig, pc *PortChannel, rt *CommsRuntime, jb *rtp.
 	return out
 }
 
+func TestPlayoutOneFrame_UsesPerPortDecoder(t *testing.T) {
+	// Concurrent receive on multiple talk groups is a designed capability
+	// (any port can be receive-enabled at any time), and each playback
+	// callback runs on its own audio thread. Sharing one stateful Opus
+	// decoder across them is a CGO-level data race, so every port must own
+	// its own decoder instance.
+	cfg := &CommsConfig{Log: zerolog.Nop()}
+	rt := &CommsRuntime{}
+
+	makePort := func(fill int16) (*PortChannel, *rtp.JitterBuffer) {
+		pc := &PortChannel{cfg: McastPortConfig{Receive: true}}
+		pc.ReceiveEnabled.Store(true)
+		pc.Decoder = &mockDecoder{fillValue: fill, returnN: audiopool.FrameSize}
+
+		jb := rtp.NewJitterBuffer(1, 16)
+		jb.Push(0, []byte{1})
+
+		return pc, jb
+	}
+
+	pcA, jbA := makePort(11)
+	pcB, jbB := makePort(22)
+	rt.Ports = []*PortChannel{pcA, pcB}
+
+	outA := driveOneFrame(cfg, pcA, rt, jbA)
+	outB := driveOneFrame(cfg, pcB, rt, jbB)
+
+	if outA[0] != 11 {
+		t.Errorf("port A must decode through its own decoder; got sample %d, want 11", outA[0])
+	}
+
+	if outB[0] != 22 {
+		t.Errorf("port B must decode through its own decoder; got sample %d, want 22", outB[0])
+	}
+}
+
 func TestPlayoutOneFrame_DecodesPayload(t *testing.T) {
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{fillValue: 1234, returnN: audiopool.FrameSize}
+	pc.Decoder = &mockDecoder{fillValue: 1234, returnN: audiopool.FrameSize}
 
-	jb := rtp.NewJitterBuffer(1, 10) // prebuffer=1: first push triggers start
+	jb := rtp.NewJitterBuffer(1, 16) // prebuffer=1: first push triggers start
 	jb.Push(0, []byte{0xAA, 0xBB})
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
@@ -80,7 +118,7 @@ func TestPlayoutOneFrame_PLCOnSkippedMissing(t *testing.T) {
 	// len >= maxDepth/2) so popOrConceal returns conceal=true → PLC must
 	// be invoked via the decoder with nil payload.
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
+	pc.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
 
 	jb := rtp.NewJitterBuffer(1, 4)
 
@@ -107,9 +145,9 @@ func TestPlayoutOneFrame_PLCOnConceal(t *testing.T) {
 	// The jitter buffer is then empty, so shouldConceal fires on the next
 	// playoutOneFrame call and the decoder is invoked with nil payload.
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
+	pc.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 
 	jb.Push(0, []byte{0})
 	jb.PopReady() // started=true, expected=1, lastPush set to now
@@ -131,9 +169,9 @@ func TestPlayoutOneFrame_SilenceAfterMaxPLC(t *testing.T) {
 	// silence rather than calling the (now degraded) decoder PLC.
 	rt, pc := newReceiveRuntime()
 	dec := &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
-	rt.Decoder = dec
+	pc.Decoder = dec
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0})
 	jb.PopReady() // started=true, lastPush set
 
@@ -160,7 +198,7 @@ func TestPlayoutOneFrame_SilenceWhenBroadcasting(t *testing.T) {
 	rt, pc := newReceiveRuntime()
 	rt.Broadcasting.Store(true) // isBroadcasting will return true; pc.SendEnabled=true → suppress
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA, 0xBB})
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
@@ -175,7 +213,7 @@ func TestPlayoutOneFrame_SilenceWhenReceiveDisabled(t *testing.T) {
 	rt, pc := newReceiveRuntime()
 	pc.ReceiveEnabled.Store(false)
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA})
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
@@ -204,7 +242,7 @@ func TestPlayoutOneFrame_NoUnderrunOnIdleStream(t *testing.T) {
 	// Stream that has never started (no packets yet) should write silence
 	// without incrementing the underrun counter — silence != underrun.
 	rt, pc := newReceiveRuntime()
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
 
@@ -221,9 +259,9 @@ func TestPlayoutOneFrame_NoUnderrunOnIdleStream(t *testing.T) {
 func TestPlayoutOneFrame_UnderrunOnDecoderError(t *testing.T) {
 	// Decoder returning an error AND PLC also failing → silence + underrun++.
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{decodeErr: errors.New("bad decode")}
+	pc.Decoder = &mockDecoder{decodeErr: errors.New("bad decode")}
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA, 0xBB})
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
@@ -242,14 +280,14 @@ func TestPlayoutOneFrame_DecoderErrorPLCFallback(t *testing.T) {
 	// Real decode fails but PLC succeeds → playoutOneFrame should emit the
 	// PLC samples, reset consecutivePLC, and NOT count an underrun.
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{
+	pc.Decoder = &mockDecoder{
 		decodeErr: errors.New("bad decode"),
 		plcOK:     true,
 		returnN:   audiopool.FrameSize,
 		fillValue: 1234,
 	}
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA, 0xBB})
 
 	cfg := &CommsConfig{Log: zerolog.Nop()}
@@ -268,8 +306,8 @@ func TestPlayoutOneFrame_DecoderErrorPLCFallback(t *testing.T) {
 
 func TestReceiveLoop_DropsOwnPackets(t *testing.T) {
 	// All packets arrive from the local IP → all should be dropped.
-	localIP := net.IPv4(192, 168, 1, 1)
-	localAddr := &net.UDPAddr{IP: localIP}
+	localIP := netip.MustParseAddr("192.168.1.1")
+	localAddr := netip.AddrPortFrom(localIP, 5004)
 
 	var pkts []mockPacket
 
@@ -287,8 +325,7 @@ func TestReceiveLoop_DropsOwnPackets(t *testing.T) {
 	pc.ReceiveEnabled.Store(true)
 	pc.PlaybackBuffer = make(chan []int16, 16)
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 	s := localIP.String()
 	rt.LocalIP.Store(&s)
@@ -330,9 +367,133 @@ func TestReceiveLoop_DropsOwnPackets(t *testing.T) {
 	}
 }
 
+// TestReceiveLoop_DropsOwn4in6Packets pins the Unmap in the loopback filter:
+// a source address in 4-in-6 form (::ffff:a.b.c.d) must still match the
+// cached v4 local address. Production sockets bind udp4 and return plain v4
+// addresses, but the filter must not silently break if the socket family
+// ever changes to dual-stack.
+func TestReceiveLoop_DropsOwn4in6Packets(t *testing.T) {
+	localIP := "192.168.1.1"
+	mappedSrc := netip.AddrPortFrom(netip.MustParseAddr("::ffff:192.168.1.1"), 5004)
+
+	var pkts []mockPacket
+
+	for i := 0; i < rtp.PrebufferPackets+1; i++ {
+		raw := makeRTPBytes(t, uint16(i))
+		pkts = append(pkts, mockPacket{data: raw, src: mappedSrc})
+	}
+
+	reader := newMockReader(pkts...)
+	pc := &PortChannel{
+		cfg:      McastPortConfig{Send: true, Receive: true},
+		Receiver: rtp.NewSwappableReceiver(reader),
+	}
+	pc.SendEnabled.Store(true)
+	pc.ReceiveEnabled.Store(true)
+	pc.PlaybackBuffer = make(chan []int16, 16)
+	rt := &CommsRuntime{
+		Ports: []*PortChannel{pc},
+	}
+	rt.LocalIP.Store(&localIP)
+
+	cfg := &CommsConfig{Log: zerolog.Nop(), Loopback: false}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		cfg.receiveLoop(ctx, pc, rt)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if reader.remaining() == 0 {
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	pc.Receiver.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("receiveLoop did not exit")
+	}
+
+	if got := pc.RxLoopback.Load(); got != int64(rtp.PrebufferPackets+1) {
+		t.Errorf("4-in-6 own packets should all be dropped as loopback; RxLoopback=%d, want %d",
+			got, rtp.PrebufferPackets+1)
+	}
+}
+
+// TestReceiveLoop_SkipsParseWhenReceiveDisabled pins the muted-port fast
+// path: a receive-disabled port must not pay the RTP unmarshal for packets
+// it will discard anyway, so parse errors are not counted while muted.
+// RxPkts still advances (the read happened) and re-enabling resumes
+// parsing.
+func TestReceiveLoop_SkipsParseWhenReceiveDisabled(t *testing.T) {
+	// Garbage packets that would fail RTP parsing if parsed.
+	garbage := []byte{0xFF, 0x00, 0x01}
+
+	var pkts []mockPacket
+	for range 3 {
+		pkts = append(pkts, mockPacket{data: garbage, src: netip.MustParseAddrPort("1.2.3.4:5004")})
+	}
+
+	reader := newMockReader(pkts...)
+	pc := &PortChannel{
+		cfg:      McastPortConfig{Send: true, Receive: true},
+		Receiver: rtp.NewSwappableReceiver(reader),
+	}
+	pc.SendEnabled.Store(true)
+	pc.ReceiveEnabled.Store(false) // muted
+	pc.PlaybackBuffer = make(chan []int16, 8)
+	rt := &CommsRuntime{Ports: []*PortChannel{pc}}
+
+	cfg := &CommsConfig{Log: zerolog.Nop(), Loopback: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		cfg.receiveLoop(ctx, pc, rt)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if reader.remaining() == 0 {
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	pc.Receiver.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("receiveLoop did not exit")
+	}
+
+	if got := pc.RxPkts.Load(); got != 3 {
+		t.Errorf("RxPkts: got %d, want 3 (reads still counted while muted)", got)
+	}
+
+	if got := pc.RxParseErrs.Load(); got != 0 {
+		t.Errorf("RxParseErrs: got %d, want 0 (muted ports must not parse)", got)
+	}
+}
+
 func TestReceiveLoop_DropsMalformedRTP(t *testing.T) {
 	// First packet is garbage; receiveLoop should log and continue rather than crash.
-	garbled := mockPacket{data: []byte{0xFF, 0x00, 0x01}, src: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4)}}
+	garbled := mockPacket{data: []byte{0xFF, 0x00, 0x01}, src: netip.MustParseAddrPort("1.2.3.4:5004")}
 	reader := newMockReader(garbled)
 
 	pc := &PortChannel{
@@ -343,8 +504,7 @@ func TestReceiveLoop_DropsMalformedRTP(t *testing.T) {
 	pc.ReceiveEnabled.Store(true)
 	pc.PlaybackBuffer = make(chan []int16, 8)
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{},
+		Ports: []*PortChannel{pc},
 	}
 
 	cfg := &CommsConfig{Log: zerolog.Nop(), Loopback: true}
@@ -501,7 +661,7 @@ func TestReceiveLoop_StampsLastRemoteRx(t *testing.T) {
 	cfg := &CommsConfig{Log: zerolog.Nop(), Loopback: true}
 
 	raw := makeRTPBytes(t, 0)
-	reader := newMockReader(mockPacket{data: raw, src: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4)}})
+	reader := newMockReader(mockPacket{data: raw, src: netip.MustParseAddrPort("1.2.3.4:5004")})
 	pc := &PortChannel{
 		cfg:      McastPortConfig{Send: true, Receive: true},
 		Receiver: rtp.NewSwappableReceiver(reader),
@@ -510,8 +670,7 @@ func TestReceiveLoop_StampsLastRemoteRx(t *testing.T) {
 	pc.ReceiveEnabled.Store(true)
 	pc.PlaybackBuffer = make(chan []int16, 32)
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -542,20 +701,100 @@ func TestReceiveLoop_StampsLastRemoteRx(t *testing.T) {
 	}
 }
 
+// ─── receiveLoop failure-path tests ───────────────────────────────────────────
+
+func TestReceiveLoop_BacksOffOnPersistentReadErrors(t *testing.T) {
+	// A permanently failing receiver (e.g. a socket closed by Start's
+	// teardown while the loop's context is still live) must not busy-spin.
+	// After a few consecutive errors the loop backs off between attempts.
+	reader := &fakeErrReader{err: net.ErrClosed}
+	pc := &PortChannel{
+		cfg:      McastPortConfig{Receive: true},
+		Receiver: rtp.NewSwappableReceiver(reader),
+	}
+	pc.ReceiveEnabled.Store(true)
+
+	rt := &CommsRuntime{Ports: []*PortChannel{pc}}
+	cfg := &CommsConfig{Log: zerolog.Nop()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		cfg.receiveLoop(ctx, pc, rt)
+	}()
+
+	// 100 ms of persistent errors must produce a bounded number of read
+	// attempts. With the consecutive-error threshold and backoff the loop
+	// makes on the order of a dozen attempts; a spinning loop makes
+	// hundreds of thousands.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("receiveLoop did not exit after cancel")
+	}
+
+	if n := reader.reads.Load(); n > 100 {
+		t.Fatalf("receiveLoop busy-spun on persistent read errors: %d reads in 100 ms", n)
+	}
+}
+
+func TestRun_StopsReceiveLoopsWhenEventSourceCloses(t *testing.T) {
+	// When the control source dies (e.g. PTT dongle unplugged), its events
+	// channel closes and Run returns; Start's defers then close every
+	// receiver while the manager's context is still live. The goroutines
+	// Run spawned must terminate with it instead of erroring against
+	// permanently closed sockets forever.
+	reader := &fakeErrReader{err: net.ErrClosed}
+	pc := &PortChannel{
+		cfg:      McastPortConfig{Receive: true},
+		Receiver: rtp.NewSwappableReceiver(reader),
+	}
+	pc.ReceiveEnabled.Store(true)
+
+	rt := &CommsRuntime{Ports: []*PortChannel{pc}}
+	cfg := &CommsConfig{Log: zerolog.Nop()}
+
+	src := &mockEventSource{ch: make(chan control.PTTEvent)}
+	close(src.ch)
+
+	cfg.Run(context.Background(), rt, src) // returns as soon as events closes
+
+	// After Run returns, the spawned receiveLoop must wind down: poll until
+	// the read count stops advancing.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		before := reader.reads.Load()
+
+		time.Sleep(50 * time.Millisecond)
+
+		if reader.reads.Load() == before {
+			return // loop has stopped
+		}
+	}
+
+	t.Fatal("receiveLoop still reading after Run returned; run-scoped cancellation missing")
+}
+
 // ─── receiveLoop socket-swap recovery tests ───────────────────────────────────
 
 // netErrClosedReader wraps a mockReader and translates any read error to
-// net.ErrClosed, matching the error that real *net.UDPConn.ReadFromUDP returns
+// net.ErrClosed, matching the error that a real *net.UDPConn read returns
 // after the connection is closed. This allows receiveLoop's socket-swap path
 // (errors.Is(err, net.ErrClosed) → jitter.Reset()) to be exercised in tests.
 type netErrClosedReader struct {
 	*mockReader
 }
 
-func (r *netErrClosedReader) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
-	n, addr, err := r.mockReader.ReadFromUDP(b)
+func (r *netErrClosedReader) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	n, addr, err := r.mockReader.ReadFromUDPAddrPort(b)
 	if err != nil {
-		return 0, nil, net.ErrClosed
+		return 0, netip.AddrPort{}, net.ErrClosed
 	}
 
 	return n, addr, nil
@@ -575,7 +814,7 @@ func TestReceiveLoop_SocketSwapResetsJitter(t *testing.T) {
 
 	for i := 0; i < rtp.PrebufferPackets+2; i++ {
 		raw := makeRTPBytes(t, uint16(i))
-		pkts1 = append(pkts1, mockPacket{data: raw, src: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4)}})
+		pkts1 = append(pkts1, mockPacket{data: raw, src: netip.MustParseAddrPort("1.2.3.4:5004")})
 	}
 
 	reader1 := &netErrClosedReader{newMockReader(pkts1...)}
@@ -585,7 +824,7 @@ func TestReceiveLoop_SocketSwapResetsJitter(t *testing.T) {
 
 	for i := 0; i < rtp.PrebufferPackets+2; i++ {
 		raw := makeRTPBytes(t, uint16(i))
-		pkts2 = append(pkts2, mockPacket{data: raw, src: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4)}})
+		pkts2 = append(pkts2, mockPacket{data: raw, src: netip.MustParseAddrPort("1.2.3.4:5004")})
 	}
 
 	reader2 := newMockReader(pkts2...)
@@ -599,8 +838,7 @@ func TestReceiveLoop_SocketSwapResetsJitter(t *testing.T) {
 	pc.PlaybackBuffer = make(chan []int16, 64)
 
 	rt := &CommsRuntime{
-		Ports:   []*PortChannel{pc},
-		Decoder: &mockDecoder{returnN: int(rtp.FrameSamples)},
+		Ports: []*PortChannel{pc},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -670,6 +908,56 @@ func TestReceiveLoop_SocketSwapResetsJitter(t *testing.T) {
 // Opus payloads from the jitter buffer to the WebAudioBridge for streaming
 // to the browser. The malgo playback stream is not opened and playoutOneFrame is not used.
 
+// TestWebPlayoutLoop_GatesWhenNoConsumer pins the idle-web-mode contract:
+// with no RPC stream attached to the bridge, the drain must still empty the
+// jitter buffer (so the cursor advances and pool buffers recycle) but must
+// not copy or offer frames to the bridge channel.
+func TestWebPlayoutLoop_GatesWhenNoConsumer(t *testing.T) {
+	cfg := newSilentComms()
+	rt, pc := newReceiveRuntime()
+
+	bridge := webaudio.NewBridge(zerolog.Nop(), func(payload []byte) {
+		cfg.sendToAllPorts(rt, payload)
+	})
+	rt.WebBridge = bridge
+	// Deliberately no AddConsumer: the browser tab is closed.
+
+	jb := rtp.NewJitterBuffer(1, 16)
+	for i := range uint16(5) {
+		jb.Push(i, []byte{byte(i)})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	go cfg.webPlayoutLoop(ctx, pc, jb, rt)
+
+	// Wait until the drain has consumed everything the jitter buffer holds.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if bridge.RxGatedNoConsumer.Load() == 5 {
+			break
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := bridge.RxGatedNoConsumer.Load(); got != 5 {
+		t.Fatalf("gated-frame counter: got %d, want 5", got)
+	}
+
+	if got := bridge.RxPushIn.Load(); got != 0 {
+		t.Errorf("no frame should be offered to the bridge without a consumer; RxPushIn=%d", got)
+	}
+
+	select {
+	case f := <-bridge.RxFrames():
+		t.Errorf("bridge channel should stay empty without a consumer; got frame %v", f.Data())
+		f.Release()
+	default:
+	}
+}
+
 func TestWebPlayoutLoop_ForwardsRawOpus(t *testing.T) {
 	cfg := newSilentComms()
 	rt, pc := newReceiveRuntime()
@@ -678,8 +966,9 @@ func TestWebPlayoutLoop_ForwardsRawOpus(t *testing.T) {
 		cfg.sendToAllPorts(rt, payload)
 	})
 	rt.WebBridge = bridge
+	bridge.AddConsumer() // this test reads RxFrames directly
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0xAA, 0xBB, 0xCC})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -690,11 +979,62 @@ func TestWebPlayoutLoop_ForwardsRawOpus(t *testing.T) {
 	// The raw Opus bytes should arrive on the bridge's RX channel.
 	select {
 	case frame := <-bridge.RxFrames():
-		if len(frame) != 3 || frame[0] != 0xAA || frame[1] != 0xBB || frame[2] != 0xCC {
-			t.Errorf("unexpected frame data: %v", frame)
+		if d := frame.Data(); len(d) != 3 || d[0] != 0xAA || d[1] != 0xBB || d[2] != 0xCC {
+			t.Errorf("unexpected frame data: %v", d)
 		}
+
+		frame.Release()
 	case <-time.After(500 * time.Millisecond):
 		t.Error("timed out waiting for raw Opus frame on web bridge")
+	}
+}
+
+// TestWebPlayoutLoop_TagsFramesWithTalkGroupChannel pins the talk group
+// attribution contract: every frame handed to the web bridge carries the
+// 1-based channel derived from the port's UDP port (38803 → channel 2), so
+// the RPC layer can tell the browser which talk group the audio belongs
+// to. A port outside the talk group plan tags frames with 0 (unknown).
+func TestWebPlayoutLoop_TagsFramesWithTalkGroupChannel(t *testing.T) {
+	tests := []struct {
+		name string
+		port int
+		want byte
+	}{
+		{name: "talkgroup 2 port", port: 38803, want: 2},
+		{name: "unmapped port", port: 40000, want: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newSilentComms()
+			rt, pc := newReceiveRuntime()
+			pc.cfg.Port = tc.port
+
+			bridge := webaudio.NewBridge(zerolog.Nop(), func(payload []byte) {
+				cfg.sendToAllPorts(rt, payload)
+			})
+			rt.WebBridge = bridge
+			bridge.AddConsumer() // this test reads RxFrames directly
+
+			jb := rtp.NewJitterBuffer(1, 16)
+			jb.Push(0, []byte{0xAA})
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			go cfg.webPlayoutLoop(ctx, pc, jb, rt)
+
+			select {
+			case frame := <-bridge.RxFrames():
+				if got := frame.Channel(); got != tc.want {
+					t.Errorf("frame channel: got %d, want %d", got, tc.want)
+				}
+
+				frame.Release()
+			case <-time.After(500 * time.Millisecond):
+				t.Error("timed out waiting for frame on web bridge")
+			}
+		})
 	}
 }
 
@@ -715,8 +1055,9 @@ func TestWebPlayoutLoop_MultipleFrames(t *testing.T) {
 		cfg.sendToAllPorts(rt, payload)
 	})
 	rt.WebBridge = bridge
+	bridge.AddConsumer() // this test reads RxFrames directly
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	for i := 0; i < 5; i++ {
 		jb.Push(uint16(i), []byte{byte(i)})
 	}
@@ -729,9 +1070,11 @@ func TestWebPlayoutLoop_MultipleFrames(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		select {
 		case frame := <-bridge.RxFrames():
-			if len(frame) != 1 || frame[0] != byte(i) {
-				t.Errorf("frame %d: got %v, want [%d]", i, frame, i)
+			if d := frame.Data(); len(d) != 1 || d[0] != byte(i) {
+				t.Errorf("frame %d: got %v, want [%d]", i, d, i)
 			}
+
+			frame.Release()
 		case <-time.After(500 * time.Millisecond):
 			t.Fatalf("timed out waiting for frame %d", i)
 		}
@@ -749,9 +1092,10 @@ func TestWebPlayoutLoop_DeliversWhileBroadcasting(t *testing.T) {
 		cfg.sendToAllPorts(rt, payload)
 	})
 	rt.WebBridge = bridge
+	bridge.AddConsumer() // this test reads RxFrames directly
 	rt.Broadcasting.Store(true)
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0x01})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -760,8 +1104,9 @@ func TestWebPlayoutLoop_DeliversWhileBroadcasting(t *testing.T) {
 	go cfg.webPlayoutLoop(ctx, pc, jb, rt)
 
 	select {
-	case <-bridge.RxFrames():
+	case f := <-bridge.RxFrames():
 		// OK — frame delivered as expected.
+		f.Release()
 	case <-ctx.Done():
 		t.Error("bridge should receive frames in web mode even while broadcasting")
 	}
@@ -774,9 +1119,9 @@ func TestPlayoutOneFrame_ConsecutivePLCLimit(t *testing.T) {
 	// but all subsequent frames are missing. playoutOneFrame should emit
 	// exactly maxConsecutivePLC PLC frames followed by silence.
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
+	pc.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0})
 	jb.PopReady() // started=true, expected=1, lastPush set
 
@@ -803,9 +1148,9 @@ func TestPlayoutOneFrame_ConsecutivePLCResets(t *testing.T) {
 	// After a burst of PLC, decoding a real frame should reset the
 	// consecutivePLC counter so a subsequent gap produces PLC again.
 	rt, pc := newReceiveRuntime()
-	rt.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
+	pc.Decoder = &mockDecoder{fillValue: 99, returnN: audiopool.FrameSize}
 
-	jb := rtp.NewJitterBuffer(1, 10)
+	jb := rtp.NewJitterBuffer(1, 16)
 	jb.Push(0, []byte{0})
 	jb.PopReady() // started=true, expected=1, lastPush set
 
@@ -889,6 +1234,7 @@ func TestWebPlayoutLoop_DoesNotAdvanceCursorOnSafetyPoll(t *testing.T) {
 		cfg.sendToAllPorts(rt, payload)
 	})
 	rt.WebBridge = bridge
+	bridge.AddConsumer() // this test reads RxFrames directly
 
 	jb := rtp.NewJitterBuffer(1, 16)
 
@@ -907,7 +1253,8 @@ func TestWebPlayoutLoop_DoesNotAdvanceCursorOnSafetyPoll(t *testing.T) {
 	// Drain the seed frame so the loop observes expected=101 with an
 	// empty buffer.
 	select {
-	case <-bridge.RxFrames():
+	case f := <-bridge.RxFrames():
+		f.Release()
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("seed frame never reached bridge")
 	}
@@ -926,9 +1273,11 @@ func TestWebPlayoutLoop_DoesNotAdvanceCursorOnSafetyPoll(t *testing.T) {
 
 	select {
 	case frame := <-bridge.RxFrames():
-		if len(frame) != 1 || frame[0] != 0xBB {
-			t.Errorf("unexpected frame bytes: %v", frame)
+		if d := frame.Data(); len(d) != 1 || d[0] != 0xBB {
+			t.Errorf("unexpected frame bytes: %v", d)
 		}
+
+		frame.Release()
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("seq=101 frame never reached bridge (regression)")
 	}

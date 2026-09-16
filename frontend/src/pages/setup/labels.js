@@ -46,7 +46,10 @@ export const ENCRYPTION_LABELS = {
   [WifiEncryption.SAE]:       'WPA3 (SAE)',
   [WifiEncryption.PSK2]:      'WPA2 (PSK2)',
   [WifiEncryption.PSK]:       'WPA (PSK)',
-  [WifiEncryption.PSK_MIXED]: 'WPA2 / WPA3 (mixed)',
+  // psk-mixed is WPA1+WPA2 in OpenWrt (wpa=3), not WPA2/WPA3.
+  [WifiEncryption.PSK_MIXED]: 'WPA / WPA2 (mixed, legacy)',
+  // sae-mixed is OpenWrt's WPA2/WPA3 transition mode (psk-sae).
+  [WifiEncryption.SAE_MIXED]: 'WPA2 / WPA3 (mixed)',
   [WifiEncryption.OWE]:       'OWE (open, encrypted)',
   [WifiEncryption.NONE]:      'None (open)',
 };

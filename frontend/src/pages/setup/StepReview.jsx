@@ -14,7 +14,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { create } from '@bufbuild/protobuf';
+import { timestampFromDate } from '@bufbuild/protobuf/wkt';
 import { setupClient } from '../../services/setupClient.js';
+import { resumeSetup } from '../../services/setupDismiss.js';
 import { useSetup } from '../../contexts/SetupContext.jsx';
 import {
   ApplySetupRequestSchema,
@@ -25,9 +27,11 @@ import {
   MeshRole,
   UplinkSchema,
   RadioApProfileSchema,
+  MeshBackhaulProfileSchema,
   WifiStaProfileSchema,
   UplinkType,
 } from '../../gen/openmanet/setup/v1/setup_pb.js';
+import { WifiEncryption } from '../../gen/openmanet/wifi_config/v1/wifi_config_pb.js';
 import {
   ROLE_LABELS,
   MESH_POINT_MODE_LABELS,
@@ -35,6 +39,7 @@ import {
   UPLINK_TYPE_LABELS,
   ENCRYPTION_LABELS,
 } from './labels.js';
+import { meshJoinIssues } from './meshChannels.js';
 
 // Phase metadata: each tuple is [enum, label] in the canonical order
 // the events arrive. Phase 99 (TERMINAL) is excluded from the list and
@@ -45,6 +50,7 @@ const PHASE_DEFS = [
   [Phase.RESET_WIRELESS,     'Reset wireless'],
   [Phase.RESET_NETWORK,      'Reset network'],
   [Phase.HOSTNAME,           'Hostname'],
+  [Phase.SET_TIMEZONE,       'Timezone'],
   [Phase.BASE_NETWORK,       'Base network'],
   [Phase.WIRELESS_MESH,      'Mesh'],
   [Phase.PER_RADIO_AP_STA,   'Per-radio'],
@@ -59,7 +65,18 @@ const PHASE_DEFS = [
 const POLL_INTERVAL_MS = 4000;
 const POLL_TIMEOUT_MS  = 60000;
 
-export default function StepReview() {
+// rebootNotice is repeated on the review, success, and reconnecting
+// screens. After the wizard's own network reload, openmanetd's
+// address-reservation worker waits for peer gossip (first tick 125 s
+// after bat0 comes up — internal/mgmt/mgmt.go), claims the node's final
+// mesh address, and reboots the device: a second outage the operator
+// must expect. mDNS follows the hostname, so the .local URL survives it.
+function rebootNotice(hostname) {
+  const mdns = `${hostname || 'hostname'}.local`;
+  return `The device reboots itself about 2–3 minutes after apply and comes back on its final mesh address; ${mdns} keeps working.`;
+}
+
+export default function StepReview({ status }) {
   const { state } = useSetup();
   const [phaseMap, setPhaseMap] = useState({});  // phase enum → 'started'|'done'|'failed'
   const [phaseError, setPhaseError] = useState(null); // {phase, message}
@@ -76,7 +93,12 @@ export default function StepReview() {
     setPhaseError(null);
     setTerminal(null);
 
-    const req = create(ApplySetupRequestSchema, { profile: profileToProto(state) });
+    // Stamp the client's clock at apply time (not page load) so the
+    // device's PHASE_SET_TIMEZONE step gets an accurate reference even
+    // if the wizard sat open for a while before the user clicked Apply.
+    const profile = profileToProto(state);
+    profile.clientTime = timestampFromDate(new Date());
+    const req = create(ApplySetupRequestSchema, { profile });
     let sawTerminal = false;
 
     try {
@@ -89,6 +111,11 @@ export default function StepReview() {
           sawTerminal = true;
           setTerminalResult(ev.result ?? null);
           setTerminal(ev.result?.success ? 'success' : 'failure');
+          if (ev.result?.success) {
+            // Clear the session "Skip for now" flag: a completed wizard
+            // must not leave a stale dismiss banner behind.
+            resumeSetup();
+          }
           // Notify the BeforeUnload guard so the success-page
           // navigation doesn't trigger a confirmation prompt.
           window.dispatchEvent(new Event('setup-applied'));
@@ -113,6 +140,7 @@ export default function StepReview() {
           onSuccess: () => {
             if (cancelRef.current) return;
             setTerminal('success');
+            resumeSetup();
             window.dispatchEvent(new Event('setup-applied'));
           },
           onTimeout: () => {
@@ -142,16 +170,19 @@ export default function StepReview() {
     return <AmbiguousPanel state={state} />;
   }
 
-  const blockers = applyBlockers(state);
+  const blockers = applyBlockers(state, status);
 
   return (
     <div className="setup-step">
       <h3>Review &amp; Apply</h3>
 
       <div className="lat-alert crit">
-        Applying these settings will reload network services. The device
-        will likely move to a new IP address and SSID; you&apos;ll need to
-        reconnect.
+        <div>
+          Applying these settings will reload network services. The device
+          will likely move to a new IP address and SSID; you&apos;ll need to
+          reconnect.
+        </div>
+        <div>{rebootNotice(state.hostname)}</div>
       </div>
 
       <ReviewSummary state={state} />
@@ -206,7 +237,7 @@ function statusKey(status) {
 
 // applyBlockers returns the list of human-readable reasons the user
 // cannot click Apply yet. Empty array means good to go.
-function applyBlockers(state) {
+function applyBlockers(state, status) {
   const out = [];
   if (!state.hostname) {
     out.push('Hostname is empty (Step 1).');
@@ -225,6 +256,27 @@ function applyBlockers(state) {
   } else if (state.adminPassword !== state.adminPasswordConfirm) {
     out.push('Admin password and confirmation do not match (Password step).');
   }
+  for (const ap of state.aps) {
+    if (!ap.meshBackhaul) continue;
+    if (!ap.backhaulMeshId) {
+      out.push(`Mesh backhaul on ${ap.radioName} needs a mesh ID (Wi-Fi step).`);
+    }
+    if (!ap.backhaulPassphrase || ap.backhaulPassphrase.length < 8) {
+      out.push(`Mesh backhaul on ${ap.radioName} needs a passphrase of at least 8 characters (Wi-Fi step).`);
+    }
+    if (ap.backhaulMeshId && ap.backhaulMeshId.length > 32) {
+      out.push(`Mesh backhaul on ${ap.radioName} mesh ID must be 32 characters or fewer (Wi-Fi step).`);
+    }
+  }
+  for (const ap of state.aps) {
+    if (!ap.meshBackhaul) continue;
+    if ((ap.backhaulChannel || 0) === 0 !== ((ap.backhaulBandwidthMhz || 0) === 0)) {
+      out.push(`Mesh backhaul on ${ap.radioName}: set bandwidth and channel together or leave both at Default (Wi-Fi step).`);
+    }
+  }
+  for (const msg of meshJoinIssues(state, status)) {
+    out.push(`${msg} (Step 2).`);
+  }
   return out;
 }
 
@@ -236,6 +288,7 @@ function profileToProto(state) {
     hostname:      state.hostname,
     adminPassword: state.adminPassword,
     role:          state.role,
+    timezone:      state.timezone,
     mesh: create(MeshRadioConfigSchema, {
       radioName:    state.mesh.radioName,
       meshId:       state.mesh.meshId,
@@ -245,12 +298,23 @@ function profileToProto(state) {
       channel:      state.mesh.channel,
       countryCode:  state.mesh.countryCode,
     }),
-    aps: state.aps.filter(a => a.enabled).map(a => create(RadioApProfileSchema, {
+    aps: state.aps.filter(a => a.enabled || a.meshBackhaul).map(a => create(RadioApProfileSchema, {
       radioName:  a.radioName,
-      enabled:    true,
-      ssid:       a.ssid,
-      passphrase: a.passphrase,
-      encryption: a.encryption,
+      enabled:    a.enabled,
+      ssid:       a.enabled ? a.ssid : '',
+      passphrase: a.enabled ? a.passphrase : '',
+      // A backhaul entry carries no AP credentials, but the proto still
+      // requires a defined non-zero encryption — send SAE.
+      encryption: a.enabled ? a.encryption : WifiEncryption.SAE,
+      meshBackhaul: a.meshBackhaul
+        ? create(MeshBackhaulProfileSchema, {
+            meshId:       a.backhaulMeshId,
+            passphrase:   a.backhaulPassphrase,
+            bandwidthMhz: a.backhaulBandwidthMhz || 0,
+            channel:      a.backhaulChannel || 0,
+            countryCode:  a.backhaulCountryCode || '',
+          })
+        : undefined,
     })),
   });
 
@@ -291,6 +355,7 @@ async function pollForCompletion({ onSuccess, onTimeout }) {
 
 function ReviewSummary({ state }) {
   const apEntries = state.aps.filter(a => a.enabled);
+  const backhaul = state.aps.find(a => a.meshBackhaul);
   return (
     <>
       <div className="kv"><span className="k">Hostname</span><span className="v">{state.hostname}</span></div>
@@ -315,6 +380,9 @@ function ReviewSummary({ state }) {
       )}
       <div className="kv"><span className="k">Mesh radio</span><span className="v">{state.mesh.radioName}</span></div>
       <div className="kv"><span className="k">Mesh ID</span><span className="v">{state.mesh.meshId}</span></div>
+      {state.meshJoin && (
+        <div className="kv"><span className="k">Source</span><span className="v accent">scanned from {state.meshJoin.sourceHostname || 'another node'}</span></div>
+      )}
       <div className="kv">
         <span className="k">Country</span>
         <span className="v">{state.mesh.countryCode || '(not set)'}</span>
@@ -335,6 +403,16 @@ function ReviewSummary({ state }) {
             : apEntries.map(a => `${a.radioName}: ${a.ssid}`).join(', ')}
         </span>
       </div>
+      <div className="kv">
+        <span className="k">Mesh backhaul</span>
+        <span className="v">{backhaul ? `${backhaul.radioName}: ${backhaul.backhaulMeshId}` : 'none'}</span>
+      </div>
+      {backhaul && (
+        <div className="kv">
+          <span className="k">Backhaul channel</span>
+          <span className="v">{backhaul.backhaulChannel || 8} · {backhaul.backhaulBandwidthMhz || 40} MHz · {backhaul.backhaulCountryCode || state.mesh.countryCode || '—'}</span>
+        </div>
+      )}
     </>
   );
 }
@@ -352,11 +430,7 @@ function SuccessPanel({ state, result }) {
         <li>Open <a href={url}>{url}</a></li>
         <li>Sign in with the admin password you just set.</li>
       </ol>
-      <p className="setup-help">
-        If this is the only device on the mesh, your management IP will
-        remain at the value chosen during setup; the address will
-        renumber automatically when other peers join.
-      </p>
+      <p className="setup-help">{rebootNotice(state.hostname)}</p>
     </div>
   );
 }
@@ -393,6 +467,7 @@ function AmbiguousPanel({ state }) {
       <p className="setup-help">
         If this takes more than a minute, try connecting now: <a href={url}>{url}</a>
       </p>
+      <p className="setup-help">{rebootNotice(state.hostname)}</p>
     </div>
   );
 }

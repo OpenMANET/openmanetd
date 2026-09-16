@@ -26,8 +26,10 @@ const (
 	CommsMulticastGroup string = "239.192.41.1"
 
 	// CommsRTPPortRange is the UDP destination port range used by the
-	// OpenMANET comms RTP traffic. Matches the captured LuCI fixture.
-	CommsRTPPortRange string = "33801-38864"
+	// OpenMANET comms RTP traffic: the talk-group range owned by
+	// internal/config/multicast.go (38801 + channel-1). Matches
+	// upstream LuCI's wizard rule and both captured fixtures.
+	CommsRTPPortRange string = "38801-38864"
 
 	// BatmanMeshTCPPort is the TCP port used by batman-adv mesh
 	// management traffic. Matches the LuCI captured fixture.
@@ -141,8 +143,8 @@ func defaultWanFirewallRules(localZone string) []firewallRule {
 		"unknown-header-type",
 	}
 	icmpv6InputExtra := append(append([]string{}, icmpv6Common...),
-		"router-solicitation", "neighbor-solicitation",
-		"router-advertisement", "neighbor-advertisement",
+		"router-solicitation", "neighbour-solicitation",
+		"router-advertisement", "neighbour-advertisement",
 	)
 
 	return []firewallRule{
@@ -526,15 +528,19 @@ func zoneNameOrSectionExists(reader ConfigReader, name string) (bool, error) {
 
 // GetOrCreateForwarding returns the section reference of an enabled
 // forwarding from src to dest, creating a new one (named or anonymous
-// based on `name`) if no enabled match exists. On creation, also sets
-// `mtu_fix=1` and `masq=1` on the destination zone, matching LuCI's
-// behavior.
+// based on `name`) if no enabled match exists. On creation, `mtu_fix=1`
+// is always set on the destination zone; `masq=1` is set on the
+// destination zone only when natOnDest is true. Whether a forwarding
+// needs source NAT on its destination is per-topology (a mesh gate
+// routing onto its upstream needs it, a mesh-point-extender forwarding
+// into the mesh does not) rather than a universal LuCI behavior, so
+// callers decide explicitly.
 //
 // If a disabled matching forwarding already exists, it is re-enabled
 // rather than duplicated. Forwardings from `src` to other destinations
 // are disabled (`enabled='0'`) — the wizard only allows one forwarding
 // per source zone.
-func GetOrCreateForwarding(reader ConfigReader, src, dest, name string) (string, error) {
+func GetOrCreateForwarding(reader ConfigReader, src, dest, name string, natOnDest bool) (string, error) {
 	if src == "" || dest == "" {
 		return "", fmt.Errorf("src and dest are required")
 	}
@@ -551,37 +557,25 @@ func GetOrCreateForwarding(reader ConfigReader, src, dest, name string) (string,
 		}
 	}
 
-	// Set up NAT on the destination zone.
-	destSection, err := zoneSectionByName(reader, dest)
-	if err != nil {
+	if err := setDestZoneNATOptions(reader, dest, natOnDest); err != nil {
 		return "", err
 	}
 
-	if destSection != "" {
-		if err := reader.SetType(firewallConfigName, destSection, "mtu_fix", uci.TypeOption, "1"); err != nil {
-			return "", err
-		}
-
-		if err := reader.SetType(firewallConfigName, destSection, "masq", uci.TypeOption, "1"); err != nil {
-			return "", err
-		}
+	if err := disableOtherForwardingsFromSrc(reader, sections, src); err != nil {
+		return "", err
 	}
 
-	// Disable other forwardings from this src.
-	for _, s := range sections {
-		v, _ := reader.Get(firewallConfigName, s, "src")
-		if len(v) > 0 && v[0] == src {
-			if err := reader.SetType(firewallConfigName, s, "enabled", uci.TypeOption, "0"); err != nil {
-				return "", err
-			}
-		}
-	}
-
-	// Re-enable any disabled forwarding that already matches.
+	// Re-enable any disabled forwarding that already matches. Clear
+	// the `enabled` option rather than setting it to "1" so a
+	// re-enabled forwarding converges to the same shape a freshly
+	// created one has — fresh creation below never writes `enabled`
+	// at all, and forwardingEnabled treats absence as enabled.
+	// Setting an explicit "1" here would leave a stray option a fresh
+	// first run never wrote, breaking wizard re-run idempotence.
 	for _, s := range sections {
 		if matchesForwarding(reader, s, src, dest) {
-			if err := reader.SetType(firewallConfigName, s, "enabled", uci.TypeOption, "1"); err != nil {
-				return "", err
+			if err := reader.Del(firewallConfigName, s, "enabled"); err != nil {
+				return "", fmt.Errorf("clearing enabled on %s: %w", s, err)
 			}
 
 			return s, nil
@@ -611,6 +605,50 @@ func GetOrCreateForwarding(reader ConfigReader, src, dest, name string) (string,
 	}
 
 	return section, nil
+}
+
+// setDestZoneNATOptions sets `mtu_fix=1` on the firewall zone named
+// dest, always. `masq=1` is set on the same zone only when natOnDest
+// is true — masq is a per-topology decision the caller makes, not an
+// automatic consequence of being a forwarding destination. No-op if
+// no zone named dest exists.
+func setDestZoneNATOptions(reader ConfigReader, dest string, natOnDest bool) error {
+	destSection, err := zoneSectionByName(reader, dest)
+	if err != nil {
+		return err
+	}
+
+	if destSection == "" {
+		return nil
+	}
+
+	if err := reader.SetType(firewallConfigName, destSection, "mtu_fix", uci.TypeOption, "1"); err != nil {
+		return err
+	}
+
+	if natOnDest {
+		if err := reader.SetType(firewallConfigName, destSection, "masq", uci.TypeOption, "1"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// disableOtherForwardingsFromSrc disables (`enabled='0'`) every
+// forwarding section in sections whose `src` matches src — the wizard
+// only allows one active forwarding per source zone.
+func disableOtherForwardingsFromSrc(reader ConfigReader, sections []string, src string) error {
+	for _, s := range sections {
+		v, _ := reader.Get(firewallConfigName, s, "src")
+		if len(v) > 0 && v[0] == src {
+			if err := reader.SetType(firewallConfigName, s, "enabled", uci.TypeOption, "0"); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func matchesForwarding(reader ConfigReader, section, src, dest string) bool {

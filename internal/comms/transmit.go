@@ -6,6 +6,7 @@ import (
 
 	"github.com/openmanet/openmanetd/internal/comms/audiopool"
 	"github.com/openmanet/openmanetd/internal/comms/control"
+	"github.com/openmanet/openmanetd/internal/config"
 )
 
 // defaultPttStartDelayMs is the mic-warmup floor applied when
@@ -82,6 +83,148 @@ func (cfg *CommsConfig) transmitSettleWait(rt *CommsRuntime) time.Duration {
 	return max(cfg.pttStartDelay(), beepSettle)
 }
 
+// beepWakeWindow is how long a playback stream woken solely to make a PTT
+// beep audible keeps running before it is re-slept. Sized to cover the
+// worst-case beep emergence path (ALSA ring latency + one frame + settle
+// margin, ≈150 ms on USB audio class hardware) with generous slack; the
+// timer is Reset on every beep, so a stop-beep queued late in a start-beep's
+// window always gets a full window of its own.
+const beepWakeWindow = 500 * time.Millisecond
+
+// queueBeep queues one beep frame into exactly one audible playback stream.
+// Preference order:
+//
+//  1. The first port whose stream is running (an RX-enabled port) — one
+//     clean copy of the tone. The pre-P4 code fanned the beep out to every
+//     receive-capable port, which played N overlapping copies through dmix
+//     into the same physical output.
+//  2. No stream running (zero receive-enabled ports): wake the first
+//     startable stream, queue the beep, and arm its re-sleep timer —
+//     PTT feedback must stay audible even with all monitors off.
+//  3. No streams at all (web mode, audio-failed mode): queue to the first
+//     port's buffer, matching the legacy harmless-with-no-consumer path.
+//
+// Callers must drain the playback buffers first (drainPlaybackBuffer), so
+// the buffered channel send below cannot block.
+func (cfg *CommsConfig) queueBeep(rt *CommsRuntime, beep []int16) {
+	for _, pc := range rt.Ports {
+		if pc.PlaybackBuffer != nil && pc.playbackIsRunning() {
+			pc.PlaybackBuffer <- beep
+
+			return
+		}
+	}
+
+	for _, pc := range rt.Ports {
+		if pc.PlaybackBuffer == nil {
+			continue
+		}
+
+		if err := pc.startPlayback(); err != nil {
+			cfg.Log.Warn().Err(err).Int("port", pc.cfg.Port).
+				Msg("comms: failed to wake playback stream for beep")
+
+			continue
+		}
+
+		if !pc.playbackIsRunning() {
+			// No stream installed on this port; try the next.
+			continue
+		}
+
+		pc.PlaybackBuffer <- beep
+
+		pc.armBeepSleep(beepWakeWindow)
+
+		return
+	}
+
+	for _, pc := range rt.Ports {
+		if pc.PlaybackBuffer != nil {
+			pc.PlaybackBuffer <- beep
+
+			return
+		}
+	}
+}
+
+// trySendPlaybackFrame attempts a non-blocking send of frame into pc's
+// playback buffer. Returns whether the buffer accepted it. A free
+// function (not a closure) so queueLocalAudioFrame's hot path allocates
+// nothing — a closure capturing frame would otherwise escape to the heap.
+func trySendPlaybackFrame(pc *PortChannel, frame []int16) bool {
+	select {
+	case pc.PlaybackBuffer <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
+// queueLocalAudioFrame queues one locally generated PCM frame (an
+// announcement) into a single audible playback stream. Preference:
+//
+//  1. The active talk group's port, when its stream is running — the
+//     announcement should come out of the channel it announces.
+//  2. The first running stream (mirrors queueBeep's rule 1).
+//  3. Wake the first startable stream, queue the frame, and arm the beep
+//     re-sleep timer ONCE (beepWakeWindow). This branch is only reached for
+//     an announcement with NO receive-enabled port; in the normal
+//     selection->announce flow the active port's stream is already running
+//     (started by applyReceivePlayback), so frames take rule 1. Because the
+//     timer is armed once (not per frame), a clip longer than beepWakeWindow
+//     played into a woken-but-RX-disabled port could be re-slept mid-clip —
+//     an accepted edge for the no-monitor case; the common path is unaffected.
+//
+// Unlike queueBeep the sends are non-blocking: the announcer produces a
+// frame every 20 ms indefinitely, and a stalled buffer must drop (the
+// player counts it) rather than wedge the player goroutine. Returns
+// whether a buffer accepted the frame.
+func (cfg *CommsConfig) queueLocalAudioFrame(rt *CommsRuntime, frame []int16) bool {
+	if ch := int(rt.ActiveChannel.Load()); ch > 0 {
+		if port, err := config.TalkGroupPort(ch); err == nil {
+			for _, pc := range rt.Ports {
+				if pc.cfg.Port == port && pc.PlaybackBuffer != nil && pc.playbackIsRunning() {
+					return trySendPlaybackFrame(pc, frame)
+				}
+			}
+		}
+	}
+
+	for _, pc := range rt.Ports {
+		if pc.PlaybackBuffer != nil && pc.playbackIsRunning() {
+			return trySendPlaybackFrame(pc, frame)
+		}
+	}
+
+	for _, pc := range rt.Ports {
+		if pc.PlaybackBuffer == nil {
+			continue
+		}
+
+		if err := pc.startPlayback(); err != nil {
+			cfg.Log.Warn().Err(err).Int("port", pc.cfg.Port).
+				Msg("comms: failed to wake playback stream for announcement")
+
+			continue
+		}
+
+		if !pc.playbackIsRunning() {
+			continue
+		}
+
+		if !trySendPlaybackFrame(pc, frame) {
+			return false
+		}
+
+		pc.armBeepSleep(beepWakeWindow)
+
+		return true
+	}
+
+	return false
+}
+
 // ─── Transmission state ───────────────────────────────────────────────────────
 
 func (cfg *CommsConfig) isBroadcasting(rt *CommsRuntime) bool {
@@ -144,12 +287,7 @@ func (cfg *CommsConfig) beginTransmission(rt *CommsRuntime) {
 
 	cfg.Log.Debug().Msg("Begin transmission: playing start tone and opening TX gate")
 	cfg.drainPlaybackBuffer(rt)
-
-	for _, pc := range rt.Ports {
-		if pc.PlaybackBuffer != nil {
-			pc.PlaybackBuffer <- rt.BeepBufferStart
-		}
-	}
+	cfg.queueBeep(rt, rt.BeepBufferStart)
 
 	// Settle window before the TX gate opens. Holds the gate closed
 	// until the start-tone beep has fully emerged from the speaker —
@@ -202,12 +340,7 @@ func (cfg *CommsConfig) endTransmission(rt *CommsRuntime) {
 	}
 
 	cfg.drainPlaybackBuffer(rt)
-
-	for _, pc := range rt.Ports {
-		if pc.PlaybackBuffer != nil {
-			pc.PlaybackBuffer <- rt.BeepBufferStop
-		}
-	}
+	cfg.queueBeep(rt, rt.BeepBufferStop)
 
 	rt.Broadcasting.Store(false)
 }
@@ -216,7 +349,16 @@ func (cfg *CommsConfig) endTransmission(rt *CommsRuntime) {
 // Receive-capable port plus a single halfDuplexDecayLoop that clears the
 // cached RemoteRxActive flag when every gate has gone quiet, then blocks
 // dispatching PTT events until ctx is canceled.
-func (cfg *CommsConfig) Run(ctx context.Context, rt *CommsRuntime, src control.EventSource) {
+func (cfg *CommsConfig) Run(parentCtx context.Context, rt *CommsRuntime, src control.EventSource) {
+	// Run owns the loops it spawns: derive a context canceled when Run
+	// returns for any reason — parent cancellation or the event source
+	// closing its channel (e.g. the PTT device dying). Without this,
+	// Start's deferred teardown closes every receiver while the manager's
+	// context is still live and the receive loops retry against
+	// permanently dead sockets until Disable is called.
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
 	for _, pc := range rt.Ports {
 		if pc.Receiver != nil {
 			go cfg.receiveLoop(ctx, pc, rt)
@@ -232,7 +374,13 @@ func (cfg *CommsConfig) Run(ctx context.Context, rt *CommsRuntime, src control.E
 	events := src.Events(ctx)
 
 	if aux, ok := src.(control.AuxEventSource); ok && cfg.AuxHandler != nil {
-		go cfg.runAuxPump(ctx, aux)
+		// The aux pump deliberately runs on the parent context, not the
+		// Run-scoped one: it must drain aux events still queued when the
+		// PTT channel closes, and it has its own natural termination — the
+		// control source closes its aux channel when it dies, and Disable
+		// cancels the parent. Run-scoped cancellation would cut the drain
+		// short (pinned by TestRun_AuxEvents_DispatchedToHandler).
+		go cfg.runAuxPump(parentCtx, aux)
 	}
 
 	// In-run audio recovery: when hardware audio failed at startup (or the

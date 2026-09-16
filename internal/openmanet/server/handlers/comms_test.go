@@ -9,6 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 	commsv1 "github.com/openmanet/openmanetd/internal/api/openmanet/comms/v1"
+	"github.com/openmanet/openmanetd/internal/comms/control/alsa"
 	"github.com/openmanet/openmanetd/internal/config"
 	"github.com/openmanet/openmanetd/internal/openmanet/server/handlers"
 	"github.com/rs/zerolog"
@@ -488,4 +489,216 @@ func TestStreamAudioRx_BridgeNotActive(t *testing.T) {
 	// StreamAudioRx requires a *connect.ServerStream which is difficult to
 	// construct outside of a real HTTP connection.
 	_ = svc
+}
+
+// ── GetAudioMixer / UpdateAudioMixer ─────────────────────────────────────────
+
+func fullMixerState() alsa.State {
+	return alsa.State{
+		Available:      true,
+		SpeakerPct:     80,
+		MicPct:         60,
+		AGCPresent:     true,
+		AGCEnabled:     true,
+		SpeakerControl: "Master",
+		MicControl:     "Mic Capture Volume",
+		AGCControl:     "Auto Gain Control",
+	}
+}
+
+func TestGetAudioMixer_MapsState(t *testing.T) {
+	svc := &handlers.CommsService{
+		Cfg:   &config.Config{},
+		Log:   zerolog.Nop(),
+		Mixer: &fakeAudioMixer{state: fullMixerState()},
+	}
+
+	resp, err := svc.GetAudioMixer(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	st := resp.GetState()
+	require.NotNil(t, st)
+	assert.True(t, st.GetAvailable())
+	assert.Equal(t, int32(80), st.GetSpeakerVolume())
+	assert.Equal(t, int32(60), st.GetMicVolume())
+	assert.True(t, st.GetAgcEnabled())
+	assert.Equal(t, "Master", st.GetSpeakerControl())
+}
+
+func TestGetAudioMixer_AbsentControlsOmitOptionals(t *testing.T) {
+	svc := &handlers.CommsService{
+		Cfg: &config.Config{},
+		Log: zerolog.Nop(),
+		Mixer: &fakeAudioMixer{state: alsa.State{
+			Available:      true,
+			SpeakerPct:     50,
+			MicPct:         -1,
+			SpeakerControl: "Master",
+		}},
+	}
+
+	resp, err := svc.GetAudioMixer(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+
+	st := resp.GetState()
+	assert.NotNil(t, st.SpeakerVolume, "present control sets the optional")
+	assert.Nil(t, st.MicVolume, "absent control leaves the optional unset")
+	assert.Nil(t, st.AgcEnabled)
+}
+
+func TestGetAudioMixer_NoCard_ReturnsUnavailableWithoutError(t *testing.T) {
+	svc := &handlers.CommsService{
+		Cfg:   &config.Config{},
+		Log:   zerolog.Nop(),
+		Mixer: &fakeAudioMixer{stateErr: fmt.Errorf("wrapped: %w", alsa.ErrNoCard)},
+	}
+
+	resp, err := svc.GetAudioMixer(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err, "missing card is not an RPC error on Get")
+	assert.False(t, resp.GetState().GetAvailable())
+}
+
+func TestGetAudioMixer_IOError_Internal(t *testing.T) {
+	svc := &handlers.CommsService{
+		Cfg:   &config.Config{},
+		Log:   zerolog.Nop(),
+		Mixer: &fakeAudioMixer{stateErr: fmt.Errorf("ioctl failed")},
+	}
+
+	_, err := svc.GetAudioMixer(context.Background(), &emptypb.Empty{})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInternal, connectErr.Code())
+}
+
+func TestGetAudioMixer_NilMixer_FailedPrecondition(t *testing.T) {
+	svc := &handlers.CommsService{Cfg: &config.Config{}, Log: zerolog.Nop()}
+
+	_, err := svc.GetAudioMixer(context.Background(), &emptypb.Empty{})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+}
+
+func TestUpdateAudioMixer_AppliesAndPersists(t *testing.T) {
+	cfg := setupCommsTestConfig(t, "comms:\n  enable: true\n")
+	fake := &fakeAudioMixer{state: fullMixerState()}
+	svc := &handlers.CommsService{Cfg: cfg, Log: zerolog.Nop(), Mixer: fake}
+
+	speaker := int32(45)
+	resp, err := svc.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{
+		SpeakerVolume: &speaker,
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.GetState().GetAvailable())
+
+	calls := fake.getApplyCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].SpeakerPct)
+	assert.Equal(t, 45, *calls[0].SpeakerPct)
+	assert.Nil(t, calls[0].MicPct, "unset request fields must not be applied")
+	assert.Nil(t, calls[0].AGC)
+
+	// Persisted to the backing YAML file.
+	data, rErr := os.ReadFile(cfg.GetConfigFilePath())
+	require.NoError(t, rErr)
+	assert.Contains(t, string(data), "speakerVolume: 45")
+	assert.NotContains(t, string(data), "micVolume")
+}
+
+func TestUpdateAudioMixer_ControlNotFound_FailedPrecondition(t *testing.T) {
+	cfg := setupCommsTestConfig(t, "comms:\n  enable: true\n")
+	svc := &handlers.CommsService{
+		Cfg:   cfg,
+		Log:   zerolog.Nop(),
+		Mixer: &fakeAudioMixer{applyErr: fmt.Errorf("mic volume: %w", alsa.ErrControlNotFound)},
+	}
+
+	mic := int32(50)
+	_, err := svc.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{MicVolume: &mic})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+}
+
+func TestUpdateAudioMixer_NoCard_FailedPrecondition(t *testing.T) {
+	cfg := setupCommsTestConfig(t, "comms:\n  enable: true\n")
+	svc := &handlers.CommsService{
+		Cfg:   cfg,
+		Log:   zerolog.Nop(),
+		Mixer: &fakeAudioMixer{applyErr: fmt.Errorf("open: %w", alsa.ErrNoCard)},
+	}
+
+	speaker := int32(50)
+	_, err := svc.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{SpeakerVolume: &speaker})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+}
+
+func TestUpdateAudioMixer_ApplyIOError_Internal(t *testing.T) {
+	fake := &fakeAudioMixer{applyErr: fmt.Errorf("ioctl failed")}
+	svc := &handlers.CommsService{
+		Cfg:   &config.Config{},
+		Log:   zerolog.Nop(),
+		Mixer: fake,
+	}
+
+	speaker := int32(50)
+	_, err := svc.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{SpeakerVolume: &speaker})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInternal, connectErr.Code())
+
+	// A bare Cfg{} has a nil viper instance: if PersistCommsAudio were
+	// reached despite the Apply failure, it would panic. Reaching this
+	// assertion without panicking confirms persist was never attempted.
+	assert.Len(t, fake.getApplyCalls(), 1)
+}
+
+func TestUpdateAudioMixer_PersistFailure_Internal(t *testing.T) {
+	// No config file backing this Config: hardware apply succeeds, but the
+	// subsequent persist has nowhere to write and must fail internally
+	// without pretending the config still matches hardware.
+	cfg := config.NewWithoutWatch(viper.New())
+	fake := &fakeAudioMixer{state: fullMixerState()}
+	svc := &handlers.CommsService{Cfg: cfg, Log: zerolog.Nop(), Mixer: fake}
+
+	speaker := int32(45)
+	_, err := svc.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{
+		SpeakerVolume: &speaker,
+	})
+	require.Error(t, err)
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	assert.Equal(t, connect.CodeInternal, connectErr.Code())
+	assert.Contains(t, connectErr.Message(), "applied to hardware")
+
+	// Hardware write still happened before the persist failure.
+	assert.Len(t, fake.getApplyCalls(), 1)
+}
+
+func TestUpdateAudioMixer_MuteNotInAPI_AGCPersisted(t *testing.T) {
+	cfg := setupCommsTestConfig(t, "comms:\n  enable: true\n")
+	fake := &fakeAudioMixer{state: fullMixerState()}
+	svc := &handlers.CommsService{Cfg: cfg, Log: zerolog.Nop(), Mixer: fake}
+
+	agc := false
+	_, err := svc.UpdateAudioMixer(context.Background(), &commsv1.UpdateAudioMixerRequest{AgcEnabled: &agc})
+	require.NoError(t, err)
+
+	data, rErr := os.ReadFile(cfg.GetConfigFilePath())
+	require.NoError(t, rErr)
+	assert.Contains(t, string(data), "agc: false")
 }

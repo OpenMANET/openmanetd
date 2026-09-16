@@ -9,12 +9,17 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/openmanet/openmanetd/internal/comms/announce"
 	"github.com/openmanet/openmanetd/internal/comms/audio"
 	"github.com/openmanet/openmanetd/internal/comms/audiopool"
 	"github.com/openmanet/openmanetd/internal/comms/control"
 	"github.com/openmanet/openmanetd/internal/comms/device"
+	"github.com/openmanet/openmanetd/internal/comms/gpio"
 	"github.com/openmanet/openmanetd/internal/comms/rtp"
+	"github.com/openmanet/openmanetd/internal/comms/talkgroup"
 	"github.com/openmanet/openmanetd/internal/comms/webaudio"
+	"github.com/openmanet/openmanetd/internal/config"
+	"github.com/openmanet/openmanetd/internal/util/board"
 )
 
 // startHardwareAudio constructs an audio.Init bound to cfg/rt, builds the
@@ -64,20 +69,68 @@ func (cfg *CommsConfig) startHardwareAudio(rt *CommsRuntime) (cleanup func(), er
 			HasReceiver:  true,
 			Port:         pc.cfg.Port,
 			BeepBuf:      pc.PlaybackBuffer,
-			SetStream:    func(s device.AudioStream) { pcRef.PlaybackStream = s },
+			SetStream:    func(s device.AudioStream) { pcRef.setPlaybackStream(s) },
 			PlayoutFrame: func(out []int16) { cfg.playoutOneFrame(pcRef, rt, pcRef.Jitter, out) },
 		})
 	}
 
 	broadcast, cleanup, hwErr := audioInit.StartHardware(slots)
 	if hwErr != nil {
+		// The SetStream hooks may have stored streams that StartHardware's
+		// unwind already closed; detach them so a later toggle or beep can
+		// never call into a freed malgo device.
+		for _, pc := range rt.Ports {
+			pc.clearPlaybackStream()
+		}
+
 		return nil, hwErr
 	}
 
 	rt.SetBroadcast(broadcast)
 	rt.PlaybackOutputLatency = audioInit.PlaybackOutputLatency
 
-	return cleanup, nil
+	// StartHardware started every playback stream; record that, then
+	// re-sleep the streams of ports that are not receive-enabled (P4: an
+	// idle port must not keep a malgo RT thread waking every 20 ms).
+	cfg.markAndSyncPlayback(rt)
+
+	// Detach the per-port streams before the hardware cleanup closes
+	// them, for the same freed-device reason as the failure path above.
+	wrapped := func() {
+		for _, pc := range rt.Ports {
+			pc.clearPlaybackStream()
+		}
+
+		cleanup()
+	}
+
+	return wrapped, nil
+}
+
+// markAndSyncPlayback records that StartHardware started every installed
+// playback stream, then stops the streams of receive-disabled ports so
+// only enabled ports keep a running malgo device. Called after every
+// successful hardware init (boot and in-run recovery), so a recovery
+// honors toggles made while audio was down.
+func (cfg *CommsConfig) markAndSyncPlayback(rt *CommsRuntime) {
+	for _, pc := range rt.Ports {
+		if !pc.playbackStreamInstalled() {
+			continue
+		}
+
+		pc.markPlaybackRunning()
+
+		if pc.ReceiveEnabled.Load() {
+			continue
+		}
+
+		if err := pc.stopPlayback(); err != nil {
+			// Non-fatal: the stream keeps running, which is the pre-P4
+			// status quo for a disabled port, not a correctness problem.
+			cfg.Log.Warn().Err(err).Int("port", pc.cfg.Port).
+				Msg("comms: failed to sleep playback stream for disabled port")
+		}
+	}
 }
 
 const (
@@ -232,9 +285,18 @@ func (cfg *CommsConfig) tryAudioRecovery(rt *CommsRuntime, attempt int) bool {
 
 	rt.audioCleanup = cleanup
 
+	cfg.applyMixerStartup()
+
 	cfg.Log.Info().Msg("comms: hardware audio recovered")
 
 	return true
+}
+
+// applyMixerStartup invokes the wired startup mixer re-apply, if any.
+func (cfg *CommsConfig) applyMixerStartup() {
+	if cfg.AudioMixerStartup != nil {
+		cfg.AudioMixerStartup()
+	}
 }
 
 // detectALSACard runs ALSA card auto-detection through cfg.detectALSACardFn
@@ -249,6 +311,121 @@ func (cfg *CommsConfig) detectALSACard() {
 	}
 
 	control.DetectAndSetALSACard(cfg.Log)
+}
+
+// seedActiveChannel derives the boot-time active talk group from the
+// seeded per-port toggles (first port with both directions enabled),
+// records it, and emits a SourceInit event. The announcer deliberately
+// ignores SourceInit, so boot is silent.
+func (cfg *CommsConfig) seedActiveChannel(rt *CommsRuntime) {
+	for _, pc := range rt.Ports {
+		if !pc.SendEnabled.Load() || !pc.ReceiveEnabled.Load() {
+			continue
+		}
+
+		ch, err := config.TalkGroupChannel(pc.cfg.Port)
+		if err != nil {
+			continue
+		}
+
+		rt.ActiveChannel.Store(int32(ch))
+		rt.Events.Notify(talkgroup.Event{
+			Kind: talkgroup.KindSelected, Channel: ch,
+			Send: true, Receive: true,
+			Source: talkgroup.SourceInit, At: time.Now(),
+		})
+
+		return
+	}
+}
+
+// startAnnouncer wires the announcement player to the event registry.
+// Best-effort: clip decode failure logs and disables announcements
+// (mirroring the audio-init posture). Web mode is skipped — the browser
+// owns the speaker; it gets the event stream instead. The registry
+// listener is never removed: registry and player share the runtime's
+// lifetime, and Run exits with ctx.
+func (cfg *CommsConfig) startAnnouncer(ctx context.Context, rt *CommsRuntime) {
+	if rt.WebBridge != nil {
+		return
+	}
+
+	player, err := announce.New(cfg.Log, func(frame []int16) bool {
+		return cfg.queueLocalAudioFrame(rt, frame)
+	})
+	if err != nil {
+		cfg.Log.Warn().Err(err).Msg("comms: announcements disabled")
+
+		return
+	}
+
+	rt.Announcer = player
+
+	go player.Run(ctx)
+
+	rt.Events.Add(func(ev talkgroup.Event) {
+		if ev.Kind != talkgroup.KindSelected || ev.Source == talkgroup.SourceInit {
+			return
+		}
+
+		player.Announce(ev.Channel)
+	})
+}
+
+// startGPIOSelector launches the hardware talk group selector when the
+// board wires one (Raven) and the operator has not disabled it.
+// Best-effort: an open failure (driver quirk, permissions) logs and
+// degrades gracefully — RPC and web selection keep working.
+func (cfg *CommsConfig) startGPIOSelector(ctx context.Context, svc *Service) {
+	supported := cfg.gpioSelectorSupportedFn
+	if supported == nil {
+		supported = board.GPIOSelectorSupported
+	}
+
+	if !supported() || !cfg.GPIOSelectorEnable {
+		return
+	}
+
+	sel := &gpio.Selector{Log: cfg.Log}
+
+	events, err := sel.Events(ctx)
+	if err != nil {
+		cfg.Log.Warn().Err(err).Msg("comms: GPIO selector unavailable")
+
+		return
+	}
+
+	svc.Rt.GPIOSel = sel
+
+	cfg.Log.Debug().Msg("comms: GPIO talk group selector started")
+
+	go svc.forwardSelections(events, cfg.Log)
+}
+
+// forwardSelections applies each channel emitted by the GPIO selector as a
+// talk group selection. The FIRST emission is the selector's boot-time read
+// of the physical switch position: it is forwarded as SourceInit so the
+// daemon adopts that position (flip + ActiveChannel update + stream event)
+// WITHOUT the announcer speaking it — honoring the "no boot-time
+// announcement" decision. Every later emission is a live operator action,
+// forwarded as SourceGPIO (which the announcer does play). The loop exits
+// when events closes (ctx cancel or the selector's error breaker).
+func (s *Service) forwardSelections(events <-chan int, log zerolog.Logger) {
+	src := talkgroup.SourceInit
+
+	for ch := range events {
+		log.Debug().Int("channel", ch).Str("source", src.String()).
+			Msg("comms: applying GPIO talk group selection")
+
+		if err := s.SelectTalkGroup(ch, src); err != nil {
+			log.Warn().Err(err).Int("channel", ch).
+				Msg("comms: GPIO talk group selection failed")
+		}
+
+		src = talkgroup.SourceGPIO
+	}
+
+	log.Debug().Msg("comms: GPIO selection forwarder stopped")
 }
 
 // Start initializes all comms subsystems and blocks until ctx is canceled.
@@ -269,6 +446,8 @@ func (cfg *CommsConfig) Start(ctx context.Context) error {
 		}
 	}
 
+	cfg.applyMixerStartup()
+
 	switch {
 	case cfg.Trace:
 		cfg.Log = cfg.Log.Level(zerolog.TraceLevel)
@@ -283,9 +462,9 @@ func (cfg *CommsConfig) Start(ctx context.Context) error {
 	)
 
 	// ── codec ──────────────────────────────────────────────────────────────
-	enc, dec, err := cfg.buildCodec()
+	enc, err := cfg.buildEncoder()
 	if err != nil {
-		return fmt.Errorf("comms: failed to build Opus codec: %w", err)
+		return fmt.Errorf("comms: failed to build Opus encoder: %w", err)
 	}
 
 	// ── beep tones ─────────────────────────────────────────────────────────
@@ -308,13 +487,23 @@ func (cfg *CommsConfig) Start(ctx context.Context) error {
 		return fmt.Errorf("comms: failed to set up network: %w", netErr)
 	}
 
+	// Per-port decoders: allocated after buildNetwork so every
+	// receive-capable port (Receiver != nil) gets its own instance.
+	if decErr := buildPortDecoders(ports); decErr != nil {
+		for _, pc := range ports {
+			pc.closePartial()
+		}
+
+		return fmt.Errorf("comms: failed to build Opus decoders: %w", decErr)
+	}
+
 	// ── assemble runtime ───────────────────────────────────────────────────
 	rt := &CommsRuntime{
 		Encoder:         enc,
-		Decoder:         dec,
 		Ports:           ports,
 		BeepBufferStart: beepStart,
 		BeepBufferStop:  beepStop,
+		Events:          talkgroup.NewRegistry(cfg.Log),
 	}
 
 	rt.LocalIP.Store(&localIP)
@@ -352,6 +541,8 @@ func (cfg *CommsConfig) Start(ctx context.Context) error {
 
 	SetDefault(svc)
 
+	cfg.seedActiveChannel(rt)
+
 	// ── event source ───────────────────────────────────────────────────────
 	src, srcErr := cfg.buildEventSource(rt)
 	if srcErr != nil {
@@ -366,6 +557,18 @@ func (cfg *CommsConfig) Start(ctx context.Context) error {
 			rt.audioCleanup()
 		}
 	}()
+
+	// ── announcer ─────────────────────────────────────────────────────────
+	// Must run after initAudioIO: it needs the per-port playback streams
+	// that initAudioIO/startHardwareAudio install, and it checks
+	// rt.WebBridge (set by initAudioIO's web-mode branch) to skip web mode.
+	cfg.startAnnouncer(ctx, rt)
+
+	// ── GPIO selector ─────────────────────────────────────────────────────
+	// Raven-only hardware talk group selector; skipped when the board
+	// doesn't wire one or the operator disabled it. Best-effort: an open
+	// failure degrades gracefully, leaving RPC/web selection working.
+	cfg.startGPIOSelector(ctx, svc)
 
 	// ── run loop ───────────────────────────────────────────────────────────
 	cfg.Run(ctx, rt, src)
