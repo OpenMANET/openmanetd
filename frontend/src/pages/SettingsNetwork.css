@@ -33,16 +33,10 @@
   padding: 8px 0;
 }
 
-.net-table .iface-name {
+.net-panel .iface-name {
   font-family: var(--font-mono);
   color: var(--accent);
   font-weight: 600;
-}
-
-.net-table td.num,
-.net-table th.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 
 .lat-table td.num {
@@ -146,11 +140,5 @@
 
   .net-panel .status-strip {
     grid-template-columns: 1fr;
-  }
-
-  /* Tables can become very wide on narrow screens; rely on horizontal scroll
-     wrappers (table-scroll) to avoid breaking the grid layout. */
-  .net-table {
-    font-size: 10px;
   }
 }

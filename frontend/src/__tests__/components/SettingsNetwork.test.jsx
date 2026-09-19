@@ -70,21 +70,25 @@ describe('TestNetworkInterfacesRender', () => {
     mockListStaticDHCPLeases.mockResolvedValue(STATIC_LEASES);
 
     render(<SettingsNetworkPage />);
+    // DataTable renders every row as both a <td> and a mobile
+    // .lat-card-head/.kv .v, so a bare screen.getByText(name) now matches
+    // twice. Scope to the table's <td> cells only.
+    const inTable = (text) => screen.getAllByText(text).filter((el) => el.closest('td'));
     await waitFor(() => {
-      expect(screen.getByText('eth0')).toBeTruthy();
-      expect(screen.getByText('wlh0')).toBeTruthy();
+      expect(inTable('eth0').length).toBeGreaterThanOrEqual(1);
+      expect(inTable('wlh0').length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText('br-lan').length).toBeGreaterThanOrEqual(1);
     });
     // Type labels
-    expect(screen.getByText('Ethernet')).toBeTruthy();
-    expect(screen.getByText('HaLow Mesh')).toBeTruthy();
-    expect(screen.getByText('Bridge')).toBeTruthy();
+    expect(inTable('Ethernet').length).toBe(1);
+    expect(inTable('HaLow Mesh').length).toBe(1);
+    expect(inTable('Bridge').length).toBe(1);
     // Status badges
-    expect(screen.getAllByText('Up').length).toBe(2);
-    expect(screen.getAllByText('Down').length).toBe(1);
+    expect(inTable('Up').length).toBe(2);
+    expect(inTable('Down').length).toBe(1);
     // IP addresses
-    expect(screen.getByText('192.168.1.1')).toBeTruthy();
-    expect(screen.getByText('10.41.1.1')).toBeTruthy();
+    expect(inTable('192.168.1.1').length).toBe(1);
+    expect(inTable('10.41.1.1').length).toBe(1);
   });
 });
 
@@ -164,5 +168,23 @@ describe('TestDHCPStaticLeases', () => {
     fireEvent.click(screen.getByText(/Static Reservations \(1\)/));
     expect(screen.getByText('printer')).toBeTruthy();
     expect(screen.getByText('192.168.1.10')).toBeTruthy();
+  });
+});
+
+describe('TestSettingsNetworkMobileCards', () => {
+  it('renders interfaces as both table rows and cards', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({ interfaces: INTERFACES });
+    mockGetDHCPServerConfig.mockResolvedValue(DHCP_CONFIG);
+    mockListActiveDHCPLeases.mockResolvedValue(ACTIVE_LEASES);
+    mockListStaticDHCPLeases.mockResolvedValue(STATIC_LEASES);
+
+    const { container } = render(<SettingsNetworkPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-tabular')).toBeTruthy();
+    });
+    const tabular = container.querySelector('.lat-tabular');
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    expect(tableRows).toBeGreaterThan(0);
+    expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
   });
 });

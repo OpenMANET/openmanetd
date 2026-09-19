@@ -4,7 +4,7 @@
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 
 import { Phase } from '../../gen/openmanet/sysupgrade/v1/sysupgrade_pb.js';
 
@@ -212,8 +212,14 @@ describe('SettingsFirmware', () => {
 
     render(<SettingsFirmware />);
 
-    expect(await screen.findByText('v1.9.0')).toBeInTheDocument();
-    expect(screen.getByText('openmanet-1.9.0-sysupgrade.img.gz')).toBeInTheDocument();
+    // DataTable renders every row as both a <td> and a mobile
+    // .lat-card-head/.kv .v, so a bare screen.getByText(name) now matches
+    // twice. Scope to the table's <td> cells only.
+    await screen.findAllByText('v1.9.0');
+    expect(screen.getAllByText('v1.9.0').find((el) => el.tagName === 'TD')).toBeTruthy();
+    expect(
+      screen.getAllByText('openmanet-1.9.0-sysupgrade.img.gz').find((el) => el.tagName === 'TD'),
+    ).toBeTruthy();
     // matchedAsset chip says "1 newer"
     expect(screen.getByText(/1 newer/i)).toBeInTheDocument();
   });
@@ -227,14 +233,20 @@ describe('SettingsFirmware', () => {
       assets: [],
     };
 
-    render(<SettingsFirmware />);
+    const { container } = render(<SettingsFirmware />);
 
-    const installBtn = await screen.findByRole('button', { name: /^install$/i });
-    fireEvent.click(installBtn);
+    // DataTable also renders an Install button inside the mobile card, so
+    // scope to the table's copy to avoid an ambiguous match.
+    await waitFor(() => {
+      expect(container.querySelector('table.lat-table')).toBeTruthy();
+    });
+    const table = container.querySelector('table.lat-table');
+    fireEvent.click(within(table).getByRole('button', { name: /^install$/i }));
 
     // Confirm card content
     expect(await screen.findByRole('button', { name: /install — device will reboot/i })).toBeInTheDocument();
-    expect(screen.getByText(/Selected/i)).toBeInTheDocument();
+    const selectedChip = screen.getAllByText(/Selected/i).find((el) => el.closest('td'));
+    expect(selectedChip).toBeTruthy();
     // Release notes loaded via getReleaseDetail
     await waitFor(() => {
       expect(screen.getByText('Release v1.9.0')).toBeInTheDocument();
@@ -246,9 +258,14 @@ describe('SettingsFirmware', () => {
     apiState.updates = [sampleUpdate];
     apiState.release = { tag: 'v1.9.0', body: 'notes', assets: [] };
 
-    render(<SettingsFirmware />);
+    const { container } = render(<SettingsFirmware />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /^install$/i }));
+    // DataTable also renders an Install button inside the mobile card, so
+    // scope to the table's copy to avoid an ambiguous match.
+    await waitFor(() => {
+      expect(container.querySelector('table.lat-table')).toBeTruthy();
+    });
+    fireEvent.click(within(container.querySelector('table.lat-table')).getByRole('button', { name: /^install$/i }));
 
     const testOnly = await screen.findByLabelText(/Test only/i);
     fireEvent.click(testOnly);
@@ -268,9 +285,14 @@ describe('SettingsFirmware', () => {
     apiState.updates = [sampleUpdate];
     apiState.release = { tag: 'v1.9.0', body: 'notes', assets: [] };
 
-    render(<SettingsFirmware />);
+    const { container } = render(<SettingsFirmware />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /^install$/i }));
+    // DataTable also renders an Install button inside the mobile card, so
+    // scope to the table's copy to avoid an ambiguous match.
+    await waitFor(() => {
+      expect(container.querySelector('table.lat-table')).toBeTruthy();
+    });
+    fireEvent.click(within(container.querySelector('table.lat-table')).getByRole('button', { name: /^install$/i }));
 
     fireEvent.click(await screen.findByLabelText(/Test only/i));
     fireEvent.click(screen.getByLabelText(/^Force/i));
@@ -703,5 +725,51 @@ describe('SettingsFirmware factory reset', () => {
       expect(screen.queryByLabelText(/confirm hostname/i)).not.toBeInTheDocument();
     });
     expect(screen.getByRole('button', { name: /Begin reset/i })).toBeInTheDocument();
+  });
+});
+
+describe('SettingsFirmware mobile cards', () => {
+  beforeEach(() => {
+    resetApiState();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('renders the releases table as both table rows and cards', async () => {
+    apiState.systemInfo = capableInfo;
+    apiState.updates = [
+      sampleUpdate,
+      {
+        release: {
+          tag: 'v1.8.0',
+          name: 'OpenMANET 1.8.0',
+          body: '',
+          publishedAt: new Date('2026-02-10T12:00:00Z'),
+          prerelease: true,
+          version: '1.8.0',
+          assets: [],
+        },
+        matchedAsset: {
+          name: 'openmanet-1.8.0-sysupgrade.img.gz',
+          sizeBytes: 51_000_000,
+          downloadUrl: 'https://example.com/v1.8.0',
+        },
+        newerThanCurrent: true,
+      },
+    ];
+    apiState.fetchedAt = new Date('2026-04-25T12:00:00Z');
+
+    const { container } = render(<SettingsFirmware />);
+
+    await waitFor(() => {
+      expect(container.querySelector('.lat-tabular')).toBeTruthy();
+    });
+    const tabular = container.querySelector('.lat-tabular');
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    expect(tableRows).toBeGreaterThan(0);
+    expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
   });
 });

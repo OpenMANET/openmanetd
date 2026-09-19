@@ -160,13 +160,13 @@
   font-family: var(--font-mono);
 }
 
-.firmware-updates-table .release-tag {
+.firmware-panel .release-tag {
   color: var(--accent);
   font-weight: 600;
   font-family: var(--font-mono);
 }
 
-.firmware-updates-table .asset-cell {
+.firmware-panel .asset-cell {
   color: var(--muted);
   max-width: 360px;
   overflow: hidden;
@@ -174,7 +174,7 @@
   white-space: nowrap;
 }
 
-.firmware-updates-table tr.selected {
+.firmware-panel .selected {
   background: rgba(0, 229, 255, 0.08);
 }
 
@@ -520,11 +520,7 @@
     grid-template-columns: 1fr;
   }
 
-  .firmware-updates-table {
-    font-size: 10px;
-  }
-
-  .firmware-updates-table .asset-cell {
+  .firmware-panel .asset-cell {
     max-width: none;
     white-space: normal;
   }

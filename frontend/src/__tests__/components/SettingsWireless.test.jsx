@@ -804,3 +804,38 @@ describe('TestSettingsWirelessPeerFloor', () => {
     expect('meshRssiThreshold' in sent).toBe(false);
   });
 });
+
+describe('TestSettingsWirelessMobileCards', () => {
+  it('renders one .lat-tabular per rendered station table', async () => {
+    mockListRadios.mockResolvedValue({ radios: [RADIO_AP, RADIO_S1G] });
+    mockGetRadioStatus.mockResolvedValue({ status: STATUS_AP });
+    settingsFor({ radio2: SETTINGS_AP, radio0: SETTINGS_S1G });
+    mockListConnectedClients.mockResolvedValue({
+      clients: [
+        { hostname: 'laptop', macAddress: 'aa:bb:cc:dd:ee:01', signalDbm: -55, rxRateBps: 54_000_000, txRateBps: 24_000_000 },
+        { hostname: '', macAddress: 'aa:bb:cc:dd:ee:02', signalDbm: -60, rxRateBps: 1_000_000, txRateBps: 500_000 },
+      ],
+    });
+    mockListMeshPeers.mockResolvedValue({
+      peers: [
+        { hostname: 'node-b', macAddress: 'aa:bb:cc:dd:ee:03', signalDbm: -50, throughputMbps: 12.3 },
+      ],
+    });
+
+    render(<SettingsWireless />);
+    await waitFor(() => screen.getByText('2.4 GHz Radio'));
+    await waitFor(() => screen.getByText('HaLow Radio'));
+
+    fireEvent.click(screen.getByText('Connected Clients'));
+    fireEvent.click(screen.getByText('Mesh Peers'));
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('.lat-tabular').length).toBe(2);
+    });
+    document.querySelectorAll('.lat-tabular').forEach((tabular) => {
+      const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+      expect(tableRows).toBeGreaterThan(0);
+      expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
+    });
+  });
+});

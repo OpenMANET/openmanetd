@@ -7,6 +7,7 @@ import { createClient } from '@connectrpc/connect';
 import { transport } from '../services/connectClient.js';
 import { NetworkInterfaceService } from '../gen/openmanet/network_interface/v1/network_interface_service_pb.js';
 import { useNetworkInterfaces, refreshNetworkInterfaces } from '../hooks/useNetworkInterfaces.js';
+import DataTable from '../components/DataTable.jsx';
 import './SettingsNetwork.css';
 
 const netClient = createClient(NetworkInterfaceService, transport);
@@ -39,6 +40,28 @@ function formatBytes(bytes) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+const INTERFACE_COLUMNS = [
+  { key: 'name', label: 'Name', className: 'iface-name', render: (iface) => iface.name },
+  { key: 'type', label: 'Type', render: (iface) => IFACE_TYPE_LABELS[iface.type] || 'Unknown' },
+  {
+    key: 'status',
+    label: 'Status',
+    render: (iface) => {
+      const up = iface.status === IFACE_STATUS_UP;
+      return (
+        <span className={`lat-chip ${up ? 'ok' : 'crit'}`}>
+          <span className="dot" />{up ? 'Up' : 'Down'}
+        </span>
+      );
+    },
+  },
+  { key: 'ip', label: 'IP', className: 'mono', render: (iface) => iface.ipAddress || '—' },
+  { key: 'mac', label: 'MAC', className: 'mono', render: (iface) => iface.macAddress || '—' },
+  { key: 'rx', label: 'RX', className: 'num', render: (iface) => formatBytes(iface.rxBytes) },
+  { key: 'tx', label: 'TX', className: 'num', render: (iface) => formatBytes(iface.txBytes) },
+  { key: 'mtu', label: 'MTU', className: 'num', render: (iface) => iface.mtu || '—' },
+];
+
 function InterfacesPanel() {
   // Shared with Dashboard so navigating Dashboard → SettingsNetwork
   // renders cached interfaces immediately instead of flashing empty.
@@ -67,46 +90,14 @@ function InterfacesPanel() {
 
       {loading ? (
         <div className="net-empty">Loading…</div>
-      ) : interfaces.length === 0 ? (
-        <div className="net-empty">No interfaces found.</div>
       ) : (
-        <div className="table-scroll">
-          <table className="lat-table net-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>IP</th>
-                <th>MAC</th>
-                <th className="num">RX</th>
-                <th className="num">TX</th>
-                <th className="num">MTU</th>
-              </tr>
-            </thead>
-            <tbody>
-              {interfaces.map((iface) => {
-                const up = iface.status === IFACE_STATUS_UP;
-                return (
-                  <tr key={iface.name}>
-                    <td className="iface-name">{iface.name}</td>
-                    <td>{IFACE_TYPE_LABELS[iface.type] || 'Unknown'}</td>
-                    <td>
-                      <span className={`lat-chip ${up ? 'ok' : 'crit'}`}>
-                        <span className="dot" />{up ? 'Up' : 'Down'}
-                      </span>
-                    </td>
-                    <td className="mono">{iface.ipAddress || '—'}</td>
-                    <td className="mono">{iface.macAddress || '—'}</td>
-                    <td className="num">{formatBytes(iface.rxBytes)}</td>
-                    <td className="num">{formatBytes(iface.txBytes)}</td>
-                    <td className="num">{iface.mtu || '—'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          ariaLabel="Network interfaces"
+          columns={INTERFACE_COLUMNS}
+          rows={interfaces}
+          rowKey={(iface) => iface.name}
+          emptyLabel="No interfaces found."
+        />
       )}
     </div>
   );
