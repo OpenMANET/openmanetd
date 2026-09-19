@@ -31,7 +31,10 @@ const FIX_SUBTITLE = { 0: 'NO FIX', 1: 'NO FIX', 2: '2D FIX', 3: '3D FIX' };
 const POLL_INTERVAL = 2000;
 const FIX_RATE_SAMPLES = 6;
 
-const GLOBE_SIZE = 300;
+// Globe canvas size bounds. The canvas is square and measured from its
+// container so it fills a single-column mobile panel without overflowing it.
+const GLOBE_MIN = 180;
+const GLOBE_MAX = 300;
 const MIN_ZOOM = 0.8;
 const MAX_ZOOM = 4;
 const DEG2RAD = Math.PI / 180;
@@ -69,21 +72,21 @@ function snrBadge(snr) {
 
 // ── Globe rendering ─────────────────────────────────────────────────────────
 
-function drawGlobe(canvas, viewLat, viewLon, zoom) {
+function drawGlobe(canvas, viewLat, viewLon, zoom, size) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
 
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = GLOBE_SIZE * dpr;
-  canvas.height = GLOBE_SIZE * dpr;
-  canvas.style.width = GLOBE_SIZE + 'px';
-  canvas.style.height = GLOBE_SIZE + 'px';
+  canvas.width = size * dpr;
+  canvas.height = size * dpr;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
   ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, GLOBE_SIZE, GLOBE_SIZE);
+  ctx.clearRect(0, 0, size, size);
 
-  const cx = GLOBE_SIZE / 2;
-  const cy = GLOBE_SIZE / 2;
-  const r = (GLOBE_SIZE / 2 - 14) * zoom;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = (size / 2 - 14) * zoom;
 
   const lonRad = -viewLon * DEG2RAD;
   const latRad = viewLat * DEG2RAD;
@@ -160,7 +163,7 @@ function drawGlobe(canvas, viewLat, viewLon, zoom) {
 
   ctx.save();
   ctx.beginPath();
-  ctx.arc(cx, cy, (GLOBE_SIZE / 2 - 14) * Math.max(zoom, 1), 0, Math.PI * 2);
+  ctx.arc(cx, cy, (size / 2 - 14) * Math.max(zoom, 1), 0, Math.PI * 2);
   ctx.clip();
 
   ctx.beginPath();
@@ -222,7 +225,7 @@ function drawGlobe(canvas, viewLat, viewLon, zoom) {
 
   ctx.restore();
   ctx.beginPath();
-  ctx.arc(cx, cy, (GLOBE_SIZE / 2 - 14) * Math.max(zoom, 1), 0, Math.PI * 2);
+  ctx.arc(cx, cy, (size / 2 - 14) * Math.max(zoom, 1), 0, Math.PI * 2);
   ctx.strokeStyle = 'rgba(0,229,255,0.45)';
   ctx.lineWidth = 1.2;
   ctx.stroke();
@@ -234,9 +237,29 @@ function drawGlobe(canvas, viewLat, viewLon, zoom) {
 
 function GlobePanel({ position, actionsRef }) {
   const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
   const viewRef = useRef({ lat: 20, lon: 0, zoom: 1 });
   const dragRef = useRef(null);
   const [, forceRender] = useState(0);
+  const [globeSize, setGlobeSize] = useState(GLOBE_MAX);
+
+  // The canvas is a fixed-size raster, so it has to be measured rather than
+  // sized in CSS. Clamped so it fills a 360px panel without overflowing and
+  // never grows past its desktop size.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return undefined;
+    const apply = (width) => {
+      if (width <= 0) return;
+      setGlobeSize(Math.round(Math.max(GLOBE_MIN, Math.min(GLOBE_MAX, width))));
+    };
+    apply(wrap.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) apply(entry.contentRect.width);
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, []);
 
   const lat = position?.latitude;
   const lon = position?.longitude;
@@ -259,7 +282,7 @@ function GlobePanel({ position, actionsRef }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const v = viewRef.current;
-    const project = drawGlobe(canvas, v.lat, v.lon, v.zoom);
+    const project = drawGlobe(canvas, v.lat, v.lon, v.zoom, globeSize);
     if (!project || !hasPos) return;
 
     const ctx = canvas.getContext('2d');
@@ -358,7 +381,7 @@ function GlobePanel({ position, actionsRef }) {
           <button type="button" onClick={resetView}>RESET</button>
         </div>
       </div>
-      <div className="gps-globe-wrap">
+      <div className="gps-globe-wrap" ref={wrapRef}>
         <canvas ref={canvasRef} className="gps-globe-canvas" />
         {hasPos ? (
           <div className="gps-globe-coord">
@@ -368,7 +391,10 @@ function GlobePanel({ position, actionsRef }) {
         ) : (
           <div className="gps-globe-coord muted">No position data</div>
         )}
-        <div className="gps-globe-hint">Drag to rotate · scroll to zoom</div>
+        <div className="gps-globe-hint">
+          <span className="hint-fine">Drag to rotate · scroll to zoom</span>
+          <span className="hint-coarse">Drag to rotate</span>
+        </div>
       </div>
     </div>
   );

@@ -498,3 +498,29 @@ describe('TestGpsStatusPolling', () => {
     vi.useRealTimers();
   });
 });
+
+// ── Touch hints ─────────────────────────────────────────────────────────────
+
+// Standard config/status fixtures rendered; returns the RTL result so
+// callers can query the DOM.
+function renderGpsStatus() {
+  mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+  mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+  return render(<GpsStatusPage />);
+}
+
+describe('TestGpsTouchHints', () => {
+  it('offers a pointer-appropriate globe hint for each input type', async () => {
+    const { container } = renderGpsStatus();
+    await waitFor(() => {
+      expect(container.querySelector('.gps-globe-hint')).toBeTruthy();
+    });
+    // Both variants are in the DOM; CSS picks one by pointer type. The coarse
+    // variant must not promise scroll-to-zoom, which touch cannot perform.
+    const fine = container.querySelector('.gps-globe-hint .hint-fine');
+    const coarse = container.querySelector('.gps-globe-hint .hint-coarse');
+    expect(fine.textContent).toContain('scroll to zoom');
+    expect(coarse.textContent).not.toContain('scroll');
+    expect(coarse.textContent).toContain('Drag to rotate');
+  });
+});
