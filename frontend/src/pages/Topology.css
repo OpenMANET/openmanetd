@@ -372,7 +372,9 @@
 
 /* ── Mobile responsiveness: stack segments + shrink canvas height ──────── */
 
-@media (max-width: 600px) {
+/* Matches MOBILE_BREAKPOINT in src/constants.js — an 800px canvas under the
+   mobile tab bar is three screens of scroll on a phone. */
+@media (max-width: 768px) {
   .topo-canvas { min-height: 440px; }
   .topo-canvas svg { height: 440px; }
   .topo-segment-label { font-size: 9px; letter-spacing: 0.12em; }

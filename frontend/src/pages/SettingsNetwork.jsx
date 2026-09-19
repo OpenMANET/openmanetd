@@ -7,6 +7,7 @@ import { createClient } from '@connectrpc/connect';
 import { transport } from '../services/connectClient.js';
 import { NetworkInterfaceService } from '../gen/openmanet/network_interface/v1/network_interface_service_pb.js';
 import { useNetworkInterfaces, refreshNetworkInterfaces } from '../hooks/useNetworkInterfaces.js';
+import DataTable from '../components/DataTable.jsx';
 import './SettingsNetwork.css';
 
 const netClient = createClient(NetworkInterfaceService, transport);
@@ -39,6 +40,28 @@ function formatBytes(bytes) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+const INTERFACE_COLUMNS = [
+  { key: 'name', label: 'Name', className: 'iface-name', render: (iface) => iface.name },
+  { key: 'type', label: 'Type', render: (iface) => IFACE_TYPE_LABELS[iface.type] || 'Unknown' },
+  {
+    key: 'status',
+    label: 'Status',
+    render: (iface) => {
+      const up = iface.status === IFACE_STATUS_UP;
+      return (
+        <span className={`lat-chip ${up ? 'ok' : 'crit'}`}>
+          <span className="dot" />{up ? 'Up' : 'Down'}
+        </span>
+      );
+    },
+  },
+  { key: 'ip', label: 'IP', className: 'mono', render: (iface) => iface.ipAddress || '—' },
+  { key: 'mac', label: 'MAC', className: 'mono', render: (iface) => iface.macAddress || '—' },
+  { key: 'rx', label: 'RX', className: 'num', headerClass: 'num', render: (iface) => formatBytes(iface.rxBytes) },
+  { key: 'tx', label: 'TX', className: 'num', headerClass: 'num', render: (iface) => formatBytes(iface.txBytes) },
+  { key: 'mtu', label: 'MTU', className: 'num', headerClass: 'num', render: (iface) => iface.mtu || '—' },
+];
+
 function InterfacesPanel() {
   // Shared with Dashboard so navigating Dashboard → SettingsNetwork
   // renders cached interfaces immediately instead of flashing empty.
@@ -66,79 +89,44 @@ function InterfacesPanel() {
       {error && <div className="lat-alert crit">{error}</div>}
 
       {loading ? (
-        <div className="net-empty">Loading…</div>
-      ) : interfaces.length === 0 ? (
-        <div className="net-empty">No interfaces found.</div>
+        <div className="lat-empty">Loading…</div>
       ) : (
-        <div className="table-scroll">
-          <table className="lat-table net-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>IP</th>
-                <th>MAC</th>
-                <th className="num">RX</th>
-                <th className="num">TX</th>
-                <th className="num">MTU</th>
-              </tr>
-            </thead>
-            <tbody>
-              {interfaces.map((iface) => {
-                const up = iface.status === IFACE_STATUS_UP;
-                return (
-                  <tr key={iface.name}>
-                    <td className="iface-name">{iface.name}</td>
-                    <td>{IFACE_TYPE_LABELS[iface.type] || 'Unknown'}</td>
-                    <td>
-                      <span className={`lat-chip ${up ? 'ok' : 'crit'}`}>
-                        <span className="dot" />{up ? 'Up' : 'Down'}
-                      </span>
-                    </td>
-                    <td className="mono">{iface.ipAddress || '—'}</td>
-                    <td className="mono">{iface.macAddress || '—'}</td>
-                    <td className="num">{formatBytes(iface.rxBytes)}</td>
-                    <td className="num">{formatBytes(iface.txBytes)}</td>
-                    <td className="num">{iface.mtu || '—'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          ariaLabel="Network interfaces"
+          columns={INTERFACE_COLUMNS}
+          rows={interfaces}
+          rowKey={(iface) => iface.name}
+          emptyLabel="No interfaces found."
+        />
       )}
     </div>
   );
 }
 
-function LeasesTable({ rows, columns }) {
-  if (!rows || rows.length === 0) {
-    return <div className="net-empty">No entries.</div>;
-  }
+// Module-level like INTERFACE_COLUMNS above — neither depends on props or
+// state, so there's no reason to rebuild them on every DHCPPanel render.
+const ACTIVE_LEASE_COLUMNS = [
+  { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
+  { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
+  { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
+  { key: 'expiresSeconds', label: 'Expires', className: 'num', headerClass: 'num', render: (r) => `${r.expiresSeconds}s` },
+];
+
+const STATIC_LEASE_COLUMNS = [
+  { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
+  { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
+  { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
+];
+
+function LeasesTable({ rows, columns, ariaLabel }) {
   return (
-    <div className="table-scroll">
-      <table className="lat-table">
-        <thead>
-          <tr>
-            {columns.map((c) => (
-              <th key={c.key} className={c.num ? 'num' : ''}>{c.label}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i}>
-              {columns.map((c) => (
-                <td key={c.key} className={`${c.mono ? 'mono' : ''} ${c.num ? 'num' : ''}`.trim()}>
-                  {c.render ? c.render(r) : (r[c.key] ?? '—')}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      ariaLabel={ariaLabel}
+      columns={columns}
+      rows={rows ?? []}
+      rowKey={(r, i) => r.macAddress ?? String(i)}
+      emptyLabel="No entries."
+    />
   );
 }
 
@@ -177,19 +165,6 @@ function DHCPPanel() {
     load();
   }, [load]);
 
-  const activeColumns = [
-    { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
-    { key: 'macAddress', label: 'MAC', mono: true },
-    { key: 'ipAddress', label: 'IP', mono: true },
-    { key: 'expiresSeconds', label: 'Expires', num: true, render: (r) => `${r.expiresSeconds}s` },
-  ];
-
-  const staticColumns = [
-    { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
-    { key: 'macAddress', label: 'MAC', mono: true },
-    { key: 'ipAddress', label: 'IP', mono: true },
-  ];
-
   return (
     <div className="lat-panel net-panel">
       <div className="panel-head">
@@ -209,9 +184,9 @@ function DHCPPanel() {
       {error && <div className="lat-alert crit">{error}</div>}
 
       {loading ? (
-        <div className="net-empty">Loading…</div>
+        <div className="lat-empty">Loading…</div>
       ) : !config ? (
-        <div className="net-empty">DHCP server not configured.</div>
+        <div className="lat-empty">DHCP server not configured.</div>
       ) : (
         <>
           <div className="status-strip">
@@ -251,7 +226,7 @@ function DHCPPanel() {
             </button>
             {showActive && (
               <div className="disclosure-body">
-                <LeasesTable rows={activeLeases} columns={activeColumns} />
+                <LeasesTable rows={activeLeases} columns={ACTIVE_LEASE_COLUMNS} ariaLabel="Active DHCP leases" />
               </div>
             )}
           </div>
@@ -268,7 +243,7 @@ function DHCPPanel() {
             </button>
             {showStatic && (
               <div className="disclosure-body">
-                <LeasesTable rows={staticLeases} columns={staticColumns} />
+                <LeasesTable rows={staticLeases} columns={STATIC_LEASE_COLUMNS} ariaLabel="Static DHCP reservations" />
               </div>
             )}
           </div>

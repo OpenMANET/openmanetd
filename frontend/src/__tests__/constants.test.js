@@ -5,6 +5,9 @@
 // and internal consistency.
 
 import { describe, it, expect } from 'vitest';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SAMPLE_RATE,
   WHISPER_RATE,
@@ -15,6 +18,7 @@ import {
   MSG_TYPE,
   VOX_HANGTIME_MS,
   NEIGHBOR_HISTORY_LENGTH,
+  MOBILE_BREAKPOINT,
 } from '../constants.js';
 
 describe('TestAudioConstants', () => {
@@ -125,5 +129,89 @@ describe('TestVoxConstants', () => {
 describe('TestNeighborHistoryConstants', () => {
   it('NEIGHBOR_HISTORY_LENGTH is a positive number', () => {
     expect(NEIGHBOR_HISTORY_LENGTH).toBeGreaterThan(0);
+  });
+});
+
+describe('TestMobileBreakpoint', () => {
+  it('is 768 to match the CSS grid collapse breakpoint', () => {
+    expect(MOBILE_BREAKPOINT).toBe(768);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// CSS cannot import MOBILE_BREAKPOINT, so every stylesheet that mirrors the
+// shell's collapse breakpoint repeats it as a literal `768px`. The test above
+// only pins the JS half; this one reads every stylesheet under src/ and pins
+// the CSS half too, so a change to MOBILE_BREAKPOINT that isn't mirrored into
+// every `@media (max-width: 768px)` block fails here instead of shipping a
+// page whose shell and grid collapse at a different width than its panels.
+function listCssFiles(dir) {
+  const files = [];
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) {
+      files.push(...listCssFiles(full));
+    } else if (name.endsWith('.css')) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+describe('TestMobileBreakpointCssSync', () => {
+  const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const cssFiles = listCssFiles(srcDir);
+
+  it('found stylesheets to check (guards against a broken scan)', () => {
+    expect(cssFiles.length).toBeGreaterThan(0);
+  });
+
+  // Every `@media` query in the file, one entry per query — not per file.
+  // A file-level substring scan would pass a stylesheet that carried both a
+  // correct `max-width: 768px` and a wrong `min-width: 768px`, since the
+  // correct spelling appears somewhere in the text either way.
+  function mediaQueries(path) {
+    const content = readFileSync(path, 'utf8');
+    return [...content.matchAll(/@media([^{]*)\{/g)].map((m) => ({
+      path,
+      query: m[1].trim(),
+    }));
+  }
+
+  it('every @media query mentioning 768px is the max-width form', () => {
+    const target = `max-width: ${MOBILE_BREAKPOINT}px`;
+    const drifted = cssFiles
+      .flatMap(mediaQueries)
+      .filter(({ query }) => query.includes(`${MOBILE_BREAKPOINT}px`) && !query.includes(target))
+      .map(({ path, query }) => `${path}: @media ${query}`);
+    expect(drifted).toEqual([]);
+  });
+
+  it('rejects a drifted query even when a correct one sits in the same file', () => {
+    // Pins the bug the file-level scan had: this input contains the expected
+    // substring, so the old check passed it.
+    const mixed = `
+      @media (max-width: ${MOBILE_BREAKPOINT}px) { .a { color: red } }
+      @media (min-width: ${MOBILE_BREAKPOINT}px) { .b { color: blue } }
+    `;
+    const target = `max-width: ${MOBILE_BREAKPOINT}px`;
+    expect(mixed.includes(target)).toBe(true);
+
+    const drifted = [...mixed.matchAll(/@media([^{]*)\{/g)]
+      .map((m) => m[1].trim())
+      .filter((query) => query.includes(`${MOBILE_BREAKPOINT}px`) && !query.includes(target));
+    expect(drifted).toEqual([`(min-width: ${MOBILE_BREAKPOINT}px)`]);
+  });
+
+  it('rejects the media-query range syntax this project builds against', () => {
+    // `(width<=768px)` is what an unconstrained minifier emits and what the
+    // target device's browser cannot parse — the defect the cssTarget guard
+    // exists for. It must not slip into hand-written CSS either.
+    const target = `max-width: ${MOBILE_BREAKPOINT}px`;
+    const range = `@media (width<=${MOBILE_BREAKPOINT}px) { .a { color: red } }`;
+    const drifted = [...range.matchAll(/@media([^{]*)\{/g)]
+      .map((m) => m[1].trim())
+      .filter((query) => query.includes(`${MOBILE_BREAKPOINT}px`) && !query.includes(target));
+    expect(drifted).toEqual([`(width<=${MOBILE_BREAKPOINT}px)`]);
   });
 });

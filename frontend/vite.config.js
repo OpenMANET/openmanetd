@@ -17,6 +17,14 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, '../static'),
     emptyOutDir: false,
+    // Rolldown's CSS minifier emits media query range syntax — `(width<=640px)`
+    // — unless a target constrains it. Browsers older than Chrome 104 /
+    // Safari 16.4 discard those at-rules wholesale, which silently disabled
+    // every responsive rule in the shipped bundle. These floors cover the
+    // stock browsers on the embedded ARM and Android field devices while
+    // still permitting custom properties, flexbox gap, and grid.
+    // Guarded by frontend/scripts/check-css-target.mjs in `make frontend`.
+    cssTarget: ['chrome87', 'safari13.1', 'firefox78', 'edge88'],
     // Raised above the size of the (lazy-loaded) TopologyMap chunk, which
     // carries reagraph + three.js. Any synchronous chunk exceeding this is a
     // genuine regression worth investigating.

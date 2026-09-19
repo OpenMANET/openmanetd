@@ -804,3 +804,66 @@ describe('TestSettingsWirelessPeerFloor', () => {
     expect('meshRssiThreshold' in sent).toBe(false);
   });
 });
+
+describe('TestSettingsWirelessMeshPeerFallbacks', () => {
+  it('shows 0.0 Mbps for a peer with no throughput and keys it by row index', async () => {
+    mockListRadios.mockResolvedValue({ radios: [RADIO_S1G] });
+    mockGetRadioStatus.mockResolvedValue({ status: STATUS_S1G });
+    mockGetRadioSettings.mockResolvedValue(SETTINGS_S1G);
+    // throughputMbps omitted hits `r.throughputMbps?.toFixed(1) ?? '0.0'`;
+    // macAddress: null hits the rowKey fallback
+    // (`r.macAddress ?? String(i)`) shared by both station tables.
+    mockListConnectedClients.mockResolvedValue({ clients: [] });
+    mockListMeshPeers.mockResolvedValue({
+      peers: [{ hostname: 'node-c', macAddress: null, signalDbm: -66 }],
+    });
+
+    render(<SettingsWireless />);
+    await waitFor(() => screen.getByDisplayValue('old-mesh'));
+
+    fireEvent.click(screen.getByText('Mesh Peers'));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('node-c').some((el) => el.tagName === 'TD')).toBe(true);
+    });
+    const row = screen.getAllByText('node-c').find((el) => el.tagName === 'TD').closest('tr');
+    const cells = [...row.querySelectorAll('td')];
+    // name(0), mac(1), signal(2), throughput(3)
+    expect(cells[3].textContent).toBe('0.0 Mbps');
+  });
+});
+
+describe('TestSettingsWirelessMobileCards', () => {
+  it('renders one .lat-tabular per rendered station table', async () => {
+    mockListRadios.mockResolvedValue({ radios: [RADIO_AP, RADIO_S1G] });
+    mockGetRadioStatus.mockResolvedValue({ status: STATUS_AP });
+    settingsFor({ radio2: SETTINGS_AP, radio0: SETTINGS_S1G });
+    mockListConnectedClients.mockResolvedValue({
+      clients: [
+        { hostname: 'laptop', macAddress: 'aa:bb:cc:dd:ee:01', signalDbm: -55, rxRateBps: 54_000_000, txRateBps: 24_000_000 },
+        { hostname: '', macAddress: 'aa:bb:cc:dd:ee:02', signalDbm: -60, rxRateBps: 1_000_000, txRateBps: 500_000 },
+      ],
+    });
+    mockListMeshPeers.mockResolvedValue({
+      peers: [
+        { hostname: 'node-b', macAddress: 'aa:bb:cc:dd:ee:03', signalDbm: -50, throughputMbps: 12.3 },
+      ],
+    });
+
+    render(<SettingsWireless />);
+    await waitFor(() => screen.getByText('2.4 GHz Radio'));
+    await waitFor(() => screen.getByText('HaLow Radio'));
+
+    fireEvent.click(screen.getByText('Connected Clients'));
+    fireEvent.click(screen.getByText('Mesh Peers'));
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('.lat-tabular').length).toBe(2);
+    });
+    document.querySelectorAll('.lat-tabular').forEach((tabular) => {
+      const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+      expect(tableRows).toBeGreaterThan(0);
+      expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
+    });
+  });
+});

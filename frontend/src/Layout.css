@@ -2,8 +2,10 @@
  * Layout.css — Lattice app shell (sidebar + bottom tabs + status topbar)
  * ============================================================================= */
 
-/* Override body styles when Layout is active */
-body:has(.layout-desktop), body:has(.layout-mobile) {
+/* Override body styles when Layout is active. The class is applied by
+   Layout.jsx — :has() is unsupported on some field-device browsers and
+   cannot be lowered by the build target. */
+body.lat-shell-active {
   padding: 0;
   align-items: stretch;
 }
@@ -428,7 +430,10 @@ body:has(.layout-desktop), body:has(.layout-mobile) {
   .lat-body.grid-4 { grid-template-columns: 1fr 1fr; }
   .lat-body.grid-3 { grid-template-columns: 1fr 1fr; }
 }
-@media (max-width: 640px) {
+/* Mobile collapse. Matches MOBILE_BREAKPOINT in src/constants.js, which the
+   shell's tab-bar switch reads — the two must stay equal so single-column
+   layout and the touch shell always coincide. */
+@media (max-width: 768px) {
   .lat-body { padding: 12px; }
   .lat-body.grid-4,
   .lat-body.grid-3,

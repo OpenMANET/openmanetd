@@ -4,10 +4,12 @@
 
 /* ── Sky plot SVG (shared with SkyPlot.jsx) ─────────────────────────────── */
 
+/* The SVG is viewBox-scaled, so it can simply fill its panel. The cap keeps
+   it from dominating a wide desktop column. */
 .skyplot-svg {
   display: block;
-  width: 220px;
-  max-width: 100%;
+  width: 100%;
+  max-width: 260px;
   height: auto;
 }
 
@@ -106,6 +108,13 @@
   text-align: center;
 }
 
+/* The globe zooms on wheel only, so the touch hint must not promise it. */
+.gps-globe-hint .hint-coarse { display: none; }
+@media (pointer: coarse) {
+  .gps-globe-hint .hint-fine { display: none; }
+  .gps-globe-hint .hint-coarse { display: inline; }
+}
+
 /* ── Sky plot panel ─────────────────────────────────────────────────────── */
 
 .gps-sky-wrap {
@@ -156,23 +165,9 @@
 
 /* ── Satellite SNR panel ────────────────────────────────────────────────── */
 
-.gps-table-scroll {
-  overflow-x: auto;
-  width: 100%;
-}
-
 .lat-panel .panel-head .actions button.gps-filter-active {
   color: var(--accent);
   border-bottom: 1px solid var(--accent);
-}
-
-.gps-empty {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  padding: 16px 0;
-  text-align: center;
 }
 
 /* ── Output protocols panel ─────────────────────────────────────────────── */
@@ -209,7 +204,7 @@
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .gps-output-row {
     grid-template-columns: 1fr;
   }

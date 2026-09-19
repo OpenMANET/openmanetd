@@ -24,6 +24,7 @@ import {
 } from '../services/sysupgradeApi.js';
 import { Phase } from '../gen/openmanet/sysupgrade/v1/sysupgrade_pb.js';
 import { renderReleaseNotes } from '../util/renderReleaseNotes.js';
+import DataTable from '../components/DataTable.jsx';
 import './SettingsFirmware.css';
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,85 @@ function KV({ k, v, mono, variant }) {
 // AvailableUpdatesPanel
 // ---------------------------------------------------------------------------
 
+// Column spec for the releases table. Built per-render (behind useMemo in
+// AvailableUpdatesPanel below) rather than as a module-level const because
+// the Action column and the selected-row highlight both close over
+// component props (selectedTag, onSelect, disabled).
+function releaseColumns({ selectedTag, onSelect, disabled }) {
+  const selectedClass = (u) => {
+    const tag = u?.release?.tag ?? '';
+    return selectedTag && tag === selectedTag ? 'selected' : '';
+  };
+  return [
+    {
+      key: 'tag',
+      label: 'Tag',
+      className: 'release-tag',
+      cellClass: selectedClass,
+      render: (u) => u?.release?.tag ?? '',
+    },
+    {
+      key: 'published',
+      label: 'Published',
+      className: 'mono',
+      cellClass: selectedClass,
+      render: (u) => (u.release?.publishedAt
+        ? `${formatDate(u.release.publishedAt)} · ${formatRelative(u.release.publishedAt)}`
+        : '—'),
+    },
+    {
+      key: 'type',
+      label: 'Type',
+      cellClass: selectedClass,
+      render: (u) => {
+        const prerelease = u.release?.prerelease;
+        return (
+          <span className={`lat-chip ${prerelease ? 'warn' : 'ok'}`}>
+            <span className="dot" />
+            {prerelease ? 'Pre-release' : 'Stable'}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'asset',
+      label: 'Asset',
+      className: 'mono asset-cell',
+      cellClass: selectedClass,
+      render: (u) => u.matchedAsset?.name || '—',
+    },
+    {
+      key: 'size',
+      label: 'Size',
+      className: 'num',
+      headerClass: 'num',
+      cellClass: selectedClass,
+      render: (u) => formatBytes(u.matchedAsset?.sizeBytes ?? 0),
+    },
+    {
+      key: 'action',
+      label: 'Action',
+      cellClass: selectedClass,
+      render: (u) => {
+        const tag = u?.release?.tag ?? '';
+        const isSelected = selectedTag && tag === selectedTag;
+        return isSelected ? (
+          <span className="lat-chip"><span className="dot" />Selected</span>
+        ) : (
+          <button
+            type="button"
+            className="lat-btn primary sm"
+            onClick={() => onSelect(u)}
+            disabled={disabled}
+          >
+            Install
+          </button>
+        );
+      },
+    },
+  ];
+}
+
 function AvailableUpdatesPanel({
   updates,
   fetchedAt,
@@ -205,6 +285,10 @@ function AvailableUpdatesPanel({
   error,
 }) {
   const count = updates?.length ?? 0;
+  const columns = useMemo(
+    () => releaseColumns({ selectedTag, onSelect, disabled }),
+    [selectedTag, onSelect, disabled],
+  );
   let chip;
   if (loading) {
     chip = (
@@ -264,68 +348,30 @@ function AvailableUpdatesPanel({
       )}
       {error && <div className="lat-alert crit">{errorMessage(error)}</div>}
 
-      {count === 0 && !loading ? (
+      {/* Gated on count === 0 alone (not count === 0 && !loading) so
+          "nothing to show yet" has one source of truth: DataTable never
+          renders with an empty rows array from this call site, regardless
+          of loading state. Without the loading guard baked into this
+          branch, the mount sequence (updatesLoading starts false, the
+          mount effect flips it to true before the fetch resolves) hits a
+          render where count === 0 && !loading is false but updates is
+          still [] — that used to fall into the DataTable branch and render
+          a blank .lat-empty box for the duration of the initial check. */}
+      {count === 0 ? (
         <div className="firmware-empty">
-          {fetchedAt
-            ? 'Up to date — no newer firmware available for this hardware.'
-            : 'Click “Check for Updates” to query GitHub.'}
+          {loading
+            ? 'Checking for updates…'
+            : fetchedAt
+              ? 'Up to date — no newer firmware available for this hardware.'
+              : 'Click “Check for Updates” to query GitHub.'}
         </div>
       ) : (
-        <div className="table-scroll">
-          <table className="lat-table firmware-updates-table">
-            <thead>
-              <tr>
-                <th>Tag</th>
-                <th>Published</th>
-                <th>Type</th>
-                <th>Asset</th>
-                <th className="num">Size</th>
-                <th className="act">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {updates.map((u) => {
-                const tag = u?.release?.tag ?? '';
-                const isSelected = selectedTag && tag === selectedTag;
-                const asset = u.matchedAsset?.name ?? '';
-                const size = u.matchedAsset?.sizeBytes ?? 0;
-                const prerelease = u.release?.prerelease;
-                return (
-                  <tr key={tag} className={isSelected ? 'selected' : ''}>
-                    <td className="release-tag">{tag}</td>
-                    <td className="mono">
-                      {u.release?.publishedAt
-                        ? `${formatDate(u.release.publishedAt)} · ${formatRelative(u.release.publishedAt)}`
-                        : '—'}
-                    </td>
-                    <td>
-                      <span className={`lat-chip ${prerelease ? 'warn' : 'ok'}`}>
-                        <span className="dot" />
-                        {prerelease ? 'Pre-release' : 'Stable'}
-                      </span>
-                    </td>
-                    <td className="mono asset-cell">{asset || '—'}</td>
-                    <td className="num">{formatBytes(size)}</td>
-                    <td className="act">
-                      {isSelected ? (
-                        <span className="lat-chip"><span className="dot" />Selected</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="lat-btn primary sm"
-                          onClick={() => onSelect(u)}
-                          disabled={disabled}
-                        >
-                          Install
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          ariaLabel="Available firmware updates"
+          columns={columns}
+          rows={updates}
+          rowKey={(u, i) => u?.release?.tag ?? String(i)}
+        />
       )}
     </section>
   );

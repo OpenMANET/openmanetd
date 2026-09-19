@@ -327,7 +327,7 @@ export default function BLOSPage() {
             <span className="panel-head-right">{peers.length} visible</span>
           </div>
           {peers.length === 0 ? (
-            <div className="blos-empty">
+            <div className="lat-empty">
               {enabled ? 'No overlay peers yet.' : 'BLOS is disabled.'}
             </div>
           ) : (
@@ -432,7 +432,7 @@ export default function BLOSPage() {
         <div className="lat-panel col-span-2">
           <div className="panel-head"><h3>Keepalive &amp; Events</h3></div>
           {events.length === 0 ? (
-            <div className="blos-empty">
+            <div className="lat-empty">
               {enabled ? 'Waiting for events…' : 'BLOS is disabled.'}
             </div>
           ) : (

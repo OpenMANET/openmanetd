@@ -63,21 +63,6 @@
   border: 1px solid var(--border-subtle);
 }
 
-/* Key column is fixed-width so the value sits right after its label instead
-   of being pushed to the far edge of a stretched grid cell (which read as
-   the value belonging to the *next* key on wide screens). Mirrors the
-   firmware page's strip. */
-.radio-card .status-strip .kv {
-  display: grid;
-  grid-template-columns: 96px 1fr;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11px;
-  border-bottom: none;
-  padding: 2px 0;
-  min-width: 0;
-}
-
 .radio-card .status-strip .kv .k {
   color: var(--muted);
   letter-spacing: 0.08em;
@@ -227,19 +212,6 @@
   overflow-x: auto;
 }
 
-.radio-card .empty-row {
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-  padding: 8px 0;
-}
-
-.radio-card .lat-table td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
 .radio-card .lat-table td.mono {
   color: var(--muted);
 }
@@ -267,7 +239,7 @@
 }
 
 /* mobile ----------------------------------------------------------------- */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .settings-wireless-list {
     padding: 12px;
     gap: 12px;

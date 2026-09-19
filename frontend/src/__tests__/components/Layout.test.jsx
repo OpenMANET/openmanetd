@@ -6,6 +6,7 @@ import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Layout from '../../Layout.jsx';
+import { MOBILE_BREAKPOINT } from '../../constants.js';
 import { resumeSetup } from '../../services/setupDismiss.js';
 
 vi.mock('../../contexts/useAuth.js', () => ({
@@ -184,5 +185,44 @@ describe('TestLayoutNavLinks', () => {
     expect(hrefs).toContain('/gps');
     expect(hrefs).toContain('/blos');
     expect(hrefs).toContain('/settings');
+  });
+});
+
+describe('TestLayoutBreakpointBoundary', () => {
+  // The CSS breakpoint is `max-width: 768px`, which is inclusive, so 768 must
+  // get the mobile shell. Layout used a strict `<` here, which rendered the
+  // desktop sidebar around mobile-styled content at exactly iPad portrait
+  // width. These three cases pin both sides of the boundary and the boundary
+  // itself, so the JS and CSS halves cannot drift apart again.
+  it('renders the mobile shell at exactly MOBILE_BREAKPOINT', () => {
+    const { container } = renderLayout(MOBILE_BREAKPOINT);
+    expect(container.querySelector('.layout-mobile')).toBeTruthy();
+    expect(container.querySelector('.bottom-tab-bar')).toBeTruthy();
+    expect(container.querySelector('.sidebar')).toBeNull();
+  });
+
+  it('renders the mobile shell one pixel below MOBILE_BREAKPOINT', () => {
+    const { container } = renderLayout(MOBILE_BREAKPOINT - 1);
+    expect(container.querySelector('.layout-mobile')).toBeTruthy();
+  });
+
+  it('renders the desktop shell one pixel above MOBILE_BREAKPOINT', () => {
+    const { container } = renderLayout(MOBILE_BREAKPOINT + 1);
+    expect(container.querySelector('.layout-desktop')).toBeTruthy();
+    expect(container.querySelector('.sidebar')).toBeTruthy();
+    expect(container.querySelector('.bottom-tab-bar')).toBeNull();
+  });
+});
+
+describe('TestLayoutBodyClass', () => {
+  it('adds lat-shell-active to body while mounted', () => {
+    renderLayout(1024);
+    expect(document.body.classList.contains('lat-shell-active')).toBe(true);
+  });
+
+  it('removes lat-shell-active from body on unmount', () => {
+    const { unmount } = renderLayout(1024);
+    unmount();
+    expect(document.body.classList.contains('lat-shell-active')).toBe(false);
   });
 });

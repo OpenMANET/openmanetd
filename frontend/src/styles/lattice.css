@@ -94,6 +94,9 @@ html, body {
   flex-direction: column;
   gap: 10px;
   position: relative;
+  /* Grid/flex children default to min-width:auto, which lets a nowrap table
+     inside a panel force the whole page wider than the viewport. */
+  min-width: 0;
 }
 .lat-panel.col-span-2 { grid-column: span 2; }
 .lat-panel.col-span-3 { grid-column: span 3; }
@@ -505,9 +508,17 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
 
 /* ------------------------------------------------------------------ kv */
 
+/* Two-column grid rather than space-between flex: a fixed label column stops
+   long values wrapping inside themselves, which broke coordinates mid-token
+   ("39° 47'" / "26.90\" N") on narrow viewports. The 112px figure matches the
+   status-strip pattern SettingsNetwork used before its page-local .kv
+   override was folded into this primitive; SettingsWireless and
+   SettingsFirmware used 96px (this primitive's own mobile value) and now
+   converge on 112px at desktop / 96px below 768px like everything else. */
 .kv {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  align-items: baseline;
   font-size: 11px;
   padding: 3px 0;
   border-bottom: 1px dashed rgba(255, 255, 255, 0.04);
@@ -524,6 +535,9 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
 .kv .v {
   color: var(--text);
   font-family: var(--font-mono);
+  text-align: right;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .kv .v.ok { color: var(--ok); }
 .kv .v.warn { color: var(--warn); }
@@ -717,12 +731,65 @@ input[type="range"].lat-slider:disabled {
   white-space: nowrap;
 }
 .lat-table tbody tr:hover { background: rgba(0, 229, 255, 0.04); }
-.lat-table .badge-ok { color: var(--ok); }
-.lat-table .badge-warn { color: var(--warn); }
-.lat-table .badge-crit { color: var(--crit); }
-.lat-table .mono { font-family: var(--font-mono); color: var(--muted); }
+/* Primitive rule for numeric columns — was duplicated in SettingsNetwork.css
+   and SettingsWireless.css, which meant it only applied when those route
+   chunks happened to be loaded. th.num pairs with DataTable's headerClass. */
+.lat-table th.num, .lat-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
-.table-scroll { overflow-x: auto; }
+/* Unscoped (not `.lat-table .badge-*` / `.lat-table .mono`): DataTable
+   applies these classes to both the <td> in .lat-table and the card .v in
+   .lat-cardlist (see components/DataTable.jsx), so the rule must reach both
+   renderings. The class names are unique enough that scoping buys nothing.
+   (.mono also reaches any standalone `.kv .v.mono` outside a DataTable
+   entirely, e.g. SettingsFirmware's KV helper — same defect, same fix.) */
+.badge-ok { color: var(--ok); }
+.badge-warn { color: var(--warn); }
+.badge-crit { color: var(--crit); }
+.mono { font-family: var(--font-mono); color: var(--muted); }
+
+.table-scroll { overflow-x: auto; max-width: 100%; }
+
+/* ---------------------------------------------------------------- tabular */
+/* A .lat-tabular holds both a .lat-table and a .lat-cardlist rendered from
+   the same data (see components/DataTable.jsx). Exactly one is visible: the
+   table above the mobile breakpoint, the card list below it. */
+
+.lat-cardlist { display: none; }
+
+.lat-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lat-card-head {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-wrap: anywhere;
+}
+
+/* Left-aligned to match the empty-state rhythm already in use across the
+   app (net-empty, empty-row, blos-empty, now folded into this primitive)
+   rather than the centered figure DataTable shipped with initially. */
+.lat-empty {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 16px 0;
+  text-align: left;
+}
 
 /* ------------------------------------------------------------------ status dot */
 
@@ -863,6 +930,49 @@ input[type="range"].lat-slider:disabled {
 .yaml-preview .s { color: var(--ok); }
 .yaml-preview .n { color: var(--warn); }
 .yaml-preview .c { color: var(--dim); font-style: italic; }
+
+/* ------------------------------------------------------------------ mobile */
+/* Matches MOBILE_BREAKPOINT in src/constants.js. Below this width the shell
+   shows the bottom tab bar, which is the signal that the user is on a touch
+   device: targets grow to 44px and density drops. */
+
+@media (max-width: 768px) {
+  .lat-panel { padding: 12px; }
+
+  /* Narrower label column — 112px is a third of a 360px viewport. */
+  .kv { grid-template-columns: 96px 1fr; }
+
+  /* 36px eats a third of the panel width at 360px. */
+  .big-num { font-size: 28px; }
+  .big-num .unit { font-size: 11px; }
+
+  /* Touch targets. The desktop primitives are deliberately untouched — this
+     is a mobile-scoped padding bump, per .claude/rules/frontend.md. */
+  .lat-panel .panel-head .actions button {
+    min-height: 44px;
+    padding: 6px 12px;
+  }
+  .lat-panel .panel-head {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .lat-view-toolbar .lat-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 8px 14px;
+  }
+
+  .lat-tabular .table-scroll { display: none; }
+  .lat-cardlist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+}
 
 /* ------------------------------------------------------------------ accessibility */
 
