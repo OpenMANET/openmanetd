@@ -6,6 +6,7 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from './contexts/useAuth.js';
 import SetupDismissBanner from './components/SetupDismissBanner.jsx';
+import NavIcon from './components/NavIcon.jsx';
 import { MOBILE_BREAKPOINT } from './constants.js';
 import './Layout.css';
 
@@ -14,31 +15,31 @@ const NAV_GROUPS = [
   {
     label: 'Operations',
     items: [
-      { to: '/',          label: 'Dashboard', short: 'Home' },
-      { to: '/comms',     label: 'Comms',     short: 'Comms' },
-      { to: '/topology',  label: 'Topology',  short: 'Topo' },
-      { to: '/gps',       label: 'GPS / GNSS', short: 'GPS' },
-      { to: '/blos',      label: 'BLOS',      short: 'BLOS' },
+      { to: '/',          label: 'Dashboard', short: 'Home',  icon: 'dashboard' },
+      { to: '/comms',     label: 'Comms',     short: 'Comms', icon: 'comms' },
+      { to: '/topology',  label: 'Topology',  short: 'Topo',  icon: 'topology' },
+      { to: '/gps',       label: 'GPS / GNSS', short: 'GPS',  icon: 'gps' },
+      { to: '/blos',      label: 'BLOS',      short: 'BLOS',  icon: 'blos' },
     ],
   },
   {
     label: 'System',
     items: [
-      { to: '/settings',  label: 'Settings',  short: 'Config' },
+      { to: '/settings',  label: 'Settings',  short: 'Config', icon: 'settings' },
     ],
   },
 ];
 
 // Bottom tab bar — 4 primary tabs plus a "More" overflow for the rest.
 const PRIMARY_TABS = [
-  { to: '/',         short: 'Home' },
-  { to: '/comms',    short: 'Comms' },
-  { to: '/topology', short: 'Topo' },
-  { to: '/gps',      short: 'GPS' },
+  { to: '/',         short: 'Home',  icon: 'dashboard' },
+  { to: '/comms',    short: 'Comms', icon: 'comms' },
+  { to: '/topology', short: 'Topo',  icon: 'topology' },
+  { to: '/gps',      short: 'GPS',   icon: 'gps' },
 ];
 const OVERFLOW_TABS = [
-  { to: '/blos',     label: 'BLOS' },
-  { to: '/settings', label: 'Settings' },
+  { to: '/blos',     label: 'BLOS',     icon: 'blos' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
 ];
 
 export default function Layout() {
@@ -97,7 +98,7 @@ export default function Layout() {
                   className={({ isActive }) => 'tab-sheet-item' + (isActive ? ' active' : '')}
                   onClick={() => setSheetOpen(false)}
                 >
-                  <span className="nav-icon">◇</span>
+                  <span className="nav-icon"><NavIcon name={item.icon} /></span>
                   <span>{item.label}</span>
                 </NavLink>
               ))}
@@ -106,7 +107,7 @@ export default function Layout() {
                 onClick={() => { setSheetOpen(false); logout(); }}
                 type="button"
               >
-                <span className="nav-icon">×</span>
+                <span className="nav-icon"><NavIcon name="signout" /></span>
                 <span>Sign Out</span>
               </button>
             </nav>
@@ -120,7 +121,7 @@ export default function Layout() {
               end={item.to === '/'}
               className={({ isActive }) => 'tab-item' + (isActive ? ' active' : '')}
             >
-              <span className="tab-icon">◇</span>
+              <span className="tab-icon"><NavIcon name={item.icon} /></span>
               <span className="tab-label">{item.short}</span>
             </NavLink>
           ))}
@@ -130,7 +131,7 @@ export default function Layout() {
             type="button"
             aria-expanded={sheetOpen}
           >
-            <span className="tab-icon">≡</span>
+            <span className="tab-icon"><NavIcon name="more" /></span>
             <span className="tab-label">More</span>
           </button>
         </nav>
@@ -170,7 +171,7 @@ export default function Layout() {
                   className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
                   title={item.label}
                 >
-                  <span className="nav-icon" aria-hidden="true" />
+                  <span className="nav-icon"><NavIcon name={item.icon} /></span>
                   {!collapsed && <span className="nav-label">{item.label}</span>}
                 </NavLink>
               ))}
