@@ -880,3 +880,7 @@ input[type="range"].lat-slider:disabled {
 *::-webkit-scrollbar-track { background: var(--bg); }
 *::-webkit-scrollbar-thumb { background: var(--border); }
 *::-webkit-scrollbar-thumb:hover { background: var(--border-hi); }
+
+/* CI verification probe — confirms .github/workflows/build-frontend.yml
+   rebuilds static/ via `make frontend` (which prunes stale hashed bundles)
+   rather than `pnpm run build` (which does not). Remove after verifying. */
