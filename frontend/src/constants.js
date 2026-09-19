@@ -107,11 +107,15 @@ export const MSG_TYPE = {
 // Layout
 // -----------------------------------------------------------------------------
 
-// Viewport width below which the app shell switches to the bottom tab bar and
-// every grid collapses to a single column. CSS cannot import this value, so
-// each stylesheet repeats the literal `768px` with a comment naming this
-// constant as the source of truth. constants.test.js pins this JS value, and
-// a separate check in that same file reads every stylesheet under src/ and
-// asserts each one that mentions `768px` spells it as `max-width:
-// ${MOBILE_BREAKPOINT}px` — so the CSS half is pinned too, not just this one.
+// Widest viewport that still gets the bottom tab bar and single-column grids.
+// The boundary is INCLUSIVE at both ends: CSS uses `max-width: 768px`, so
+// Layout.jsx must test `innerWidth <= MOBILE_BREAKPOINT`. A strict `<` put the
+// desktop sidebar shell around mobile-styled content at exactly 768 — iPad
+// portrait width.
+//
+// CSS cannot import this value, so each stylesheet repeats the literal `768px`
+// with a comment naming this constant as the source of truth. constants.test.js
+// pins this JS value and parses every `@media` query under src/ that mentions
+// 768px, rejecting any that is not the `max-width` form — so the CSS half is
+// pinned too, query by query rather than file by file.
 export const MOBILE_BREAKPOINT = 768;

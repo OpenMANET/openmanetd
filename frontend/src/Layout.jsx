@@ -44,7 +44,13 @@ const OVERFLOW_TABS = [
 export default function Layout() {
   const { logout } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
-  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT);
+  // `<=`, not `<`: the CSS breakpoint is `max-width: 768px`, which is
+  // inclusive, so at exactly 768 (iPad portrait) the stylesheets are already
+  // in their mobile form. A strict `<` here rendered the desktop sidebar
+  // shell around single-column mobile content at that one width.
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth <= MOBILE_BREAKPOINT
+  );
   const [sheetOpen, setSheetOpen] = useState(false);
 
   useEffect(() => {
@@ -53,7 +59,7 @@ export default function Layout() {
       if (timeoutId != null) return;
       timeoutId = setTimeout(() => {
         timeoutId = null;
-        setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
+        setIsMobile(window.innerWidth <= MOBILE_BREAKPOINT);
       }, 100);
     };
     window.addEventListener('resize', onResize);

@@ -166,12 +166,52 @@ describe('TestMobileBreakpointCssSync', () => {
     expect(cssFiles.length).toBeGreaterThan(0);
   });
 
-  it('every stylesheet mentioning 768px spells it as `max-width: ${MOBILE_BREAKPOINT}px`', () => {
+  // Every `@media` query in the file, one entry per query — not per file.
+  // A file-level substring scan would pass a stylesheet that carried both a
+  // correct `max-width: 768px` and a wrong `min-width: 768px`, since the
+  // correct spelling appears somewhere in the text either way.
+  function mediaQueries(path) {
+    const content = readFileSync(path, 'utf8');
+    return [...content.matchAll(/@media([^{]*)\{/g)].map((m) => ({
+      path,
+      query: m[1].trim(),
+    }));
+  }
+
+  it('every @media query mentioning 768px is the max-width form', () => {
     const target = `max-width: ${MOBILE_BREAKPOINT}px`;
-    const drifted = cssFiles.filter((path) => {
-      const content = readFileSync(path, 'utf8');
-      return content.includes('768px') && !content.includes(target);
-    });
+    const drifted = cssFiles
+      .flatMap(mediaQueries)
+      .filter(({ query }) => query.includes(`${MOBILE_BREAKPOINT}px`) && !query.includes(target))
+      .map(({ path, query }) => `${path}: @media ${query}`);
     expect(drifted).toEqual([]);
+  });
+
+  it('rejects a drifted query even when a correct one sits in the same file', () => {
+    // Pins the bug the file-level scan had: this input contains the expected
+    // substring, so the old check passed it.
+    const mixed = `
+      @media (max-width: ${MOBILE_BREAKPOINT}px) { .a { color: red } }
+      @media (min-width: ${MOBILE_BREAKPOINT}px) { .b { color: blue } }
+    `;
+    const target = `max-width: ${MOBILE_BREAKPOINT}px`;
+    expect(mixed.includes(target)).toBe(true);
+
+    const drifted = [...mixed.matchAll(/@media([^{]*)\{/g)]
+      .map((m) => m[1].trim())
+      .filter((query) => query.includes(`${MOBILE_BREAKPOINT}px`) && !query.includes(target));
+    expect(drifted).toEqual([`(min-width: ${MOBILE_BREAKPOINT}px)`]);
+  });
+
+  it('rejects the media-query range syntax this project builds against', () => {
+    // `(width<=768px)` is what an unconstrained minifier emits and what the
+    // target device's browser cannot parse — the defect the cssTarget guard
+    // exists for. It must not slip into hand-written CSS either.
+    const target = `max-width: ${MOBILE_BREAKPOINT}px`;
+    const range = `@media (width<=${MOBILE_BREAKPOINT}px) { .a { color: red } }`;
+    const drifted = [...range.matchAll(/@media([^{]*)\{/g)]
+      .map((m) => m[1].trim())
+      .filter((query) => query.includes(`${MOBILE_BREAKPOINT}px`) && !query.includes(target));
+    expect(drifted).toEqual([`(width<=${MOBILE_BREAKPOINT}px)`]);
   });
 });
