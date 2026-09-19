@@ -42,7 +42,7 @@
   .blos-grid .lat-panel.col-span-2,
   .blos-grid .lat-panel.col-span-3 { grid-column: span 2; }
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .blos-grid { grid-template-columns: 1fr; }
   .blos-grid .lat-panel.col-span-2,
   .blos-grid .lat-panel.col-span-3 { grid-column: span 1; }
@@ -163,7 +163,7 @@
     content: attr(data-label);
   }
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .blos-peer-row { grid-template-columns: 1fr; }
 }
 
@@ -194,6 +194,6 @@
 .blos-event-subject { color: var(--muted); }
 .blos-event-msg { color: var(--text); }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .blos-event-row { grid-template-columns: 1fr; gap: 2px; }
 }

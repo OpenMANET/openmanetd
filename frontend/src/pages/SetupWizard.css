@@ -168,7 +168,7 @@
 .setup-apply-phases .phase-status.done    { color: var(--ok); }
 .setup-apply-phases .phase-status.failed  { color: var(--crit); }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .setup-role-cards {
     grid-template-columns: 1fr;
   }

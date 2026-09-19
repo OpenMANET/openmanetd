@@ -96,7 +96,7 @@
 }
 .widget-resize-handle:hover::before { opacity: 1; }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .widget-grid-header { padding: 12px 12px; }
   .widget-grid { padding: 12px; gap: 10px; }
 }

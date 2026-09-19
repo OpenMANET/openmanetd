@@ -500,7 +500,7 @@
 }
 
 /* ── Mobile ───────────────────────────────────────────────────── */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .settings-firmware-list {
     padding: 12px;
     gap: 12px;

@@ -430,7 +430,10 @@ body.lat-shell-active {
   .lat-body.grid-4 { grid-template-columns: 1fr 1fr; }
   .lat-body.grid-3 { grid-template-columns: 1fr 1fr; }
 }
-@media (max-width: 640px) {
+/* Mobile collapse. Matches MOBILE_BREAKPOINT in src/constants.js, which the
+   shell's tab-bar switch reads — the two must stay equal so single-column
+   layout and the touch shell always coincide. */
+@media (max-width: 768px) {
   .lat-body { padding: 12px; }
   .lat-body.grid-4,
   .lat-body.grid-3,

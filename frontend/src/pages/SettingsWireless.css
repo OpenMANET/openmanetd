@@ -267,7 +267,7 @@
 }
 
 /* mobile ----------------------------------------------------------------- */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .settings-wireless-list {
     padding: 12px;
     gap: 12px;
