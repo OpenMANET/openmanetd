@@ -186,3 +186,16 @@ describe('TestLayoutNavLinks', () => {
     expect(hrefs).toContain('/settings');
   });
 });
+
+describe('TestLayoutBodyClass', () => {
+  it('adds lat-shell-active to body while mounted', () => {
+    renderLayout(1024);
+    expect(document.body.classList.contains('lat-shell-active')).toBe(true);
+  });
+
+  it('removes lat-shell-active from body on unmount', () => {
+    const { unmount } = renderLayout(1024);
+    unmount();
+    expect(document.body.classList.contains('lat-shell-active')).toBe(false);
+  });
+});

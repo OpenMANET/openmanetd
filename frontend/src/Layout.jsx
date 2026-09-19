@@ -62,6 +62,15 @@ export default function Layout() {
     };
   }, []);
 
+  // The shell owns the body's layout reset. This was a `body:has(.layout-*)`
+  // rule in Layout.css, but :has() is unsupported on the stock browsers of
+  // some field devices and cannot be lowered by the build target, so the rule
+  // was silently discarded there. A class is supported everywhere.
+  useEffect(() => {
+    document.body.classList.add('lat-shell-active');
+    return () => document.body.classList.remove('lat-shell-active');
+  }, []);
+
   // Mobile: bottom tab bar
   if (isMobile) {
     return (
