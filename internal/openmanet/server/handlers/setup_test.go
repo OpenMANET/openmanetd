@@ -1516,6 +1516,7 @@ type fullDeps struct {
 	Host     *fakeHostnameSetter
 	Pass     *fakePasswordSetter
 	Reloader *fakeServiceReloader
+	Reader   *fakeConfigReader
 }
 
 // newFullSetupService builds a SetupService over a full reader plus
@@ -1529,12 +1530,13 @@ func newFullSetupService(t *testing.T, cfg *config.Config) (*handlers.SetupServi
 		Host:     &fakeHostnameSetter{},
 		Pass:     &fakePasswordSetter{},
 		Reloader: newFakeReloader(len(handlers.ReloadServicesForTest())),
+		Reader:   newFullSetupReader(),
 	}
 
 	svc := &handlers.SetupService{
 		Cfg:            cfg,
 		Log:            zerolog.Nop(),
-		UCI:            newFullSetupReader(),
+		UCI:            deps.Reader,
 		Snapshotter:    deps.Snap,
 		HostnameSetter: deps.Host,
 		PasswordSetter: deps.Pass,
@@ -1597,6 +1599,12 @@ func TestApplySetup_MeshPointExtender_HappyPath(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"wireless", "network", "dhcp", "firewall", "system", "mesh11sd", "umdns", "openmanetd", "luci",
 	}, deps.Snap.lastSnapshot.configs)
+
+	// A rerun must request a fresh address reservation instead of retaining
+	// the prior run's dhcpconfigured=1 marker.
+	dhcpConfigured, ok := deps.Reader.Get("openmanetd", "config", "dhcpconfigured")
+	require.True(t, ok)
+	assert.Equal(t, []string{"0"}, dhcpConfigured)
 
 	// Hostname setter saw the user's hostname.
 	assert.Equal(t, []string{"openmanet-1"}, deps.Host.calls)
