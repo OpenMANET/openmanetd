@@ -10,6 +10,34 @@
  * --radius) are kept for backwards compatibility during the Lattice rollout.
  * ============================================================================= */
 
+/* Self-hosted so the UI keeps its typography on an offline mesh node. These
+ * previously loaded from fonts.googleapis.com via a <link> in index.html,
+ * which a field device with no uplink never reaches — every face silently
+ * fell back to whatever the device happened to ship, and the whole Lattice
+ * type scale went with it.
+ *
+ * Both are the latin subset of the variable face, covering 400-700 in one
+ * file each: 79KB total, versus roughly 180KB for the eight static faces the
+ * old <link> requested. Variable font support (Chrome 62, Safari 11) sits
+ * well below the build's cssTarget floor, so nothing loses by it.
+ *
+ * SIL Open Font License 1.1 — see the LICENSE files beside the woff2.
+ */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('../assets/fonts/inter.woff2') format('woff2');
+}
+
 :root {
   /* Surfaces */
   --bg: #05080a;
