@@ -5,6 +5,9 @@
 // and internal consistency.
 
 import { describe, it, expect } from 'vitest';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SAMPLE_RATE,
   WHISPER_RATE,
@@ -132,5 +135,43 @@ describe('TestNeighborHistoryConstants', () => {
 describe('TestMobileBreakpoint', () => {
   it('is 768 to match the CSS grid collapse breakpoint', () => {
     expect(MOBILE_BREAKPOINT).toBe(768);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// CSS cannot import MOBILE_BREAKPOINT, so every stylesheet that mirrors the
+// shell's collapse breakpoint repeats it as a literal `768px`. The test above
+// only pins the JS half; this one reads every stylesheet under src/ and pins
+// the CSS half too, so a change to MOBILE_BREAKPOINT that isn't mirrored into
+// every `@media (max-width: 768px)` block fails here instead of shipping a
+// page whose shell and grid collapse at a different width than its panels.
+function listCssFiles(dir) {
+  const files = [];
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) {
+      files.push(...listCssFiles(full));
+    } else if (name.endsWith('.css')) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+describe('TestMobileBreakpointCssSync', () => {
+  const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const cssFiles = listCssFiles(srcDir);
+
+  it('found stylesheets to check (guards against a broken scan)', () => {
+    expect(cssFiles.length).toBeGreaterThan(0);
+  });
+
+  it('every stylesheet mentioning 768px spells it as `max-width: ${MOBILE_BREAKPOINT}px`', () => {
+    const target = `max-width: ${MOBILE_BREAKPOINT}px`;
+    const drifted = cssFiles.filter((path) => {
+      const content = readFileSync(path, 'utf8');
+      return content.includes('768px') && !content.includes(target);
+    });
+    expect(drifted).toEqual([]);
   });
 });

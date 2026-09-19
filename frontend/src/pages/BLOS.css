@@ -48,16 +48,6 @@
   .blos-grid .lat-panel.col-span-3 { grid-column: span 1; }
 }
 
-.blos-empty {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--dim);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 16px 8px;
-  text-align: center;
-}
-
 .blos-spark {
   height: 46px;
   margin-top: 6px;

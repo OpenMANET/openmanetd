@@ -511,7 +511,10 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
 /* Two-column grid rather than space-between flex: a fixed label column stops
    long values wrapping inside themselves, which broke coordinates mid-token
    ("39° 47'" / "26.90\" N") on narrow viewports. The 112px figure matches the
-   status-strip pattern already used by SettingsNetwork and SettingsWireless. */
+   status-strip pattern SettingsNetwork used before its page-local .kv
+   override was folded into this primitive; SettingsWireless and
+   SettingsFirmware used 96px (this primitive's own mobile value) and now
+   converge on 112px at desktop / 96px below 768px like everything else. */
 .kv {
   display: grid;
   grid-template-columns: 112px 1fr;
@@ -728,10 +731,22 @@ input[type="range"].lat-slider:disabled {
   white-space: nowrap;
 }
 .lat-table tbody tr:hover { background: rgba(0, 229, 255, 0.04); }
-.lat-table .badge-ok { color: var(--ok); }
-.lat-table .badge-warn { color: var(--warn); }
-.lat-table .badge-crit { color: var(--crit); }
 .lat-table .mono { font-family: var(--font-mono); color: var(--muted); }
+/* Primitive rule for numeric columns — was duplicated in SettingsNetwork.css
+   and SettingsWireless.css, which meant it only applied when those route
+   chunks happened to be loaded. th.num pairs with DataTable's headerClass. */
+.lat-table th.num, .lat-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Unscoped (not `.lat-table .badge-*`): DataTable applies these classes to
+   both the <td> in .lat-table and the card .v in .lat-cardlist (see
+   components/DataTable.jsx), so the rule must reach both renderings. The
+   class names are unique enough that scoping buys nothing. */
+.badge-ok { color: var(--ok); }
+.badge-warn { color: var(--warn); }
+.badge-crit { color: var(--crit); }
 
 .table-scroll { overflow-x: auto; max-width: 100%; }
 
@@ -761,6 +776,9 @@ input[type="range"].lat-slider:disabled {
   overflow-wrap: anywhere;
 }
 
+/* Left-aligned to match the empty-state rhythm already in use across the
+   app (net-empty, empty-row, blos-empty, now folded into this primitive)
+   rather than the centered figure DataTable shipped with initially. */
 .lat-empty {
   color: var(--muted);
   font-family: var(--font-mono);
@@ -768,7 +786,7 @@ input[type="range"].lat-slider:disabled {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 16px 0;
-  text-align: center;
+  text-align: left;
 }
 
 /* ------------------------------------------------------------------ status dot */

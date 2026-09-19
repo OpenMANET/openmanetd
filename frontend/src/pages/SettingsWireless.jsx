@@ -195,8 +195,8 @@ function stationColumns(kind) {
   if (kind === 'clients') {
     return [
       ...base,
-      { key: 'rx', label: 'Rx', className: 'num', render: (r) => formatBitrate(r.rxRateBps) },
-      { key: 'tx', label: 'Tx', className: 'num', render: (r) => formatBitrate(r.txRateBps) },
+      { key: 'rx', label: 'Rx', className: 'num', headerClass: 'num', render: (r) => formatBitrate(r.rxRateBps) },
+      { key: 'tx', label: 'Tx', className: 'num', headerClass: 'num', render: (r) => formatBitrate(r.txRateBps) },
     ];
   }
   return [
@@ -205,6 +205,7 @@ function stationColumns(kind) {
       key: 'throughput',
       label: 'Throughput',
       className: 'num',
+      headerClass: 'num',
       render: (r) => `${r.throughputMbps?.toFixed(1) ?? '0.0'} Mbps`,
     },
   ];
@@ -777,7 +778,7 @@ export default function SettingsWireless() {
           </div>
 
           {radios.length === 0 ? (
-            <div className="lat-panel"><div className="empty-row">No radios detected.</div></div>
+            <div className="lat-panel"><div className="lat-empty">No radios detected.</div></div>
           ) : (
             radios.map(r => (
               <RadioCard

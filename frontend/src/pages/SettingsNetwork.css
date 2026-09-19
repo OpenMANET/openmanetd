@@ -25,23 +25,10 @@
   gap: 10px;
 }
 
-.net-panel .net-empty {
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-  padding: 8px 0;
-}
-
 .net-panel .iface-name {
   font-family: var(--font-mono);
   color: var(--accent);
   font-weight: 600;
-}
-
-.lat-table td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 
 .net-panel .status-strip {
@@ -51,19 +38,6 @@
   padding: 10px 12px;
   background: var(--surface-2);
   border: 1px solid var(--border-subtle);
-}
-
-/* Fixed key column keeps the value next to its label rather than pushed to
-   the far edge of a stretched grid cell. Wide enough for "DNS Forwarding". */
-.net-panel .status-strip .kv {
-  display: grid;
-  grid-template-columns: 112px 1fr;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11px;
-  border-bottom: none;
-  padding: 2px 0;
-  min-width: 0;
 }
 
 .net-panel .status-strip .kv .k {
@@ -140,5 +114,14 @@
 
   .net-panel .status-strip {
     grid-template-columns: 1fr;
+  }
+
+  /* Touch target for the disclosure toggle that reveals the (now card-
+     rendered) DHCP lease tables — was ~14px tall at font-size: 10px with
+     padding: 0. Matches the Comms.css / Layout.css min-height pattern. */
+  .net-panel .disclosure-head {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
   }
 }

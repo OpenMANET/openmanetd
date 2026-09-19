@@ -242,13 +242,13 @@ function releaseColumns({ selectedTag, onSelect, disabled }) {
       key: 'size',
       label: 'Size',
       className: 'num',
+      headerClass: 'num',
       cellClass: selectedClass,
       render: (u) => formatBytes(u.matchedAsset?.sizeBytes ?? 0),
     },
     {
       key: 'action',
       label: 'Action',
-      className: 'act',
       cellClass: selectedClass,
       render: (u) => {
         const tag = u?.release?.tag ?? '';
@@ -359,8 +359,7 @@ function AvailableUpdatesPanel({
           ariaLabel="Available firmware updates"
           columns={columns}
           rows={updates}
-          rowKey={(u) => u?.release?.tag ?? ''}
-          emptyLabel="No updates."
+          rowKey={(u, i) => u?.release?.tag ?? String(i)}
         />
       )}
     </section>

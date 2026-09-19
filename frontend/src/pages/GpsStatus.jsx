@@ -254,6 +254,7 @@ function GlobePanel({ position, actionsRef }) {
       setGlobeSize(Math.round(Math.max(GLOBE_MIN, Math.min(GLOBE_MAX, width))));
     };
     apply(wrap.clientWidth);
+    if (typeof ResizeObserver === 'undefined') return undefined;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) apply(entry.contentRect.width);
     });

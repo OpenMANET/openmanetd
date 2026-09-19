@@ -9,11 +9,13 @@
   align-items: start;
 }
 
+/* text-align: right comes from the .kv .v primitive already — only the
+   inline-flex layout (for the copy button sitting next to the value) is
+   page-local here. */
 .mesh-qr .kv .v {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  text-align: right;
 }
 
 .mesh-qr .kv .v .lat-btn.sm {

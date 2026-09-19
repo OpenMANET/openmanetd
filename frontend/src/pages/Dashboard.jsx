@@ -320,9 +320,11 @@ function extractAddr(detail) {
 
 // ── DataTable column specs ──────────────────────────────────────────────────
 
-// Column spec for the mesh peers panel. Module-level so it is allocated once
-// rather than on every poll tick. `now` is needed for the Last column, so that
-// one column is built per render by meshPeerColumns().
+// Column spec for the mesh peers panel. A factory rather than a module-level
+// const — like SettingsFirmware's releaseColumns and SettingsWireless's
+// stationColumns — because the Last column formats against `now`, which
+// ticks on every poll. The caller wraps this in useMemo(() => ..., [now])
+// so it's only rebuilt when `now` actually changes.
 function meshPeerColumns(now) {
   return [
     { key: 'name', label: 'Node', render: (p) => p.name },

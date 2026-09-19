@@ -8,11 +8,21 @@
 // they cannot drift; lattice.css decides which one is visible.
 //
 // Columns:
-//   key        stable identifier, also the cardTitleKey selector
-//   label      column header, and the .k label inside a card
-//   render     (row) => ReactNode
-//   className  static class applied to the <td> and to the card's .v
-//   cellClass  (row) => string, for per-row status classes (badge-ok etc.)
+//   key         stable identifier, also the cardTitleKey selector
+//   label       column header, and the .k label inside a card
+//   render      (row) => ReactNode
+//   className   static class applied to the <td> and to the card's .v. A
+//               class scoped to `.lat-table <selector>` in CSS (as opposed
+//               to a bare, unscoped selector) only reaches the <td> — it
+//               silently drops on the card rendering, since the card is not
+//               inside a .lat-table. Define status/value classes unscoped
+//               (see .badge-ok/.badge-warn/.badge-crit in lattice.css) so
+//               they apply to both.
+//   headerClass static class applied to the <th> only (e.g. 'num' for
+//               right-aligned numeric columns) — not forwarded to <td> or
+//               the card, since header-only styling (alignment) usually
+//               isn't what a data cell or card value wants.
+//   cellClass   (row) => string, for per-row status classes (badge-ok etc.)
 
 import React from 'react';
 
@@ -44,7 +54,7 @@ export default React.memo(function DataTable({
           <thead>
             <tr>
               {columns.map((col) => (
-                <th key={col.key}>{col.label}</th>
+                <th key={col.key} className={col.headerClass}>{col.label}</th>
               ))}
             </tr>
           </thead>

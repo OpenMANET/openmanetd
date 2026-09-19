@@ -44,17 +44,6 @@
   border: 1px solid var(--border-subtle);
 }
 
-.firmware-panel .status-strip .kv {
-  display: grid;
-  grid-template-columns: 96px 1fr;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11px;
-  border-bottom: none;
-  padding: 2px 0;
-  min-width: 0;
-}
-
 .firmware-panel .status-strip .kv .k {
   color: var(--muted);
   letter-spacing: 0.08em;

@@ -57,9 +57,9 @@ const INTERFACE_COLUMNS = [
   },
   { key: 'ip', label: 'IP', className: 'mono', render: (iface) => iface.ipAddress || '—' },
   { key: 'mac', label: 'MAC', className: 'mono', render: (iface) => iface.macAddress || '—' },
-  { key: 'rx', label: 'RX', className: 'num', render: (iface) => formatBytes(iface.rxBytes) },
-  { key: 'tx', label: 'TX', className: 'num', render: (iface) => formatBytes(iface.txBytes) },
-  { key: 'mtu', label: 'MTU', className: 'num', render: (iface) => iface.mtu || '—' },
+  { key: 'rx', label: 'RX', className: 'num', headerClass: 'num', render: (iface) => formatBytes(iface.rxBytes) },
+  { key: 'tx', label: 'TX', className: 'num', headerClass: 'num', render: (iface) => formatBytes(iface.txBytes) },
+  { key: 'mtu', label: 'MTU', className: 'num', headerClass: 'num', render: (iface) => iface.mtu || '—' },
 ];
 
 function InterfacesPanel() {
@@ -89,7 +89,7 @@ function InterfacesPanel() {
       {error && <div className="lat-alert crit">{error}</div>}
 
       {loading ? (
-        <div className="net-empty">Loading…</div>
+        <div className="lat-empty">Loading…</div>
       ) : (
         <DataTable
           ariaLabel="Network interfaces"
@@ -103,13 +103,28 @@ function InterfacesPanel() {
   );
 }
 
+// Module-level like INTERFACE_COLUMNS above — neither depends on props or
+// state, so there's no reason to rebuild them on every DHCPPanel render.
+const ACTIVE_LEASE_COLUMNS = [
+  { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
+  { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
+  { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
+  { key: 'expiresSeconds', label: 'Expires', className: 'num', headerClass: 'num', render: (r) => `${r.expiresSeconds}s` },
+];
+
+const STATIC_LEASE_COLUMNS = [
+  { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
+  { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
+  { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
+];
+
 function LeasesTable({ rows, columns, ariaLabel }) {
   return (
     <DataTable
       ariaLabel={ariaLabel}
       columns={columns}
       rows={rows ?? []}
-      rowKey={(r, i) => r.macAddress || i}
+      rowKey={(r, i) => r.macAddress ?? String(i)}
       emptyLabel="No entries."
     />
   );
@@ -150,19 +165,6 @@ function DHCPPanel() {
     load();
   }, [load]);
 
-  const activeColumns = [
-    { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
-    { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
-    { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
-    { key: 'expiresSeconds', label: 'Expires', className: 'num', render: (r) => `${r.expiresSeconds}s` },
-  ];
-
-  const staticColumns = [
-    { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
-    { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
-    { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
-  ];
-
   return (
     <div className="lat-panel net-panel">
       <div className="panel-head">
@@ -182,9 +184,9 @@ function DHCPPanel() {
       {error && <div className="lat-alert crit">{error}</div>}
 
       {loading ? (
-        <div className="net-empty">Loading…</div>
+        <div className="lat-empty">Loading…</div>
       ) : !config ? (
-        <div className="net-empty">DHCP server not configured.</div>
+        <div className="lat-empty">DHCP server not configured.</div>
       ) : (
         <>
           <div className="status-strip">
@@ -224,7 +226,7 @@ function DHCPPanel() {
             </button>
             {showActive && (
               <div className="disclosure-body">
-                <LeasesTable rows={activeLeases} columns={activeColumns} ariaLabel="Active DHCP leases" />
+                <LeasesTable rows={activeLeases} columns={ACTIVE_LEASE_COLUMNS} ariaLabel="Active DHCP leases" />
               </div>
             )}
           </div>
@@ -241,7 +243,7 @@ function DHCPPanel() {
             </button>
             {showStatic && (
               <div className="disclosure-body">
-                <LeasesTable rows={staticLeases} columns={staticColumns} ariaLabel="Static DHCP reservations" />
+                <LeasesTable rows={staticLeases} columns={STATIC_LEASE_COLUMNS} ariaLabel="Static DHCP reservations" />
               </div>
             )}
           </div>

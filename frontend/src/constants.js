@@ -110,6 +110,8 @@ export const MSG_TYPE = {
 // Viewport width below which the app shell switches to the bottom tab bar and
 // every grid collapses to a single column. CSS cannot import this value, so
 // each stylesheet repeats the literal `768px` with a comment naming this
-// constant as the source of truth. A test in constants.test.js pins the value
-// so the two halves cannot drift silently.
+// constant as the source of truth. constants.test.js pins this JS value, and
+// a separate check in that same file reads every stylesheet under src/ and
+// asserts each one that mentions `768px` spells it as `max-width:
+// ${MOBILE_BREAKPOINT}px` — so the CSS half is pinned too, not just this one.
 export const MOBILE_BREAKPOINT = 768;

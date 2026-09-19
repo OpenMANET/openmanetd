@@ -4,12 +4,21 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import DataTable from '../../components/DataTable.jsx';
 
 const COLUMNS = [
   { key: 'node', label: 'Node', render: (r) => r.node },
   { key: 'hops', label: 'Hops', render: (r) => r.hops },
-  { key: 'snr', label: 'SNR', render: (r) => r.snr, cellClass: (r) => (r.snr < 10 ? 'badge-crit' : 'badge-ok') },
+  {
+    key: 'snr',
+    label: 'SNR',
+    headerClass: 'num',
+    cellClass: (r) => (r.snr < 10 ? 'badge-crit' : 'badge-ok'),
+    render: (r) => r.snr,
+  },
 ];
 
 const ROWS = [
@@ -76,6 +85,17 @@ describe('TestDataTableDualRender', () => {
     const headers = [...container.querySelectorAll('.lat-table th')].map((el) => el.textContent);
     expect(headers).toEqual(['Node', 'Hops', 'SNR']);
   });
+
+  it('applies headerClass to the <th> only, not to <td> or the card value', () => {
+    const { container } = renderTable();
+    const headers = [...container.querySelectorAll('.lat-table th')];
+    expect(headers[0].className).toBe('');
+    expect(headers[2].className).toBe('num');
+    // The SNR column has no `className`, only `headerClass` — the <td> and
+    // card .v should carry cellClass (badge-*) but never pick up 'num'.
+    const snrCell = container.querySelector('.lat-table tbody tr:first-child td:nth-child(3)');
+    expect(snrCell.className).not.toContain('num');
+  });
 });
 
 describe('TestDataTableEmpty', () => {
@@ -85,4 +105,33 @@ describe('TestDataTableEmpty', () => {
     expect(container.querySelector('.lat-table')).toBeNull();
     expect(container.querySelector('.lat-cardlist')).toBeNull();
   });
+});
+
+// -----------------------------------------------------------------------------
+// F1 regression: cellClass values like 'badge-ok' are applied to both the
+// <td> (inside .lat-table) and the card's .v (inside .lat-cardlist, which is
+// never inside a .lat-table). jsdom applies no stylesheets, so a rendered
+// DOM assertion here cannot tell us whether the color actually reaches the
+// card — the class being present proved nothing (it was present the whole
+// time the bug existed; see 'applies cellClass to both the table cell and
+// the card value' above). This test instead reads the stylesheet directly
+// and pins the one property that makes the class portable between the two
+// renderings: it must not be scoped under `.lat-table`.
+describe('TestBadgeClassesReachCards', () => {
+  const latticeCssPath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../styles/lattice.css',
+  );
+  const css = readFileSync(latticeCssPath, 'utf8');
+
+  it.each(['badge-ok', 'badge-warn', 'badge-crit'])(
+    '.%s is defined unscoped, not under .lat-table',
+    (cls) => {
+      // Reachable from a bare `.lat-card .v.badge-ok` element: a selector
+      // that starts the class at the beginning of a rule (optionally
+      // compounded, e.g. `.badge-ok,`) rather than prefixed by `.lat-table `.
+      expect(css).toMatch(new RegExp(`(^|\\n)\\.${cls}\\s*\\{`));
+      expect(css).not.toMatch(new RegExp(`\\.lat-table \\.${cls}\\s*\\{`));
+    },
+  );
 });

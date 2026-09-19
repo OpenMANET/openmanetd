@@ -42,6 +42,18 @@
   flex-direction: column;
 }
 
+@media (max-width: 768px) {
+  /* Touch target only — the 480px block below still narrows horizontal
+     padding for the six-tab row, and this rule doesn't touch it; height
+     grows via min-height rather than more padding, matching Comms.css's
+     .ch-pill fix and Layout.css's .setup-dismiss-banner .lat-btn. */
+  .settings-tab {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}
+
 @media (max-width: 480px) {
   .settings-tabs {
     padding: 4px 8px 0;
