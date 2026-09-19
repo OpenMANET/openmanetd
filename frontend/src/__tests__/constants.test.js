@@ -15,6 +15,7 @@ import {
   MSG_TYPE,
   VOX_HANGTIME_MS,
   NEIGHBOR_HISTORY_LENGTH,
+  MOBILE_BREAKPOINT,
 } from '../constants.js';
 
 describe('TestAudioConstants', () => {
@@ -125,5 +126,11 @@ describe('TestVoxConstants', () => {
 describe('TestNeighborHistoryConstants', () => {
   it('NEIGHBOR_HISTORY_LENGTH is a positive number', () => {
     expect(NEIGHBOR_HISTORY_LENGTH).toBeGreaterThan(0);
+  });
+});
+
+describe('TestMobileBreakpoint', () => {
+  it('is 768 to match the CSS grid collapse breakpoint', () => {
+    expect(MOBILE_BREAKPOINT).toBe(768);
   });
 });

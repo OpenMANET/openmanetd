@@ -6,6 +6,7 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from './contexts/useAuth.js';
 import SetupDismissBanner from './components/SetupDismissBanner.jsx';
+import { MOBILE_BREAKPOINT } from './constants.js';
 import './Layout.css';
 
 // Nav items grouped by section. Operations = day-to-day use, System = admin.
@@ -43,7 +44,7 @@ const OVERFLOW_TABS = [
 export default function Layout() {
   const { logout } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
-  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT);
   const [sheetOpen, setSheetOpen] = useState(false);
 
   useEffect(() => {
@@ -52,7 +53,7 @@ export default function Layout() {
       if (timeoutId != null) return;
       timeoutId = setTimeout(() => {
         timeoutId = null;
-        setIsMobile(window.innerWidth < 768);
+        setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
       }, 100);
     };
     window.addEventListener('resize', onResize);

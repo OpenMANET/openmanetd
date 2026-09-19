@@ -102,3 +102,14 @@ export const MSG_TYPE = {
   PTT_DOWN:   0x09, // Client -> Server: push-to-talk pressed
   PTT_UP:     0x0A, // Client -> Server: push-to-talk released
 };
+
+// -----------------------------------------------------------------------------
+// Layout
+// -----------------------------------------------------------------------------
+
+// Viewport width below which the app shell switches to the bottom tab bar and
+// every grid collapses to a single column. CSS cannot import this value, so
+// each stylesheet repeats the literal `768px` with a comment naming this
+// constant as the source of truth. A test in constants.test.js pins the value
+// so the two halves cannot drift silently.
+export const MOBILE_BREAKPOINT = 768;
