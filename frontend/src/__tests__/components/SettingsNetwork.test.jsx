@@ -92,6 +92,29 @@ describe('TestNetworkInterfacesRender', () => {
   });
 });
 
+describe('TestNetworkInterfacesFallbacks', () => {
+  it('shows fallback text for an unknown type, missing MAC, and zero MTU', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({
+      interfaces: [
+        { name: 'usb0', type: 42, status: 2, ipAddress: '10.0.0.9', macAddress: '', rxBytes: 0, txBytes: 0, mtu: 0 },
+      ],
+    });
+    mockGetDHCPServerConfig.mockResolvedValue({ config: null });
+    mockListActiveDHCPLeases.mockResolvedValue({ leases: [] });
+    mockListStaticDHCPLeases.mockResolvedValue({ leases: [] });
+
+    const { container } = render(<SettingsNetworkPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-table tbody tr')).toBeTruthy();
+    });
+    const cells = [...container.querySelector('.lat-table tbody tr').querySelectorAll('td')];
+    // name(0), type(1), status(2), ip(3), mac(4), rx(5), tx(6), mtu(7)
+    expect(cells[1].textContent).toBe('Unknown'); // IFACE_TYPE_LABELS fallback
+    expect(cells[4].textContent).toBe('—'); // macAddress fallback
+    expect(cells[7].textContent).toBe('—'); // mtu fallback
+  });
+});
+
 describe('TestNetworkInterfacesEmpty', () => {
   it('shows no interfaces message', async () => {
     mockListNetworkInterfaces.mockResolvedValue({ interfaces: [] });
@@ -171,6 +194,40 @@ describe('TestDHCPStaticLeases', () => {
     fireEvent.click(screen.getByText(/Static Reservations \(1\)/));
     expect(screen.getAllByText('printer').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('192.168.1.10').length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('TestDHCPLeasesFallbacks', () => {
+  it('shows dash fallbacks for a lease missing hostname, MAC, and IP', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({ interfaces: [] });
+    mockGetDHCPServerConfig.mockResolvedValue(DHCP_CONFIG);
+    // hostname: '' hits `r.hostname || '—'`; macAddress/ipAddress: null hit
+    // `r.macAddress ?? '—'` / `r.ipAddress ?? '—'`. macAddress: null also
+    // exercises the rowKey fallback (`r.macAddress ?? String(i)`) on both
+    // the active and static lease tables (same LeasesTable component).
+    mockListActiveDHCPLeases.mockResolvedValue({
+      leases: [{ hostname: '', macAddress: null, ipAddress: null, expiresSeconds: 60 }],
+    });
+    mockListStaticDHCPLeases.mockResolvedValue({
+      leases: [{ hostname: '', macAddress: null, ipAddress: null }],
+    });
+
+    render(<SettingsNetworkPage />);
+    await waitFor(() => screen.getByText('DHCP Server'));
+
+    fireEvent.click(screen.getByText(/Active Leases \(1\)/));
+    const activeTable = screen.getByText(/Active Leases \(1\)/).closest('.disclosure').querySelector('.lat-table');
+    const activeCells = [...activeTable.querySelectorAll('tbody tr td')].map((td) => td.textContent);
+    expect(activeCells[0]).toBe('—'); // hostname
+    expect(activeCells[1]).toBe('—'); // macAddress
+    expect(activeCells[2]).toBe('—'); // ipAddress
+
+    fireEvent.click(screen.getByText(/Static Reservations \(1\)/));
+    const staticTable = screen.getByText(/Static Reservations \(1\)/).closest('.disclosure').querySelector('.lat-table');
+    const staticCells = [...staticTable.querySelectorAll('tbody tr td')].map((td) => td.textContent);
+    expect(staticCells[0]).toBe('—');
+    expect(staticCells[1]).toBe('—');
+    expect(staticCells[2]).toBe('—');
   });
 });
 

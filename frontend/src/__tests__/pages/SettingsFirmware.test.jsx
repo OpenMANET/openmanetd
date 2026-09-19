@@ -224,6 +224,27 @@ describe('SettingsFirmware', () => {
     expect(screen.getByText(/1 newer/i)).toBeInTheDocument();
   });
 
+  it('shows fallback text for a release with no tag, publish date, or matched asset', async () => {
+    // release: null and matchedAsset: null exercise every `??`/`||`
+    // fallback in releaseColumns (tag, published, asset name, asset size)
+    // plus the rowKey fallback (u?.release?.tag ?? String(i)).
+    apiState.systemInfo = capableInfo;
+    apiState.updates = [{ release: null, matchedAsset: null, newerThanCurrent: true }];
+    apiState.fetchedAt = new Date('2026-04-25T12:00:00Z');
+
+    const { container } = render(<SettingsFirmware />);
+
+    await waitFor(() => {
+      expect(container.querySelector('.lat-table tbody tr')).toBeTruthy();
+    });
+    const cells = [...container.querySelectorAll('.lat-table tbody tr')[0].querySelectorAll('td')];
+    // tag(0), published(1), type(2), asset(3), size(4), action(5)
+    expect(cells[0].textContent).toBe(''); // tag ?? ''
+    expect(cells[1].textContent).toBe('—'); // published fallback
+    expect(cells[3].textContent).toBe('—'); // matchedAsset name fallback
+    expect(cells[4].textContent).toBe('0 B'); // formatBytes(matchedAsset?.sizeBytes ?? 0)
+  });
+
   it('shows a loading message, not a blank box, while the initial update check is in flight', async () => {
     // Regression test for F9: the mount effect flips updatesLoading to true
     // (synchronously, before listAvailableUpdates resolves) while updates

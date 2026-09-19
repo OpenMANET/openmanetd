@@ -80,6 +80,17 @@ describe('TestDataTableDualRender', () => {
     expect(labels).toEqual(['Node', 'Hops']);
   });
 
+  it('falls back to the first column when cardTitleKey names an unknown column', () => {
+    // titleKey resolves to 'not-a-real-column' (cardTitleKey ?? columns[0].key
+    // takes the cardTitleKey branch since it's provided), then
+    // columns.find(...) finds nothing and the `?? columns[0]` fallback on
+    // line 47 must kick in — without it, titleCol would be undefined and
+    // cellClassName(titleCol, row) would throw reading .className off it.
+    const { container } = renderTable({ cardTitleKey: 'not-a-real-column' });
+    const heads = [...container.querySelectorAll('.lat-card-head')].map((el) => el.textContent);
+    expect(heads).toEqual(['RAVEN-9ab7', 'Venice-fa2c']);
+  });
+
   it('renders the column headers', () => {
     const { container } = renderTable();
     const headers = [...container.querySelectorAll('.lat-table th')].map((el) => el.textContent);

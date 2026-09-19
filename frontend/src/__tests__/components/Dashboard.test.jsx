@@ -614,6 +614,19 @@ describe('TestDashboardPeerTxRate', () => {
     expect(row[4]).toContain('mesh1 · HE40');
     expect(row[5]).toBe('-55'); // RSSI still the strongest radio
   });
+
+  it('shows a dash for MAC and RSSI when the driver reports neither', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    // mac: '' and signal: 0 are both falsy, so meshPeerColumns' `p.mac ||
+    // '—'` and `p.rssi ? ... : '—'` fallbacks must both fire.
+    meshWith([{ name: 'hotel_mesh0', mac: '', signal: 0, throughput: 0, iface: 'mesh0', tx: null, rx: null }]);
+    render(<DashboardPage />);
+
+    await waitFor(() => expect(screen.getAllByText('hotel').length).toBeGreaterThan(0));
+    const row = cells(peerRow('hotel'));
+    expect(row[1]).toBe('—'); // MAC fallback
+    expect(row[5]).toBe('—'); // RSSI fallback
+  });
 });
 
 // ── Mobile card rendering (DataTable) ──────────────────────────────────────

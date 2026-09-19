@@ -805,6 +805,34 @@ describe('TestSettingsWirelessPeerFloor', () => {
   });
 });
 
+describe('TestSettingsWirelessMeshPeerFallbacks', () => {
+  it('shows 0.0 Mbps for a peer with no throughput and keys it by row index', async () => {
+    mockListRadios.mockResolvedValue({ radios: [RADIO_S1G] });
+    mockGetRadioStatus.mockResolvedValue({ status: STATUS_S1G });
+    mockGetRadioSettings.mockResolvedValue(SETTINGS_S1G);
+    // throughputMbps omitted hits `r.throughputMbps?.toFixed(1) ?? '0.0'`;
+    // macAddress: null hits the rowKey fallback
+    // (`r.macAddress ?? String(i)`) shared by both station tables.
+    mockListConnectedClients.mockResolvedValue({ clients: [] });
+    mockListMeshPeers.mockResolvedValue({
+      peers: [{ hostname: 'node-c', macAddress: null, signalDbm: -66 }],
+    });
+
+    render(<SettingsWireless />);
+    await waitFor(() => screen.getByDisplayValue('old-mesh'));
+
+    fireEvent.click(screen.getByText('Mesh Peers'));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('node-c').some((el) => el.tagName === 'TD')).toBe(true);
+    });
+    const row = screen.getAllByText('node-c').find((el) => el.tagName === 'TD').closest('tr');
+    const cells = [...row.querySelectorAll('td')];
+    // name(0), mac(1), signal(2), throughput(3)
+    expect(cells[3].textContent).toBe('0.0 Mbps');
+  });
+});
+
 describe('TestSettingsWirelessMobileCards', () => {
   it('renders one .lat-tabular per rendered station table', async () => {
     mockListRadios.mockResolvedValue({ radios: [RADIO_AP, RADIO_S1G] });

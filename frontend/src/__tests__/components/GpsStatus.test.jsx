@@ -28,6 +28,7 @@ import { GNSSSource } from '../../gen/openmanet/gnss/v1/gnss_pb.js';
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   mockGetGNSSStatus.mockReset();
   mockGetGNSSConfig.mockReset();
   mockUpdateGNSSConfig.mockReset();
@@ -169,6 +170,23 @@ describe('TestGpsStatusGlobePanel', () => {
   });
 });
 
+describe('TestGpsGlobeResizeObserverGuard', () => {
+  it('still renders the globe panel when ResizeObserver is unavailable', async () => {
+    // Target devices may run a browser predating ResizeObserver. The
+    // sizing effect's `if (typeof ResizeObserver === 'undefined') return
+    // undefined;` guard exists for exactly that case — without it,
+    // `new ResizeObserver(...)` on an undefined global throws and the
+    // effect (and thus the render) blows up.
+    vi.stubGlobal('ResizeObserver', undefined);
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+    render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Globe · WGS84/ })).toBeTruthy();
+    });
+  });
+});
+
 // ── MGRS ────────────────────────────────────────────────────────────────────
 
 describe('TestGpsStatusMGRS', () => {
@@ -236,6 +254,29 @@ describe('TestGpsStatusSatellites', () => {
     fireEvent.click(screen.getByText('USED'));
     // Only 2 used satellites remain.
     expect(container.querySelectorAll('.gps-panel-snr tbody tr').length).toBe(2);
+  });
+});
+
+describe('TestGpsStatusSatelliteFallbacks', () => {
+  it('shows dashes for elevation, azimuth, and SNR when the driver omits them', async () => {
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue({
+      position: STATUS_3D_FIX.position,
+      satelliteStatus: {
+        satellitesUsed: 1,
+        satellitesInView: 1,
+        satellites: [{ prn: 9, elevation: null, azimuth: null, snr: null, used: false }],
+      },
+    });
+    const { container } = render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(container.querySelectorAll('.gps-panel-snr tbody tr').length).toBe(1);
+    });
+    const row = container.querySelectorAll('.gps-panel-snr tbody tr td');
+    // prn(0), constellation(1), elev(2), azim(3), snr(4), used(5)
+    expect(row[2].textContent).toBe('—');
+    expect(row[3].textContent).toBe('—');
+    expect(row[4].textContent).toBe('—');
   });
 });
 
