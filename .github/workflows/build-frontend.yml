@@ -84,7 +84,13 @@ jobs:
         if: |
           steps.check-static.outputs.skip == 'false' &&
           github.event.pull_request.head.repo.fork == false
-        run: cd frontend && pnpm install && pnpm run build
+        # Use the Makefile target rather than calling pnpm directly: it prunes
+        # stale hashed bundles from static/ before building (vite runs with
+        # emptyOutDir:false, so nothing else removes them) and it is the same
+        # command the fork-PR comment above asks contributors to run. Calling
+        # `pnpm run build` here instead let orphaned assets accumulate in
+        # static/ and get embedded into every binary by //go:embed.
+        run: make frontend
 
       - name: Commit static assets
         if: |

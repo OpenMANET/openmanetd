@@ -880,3 +880,6 @@ input[type="range"].lat-slider:disabled {
 *::-webkit-scrollbar-track { background: var(--bg); }
 *::-webkit-scrollbar-thumb { background: var(--border); }
 *::-webkit-scrollbar-thumb:hover { background: var(--border-hi); }
+
+/* CI verification probe 2 — exercises the full chain: make frontend prune +
+   cssTarget lowering + check-css-target guard, on a real runner. */
