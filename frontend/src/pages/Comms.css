@@ -354,3 +354,16 @@
 .comms-log .tx { color: var(--warn); }
 .comms-log .err { color: var(--crit); }
 .comms-log .info { color: var(--accent); }
+
+/* Matches MOBILE_BREAKPOINT in src/constants.js. */
+@media (max-width: 768px) {
+  /* Four buttons across 336px leaves 84px each — enough width, but the
+     primitive's 5px vertical padding is far under the 44px touch target. */
+  .ch-tiles-panel .ch-all-row .lat-btn {
+    min-height: 44px;
+    padding: 0;
+  }
+  /* Channel tiles stay two-across: 160px each is readable, and one-across
+     would push the transcript below three screens of scroll. */
+  .ch-tiles-grid { gap: 6px; }
+}
