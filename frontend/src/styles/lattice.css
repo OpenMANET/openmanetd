@@ -735,6 +735,42 @@ input[type="range"].lat-slider:disabled {
 
 .table-scroll { overflow-x: auto; max-width: 100%; }
 
+/* ---------------------------------------------------------------- tabular */
+/* A .lat-tabular holds both a .lat-table and a .lat-cardlist rendered from
+   the same data (see components/DataTable.jsx). Exactly one is visible: the
+   table above the mobile breakpoint, the card list below it. */
+
+.lat-cardlist { display: none; }
+
+.lat-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lat-card-head {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-wrap: anywhere;
+}
+
+.lat-empty {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 16px 0;
+  text-align: center;
+}
+
 /* ------------------------------------------------------------------ status dot */
 
 .dot-i {
@@ -905,6 +941,16 @@ input[type="range"].lat-slider:disabled {
     align-items: center;
     min-height: 44px;
     padding: 8px 14px;
+  }
+
+  .lat-tabular .table-scroll { display: none; }
+  .lat-cardlist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 }
 
