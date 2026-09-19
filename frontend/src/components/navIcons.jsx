@@ -5,10 +5,13 @@
 // Hand-drawn rather than pulled from an icon library for three reasons:
 //
 //  1. `.claude/rules/frontend.md` forbids third-party UI libraries.
-//  2. The webfonts in index.html load from fonts.googleapis.com, so on an
-//     offline mesh node they never arrive and every glyph falls back to the
-//     device's stock monospace font. Unicode symbol coverage there is
-//     unknowable, which rules out a text-glyph icon set.
+//  2. A text-glyph icon set would depend on the monospace font actually
+//     arriving. The webfonts are self-hosted now, but the fallback stack is
+//     still whatever the device ships, and several otherwise-ideal glyphs
+//     are missing from common stock monospace faces anyway — U+2B21 hexagon
+//     and U+2699 gear are absent from DejaVu Sans Mono and Menlo, and the
+//     gear renders as a color emoji on iOS and Android, which would break
+//     the currentColor accent cascade even where it does render.
 //  3. Eight hand-written icons cost ~1.7KB; the smallest library option
 //     measured 4.5KB for six of them, and static/ is served and embedded
 //     uncompressed.
