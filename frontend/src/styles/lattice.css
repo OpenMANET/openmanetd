@@ -731,7 +731,6 @@ input[type="range"].lat-slider:disabled {
   white-space: nowrap;
 }
 .lat-table tbody tr:hover { background: rgba(0, 229, 255, 0.04); }
-.lat-table .mono { font-family: var(--font-mono); color: var(--muted); }
 /* Primitive rule for numeric columns — was duplicated in SettingsNetwork.css
    and SettingsWireless.css, which meant it only applied when those route
    chunks happened to be loaded. th.num pairs with DataTable's headerClass. */
@@ -740,13 +739,16 @@ input[type="range"].lat-slider:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* Unscoped (not `.lat-table .badge-*`): DataTable applies these classes to
-   both the <td> in .lat-table and the card .v in .lat-cardlist (see
-   components/DataTable.jsx), so the rule must reach both renderings. The
-   class names are unique enough that scoping buys nothing. */
+/* Unscoped (not `.lat-table .badge-*` / `.lat-table .mono`): DataTable
+   applies these classes to both the <td> in .lat-table and the card .v in
+   .lat-cardlist (see components/DataTable.jsx), so the rule must reach both
+   renderings. The class names are unique enough that scoping buys nothing.
+   (.mono also reaches any standalone `.kv .v.mono` outside a DataTable
+   entirely, e.g. SettingsFirmware's KV helper — same defect, same fix.) */
 .badge-ok { color: var(--ok); }
 .badge-warn { color: var(--warn); }
 .badge-crit { color: var(--crit); }
+.mono { font-family: var(--font-mono); color: var(--muted); }
 
 .table-scroll { overflow-x: auto; max-width: 100%; }
 

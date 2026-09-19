@@ -108,23 +108,26 @@ describe('TestDataTableEmpty', () => {
 });
 
 // -----------------------------------------------------------------------------
-// F1 regression: cellClass values like 'badge-ok' are applied to both the
-// <td> (inside .lat-table) and the card's .v (inside .lat-cardlist, which is
-// never inside a .lat-table). jsdom applies no stylesheets, so a rendered
-// DOM assertion here cannot tell us whether the color actually reaches the
-// card — the class being present proved nothing (it was present the whole
-// time the bug existed; see 'applies cellClass to both the table cell and
-// the card value' above). This test instead reads the stylesheet directly
-// and pins the one property that makes the class portable between the two
-// renderings: it must not be scoped under `.lat-table`.
-describe('TestBadgeClassesReachCards', () => {
+// F1 regression: className/cellClass values like 'badge-ok' and 'mono' are
+// applied to both the <td> (inside .lat-table) and the card's .v (inside
+// .lat-cardlist, which is never inside a .lat-table). jsdom applies no
+// stylesheets, so a rendered DOM assertion here cannot tell us whether the
+// styling actually reaches the card — the class being present proved
+// nothing (it was present the whole time the bug existed; see 'applies
+// cellClass to both the table cell and the card value' above). This test
+// instead reads the stylesheet directly and pins the one property that
+// makes each class portable between the two renderings: it must not be
+// scoped under `.lat-table`. 'mono' is the same defect as the three badge
+// classes (DataTable's IP/MAC/RX/TX columns use `className: 'mono'`), just
+// caught one review pass later — same file, same fix.
+describe('TestStatusAndValueClassesReachCards', () => {
   const latticeCssPath = join(
     dirname(fileURLToPath(import.meta.url)),
     '../../styles/lattice.css',
   );
   const css = readFileSync(latticeCssPath, 'utf8');
 
-  it.each(['badge-ok', 'badge-warn', 'badge-crit'])(
+  it.each(['badge-ok', 'badge-warn', 'badge-crit', 'mono'])(
     '.%s is defined unscoped, not under .lat-table',
     (cls) => {
       // Reachable from a bare `.lat-card .v.badge-ok` element: a selector

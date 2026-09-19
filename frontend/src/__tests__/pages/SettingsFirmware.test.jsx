@@ -4,7 +4,7 @@
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within, act } from '@testing-library/react';
 
 import { Phase } from '../../gen/openmanet/sysupgrade/v1/sysupgrade_pb.js';
 
@@ -222,6 +222,40 @@ describe('SettingsFirmware', () => {
     ).toBeTruthy();
     // matchedAsset chip says "1 newer"
     expect(screen.getByText(/1 newer/i)).toBeInTheDocument();
+  });
+
+  it('shows a loading message, not a blank box, while the initial update check is in flight', async () => {
+    // Regression test for F9: the mount effect flips updatesLoading to true
+    // (synchronously, before listAvailableUpdates resolves) while updates
+    // is still []. AvailableUpdatesPanel must not fall through to
+    // <DataTable rows={[]}> during that window — DataTable's own empty
+    // state (.lat-empty) rendering here would mean the branch regressed
+    // back to being gated on `count === 0 && !loading` instead of on
+    // `count === 0` alone.
+    apiState.systemInfo = capableInfo;
+    const { listAvailableUpdates } = await import('../../services/sysupgradeApi.js');
+
+    let resolveUpdates;
+    listAvailableUpdates.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveUpdates = resolve; }),
+    );
+
+    const { container } = render(<SettingsFirmware />);
+
+    // Wait for system info to resolve and the mount effect to call
+    // listAvailableUpdates — AvailableUpdatesPanel is now in
+    // count === 0 && loading === true.
+    await screen.findByText(/checking for updates/i);
+    expect(container.querySelector('.lat-empty')).toBeNull();
+
+    await act(async () => {
+      resolveUpdates({ updates: [], fetchedAt: new Date('2026-04-25T12:00:00Z') });
+    });
+
+    // "Up to date" also appears in the header chip, so match the settled
+    // firmware-empty panel text specifically.
+    expect(await screen.findByText(/up to date — no newer firmware/i)).toBeInTheDocument();
+    expect(container.querySelector('.lat-empty')).toBeNull();
   });
 
   it('opens the confirm card when Install is clicked', async () => {

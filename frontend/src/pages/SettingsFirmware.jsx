@@ -348,11 +348,22 @@ function AvailableUpdatesPanel({
       )}
       {error && <div className="lat-alert crit">{errorMessage(error)}</div>}
 
-      {count === 0 && !loading ? (
+      {/* Gated on count === 0 alone (not count === 0 && !loading) so
+          "nothing to show yet" has one source of truth: DataTable never
+          renders with an empty rows array from this call site, regardless
+          of loading state. Without the loading guard baked into this
+          branch, the mount sequence (updatesLoading starts false, the
+          mount effect flips it to true before the fetch resolves) hits a
+          render where count === 0 && !loading is false but updates is
+          still [] — that used to fall into the DataTable branch and render
+          a blank .lat-empty box for the duration of the initial check. */}
+      {count === 0 ? (
         <div className="firmware-empty">
-          {fetchedAt
-            ? 'Up to date — no newer firmware available for this hardware.'
-            : 'Click “Check for Updates” to query GitHub.'}
+          {loading
+            ? 'Checking for updates…'
+            : fetchedAt
+              ? 'Up to date — no newer firmware available for this hardware.'
+              : 'Click “Check for Updates” to query GitHub.'}
         </div>
       ) : (
         <DataTable

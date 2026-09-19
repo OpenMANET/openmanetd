@@ -16,8 +16,8 @@
 //               to a bare, unscoped selector) only reaches the <td> — it
 //               silently drops on the card rendering, since the card is not
 //               inside a .lat-table. Define status/value classes unscoped
-//               (see .badge-ok/.badge-warn/.badge-crit in lattice.css) so
-//               they apply to both.
+//               (see .badge-ok/.badge-warn/.badge-crit/.mono in lattice.css)
+//               so they apply to both.
 //   headerClass static class applied to the <th> only (e.g. 'num' for
 //               right-aligned numeric columns) — not forwarded to <td> or
 //               the card, since header-only styling (alignment) usually
