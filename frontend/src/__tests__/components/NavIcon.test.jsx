@@ -5,7 +5,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import NavIcon from '../../components/NavIcon.jsx';
-import { ICON_NAMES } from '../../components/navIcons.jsx';
+import { ICONS, ICON_NAMES } from '../../components/navIcons.jsx';
 
 afterEach(() => {
   cleanup();
@@ -74,6 +74,25 @@ describe('TestNavIcon', () => {
   it('returns null for an unknown icon name', () => {
     const { container } = render(<NavIcon name="does-not-exist" />);
     expect(container.querySelector('svg')).toBeNull();
+  });
+
+  it.each(['toString', 'constructor', 'hasOwnProperty', 'valueOf', '__proto__'])(
+    'returns null for the inherited key %s',
+    (name) => {
+      // A plain object literal inherits from Object.prototype, so these names
+      // would resolve to functions and sail past the `?? null` fallback into
+      // React's renderer. ICONS is null-prototype to stop that.
+      expect(NavIcon({ name })).toBeNull();
+
+      const { container } = render(<NavIcon name={name} />);
+      expect(container.querySelector('svg')).toBeNull();
+      expect(container.textContent).toBe('');
+    }
+  );
+
+  it('exposes no inherited keys on the icon table itself', () => {
+    expect(Object.getPrototypeOf(ICONS)).toBeNull();
+    expect(Object.keys(ICONS)).toEqual(ICON_NAMES);
   });
 
   it('reuses the same element instance across renders', () => {

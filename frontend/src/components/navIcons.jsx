@@ -44,7 +44,12 @@ function dot(cx, cy, r) {
   return <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r={r} fill="currentColor" stroke="none" />;
 }
 
-export const ICONS = {
+// Null-prototype so a lookup can only ever find artwork that was declared
+// here. A plain object literal inherits from Object.prototype, which would
+// make ICONS['toString'] and ICONS['constructor'] resolve to functions —
+// enough to get a non-element past NavIcon's `?? null` fallback and into
+// React's renderer, which then throws.
+export const ICONS = Object.assign(Object.create(null), {
   // Four panels in a 2x2 grid — the dashboard's own layout.
   dashboard: (
     <svg {...SVG_PROPS} data-icon="dashboard">
@@ -110,6 +115,6 @@ export const ICONS = {
       <path d="M6 2H2v12h4M10 5l3 3-3 3M13 8H6" />
     </svg>
   ),
-};
+});
 
 export const ICON_NAMES = Object.keys(ICONS);
