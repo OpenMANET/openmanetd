@@ -12,6 +12,7 @@ import { POWER_LEVELS, dBmToLevel, levelToDbm } from './SettingsWireless.power.j
 import LatSelect from '../components/LatSelect.jsx';
 import MeshJoinQR from '../components/MeshJoinQR.jsx';
 import QrScanInput from '../components/QrScanInput.jsx';
+import DataTable from '../components/DataTable.jsx';
 import { applyMeshJoin } from '../services/meshJoinApi.js';
 import { checkMeshCredentials, htModeForBandwidth, bandwidthMhzForHTMode } from '../utils/meshJoin.js';
 import './SettingsWireless.css';
@@ -185,45 +186,41 @@ function PowerSelector({ valueDbm, onChange, hint }) {
   );
 }
 
-function ConnectedTable({ rows, kind }) {
-  if (!rows || rows.length === 0) {
-    return <div className="empty-row">No {kind === 'clients' ? 'connected clients' : 'mesh peers'}.</div>;
+function stationColumns(kind) {
+  const base = [
+    { key: 'name', label: kind === 'clients' ? 'Hostname' : 'Peer', render: (r) => r.hostname || '—' },
+    { key: 'mac', label: 'MAC', className: 'mono', render: (r) => r.macAddress },
+    { key: 'signal', label: 'Signal', render: (r) => `${r.signalDbm} dBm` },
+  ];
+  if (kind === 'clients') {
+    return [
+      ...base,
+      { key: 'rx', label: 'Rx', className: 'num', headerClass: 'num', render: (r) => formatBitrate(r.rxRateBps) },
+      { key: 'tx', label: 'Tx', className: 'num', headerClass: 'num', render: (r) => formatBitrate(r.txRateBps) },
+    ];
   }
+  return [
+    ...base,
+    {
+      key: 'throughput',
+      label: 'Throughput',
+      className: 'num',
+      headerClass: 'num',
+      render: (r) => `${r.throughputMbps?.toFixed(1) ?? '0.0'} Mbps`,
+    },
+  ];
+}
+
+function ConnectedTable({ rows, kind }) {
+  const columns = useMemo(() => stationColumns(kind), [kind]);
   return (
-    <table className="lat-table">
-      <thead>
-        <tr>
-          <th>{kind === 'clients' ? 'Hostname' : 'Peer'}</th>
-          <th>MAC</th>
-          <th>Signal</th>
-          {kind === 'clients' ? (
-            <>
-              <th className="num">Rx</th>
-              <th className="num">Tx</th>
-            </>
-          ) : (
-            <th className="num">Throughput</th>
-          )}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r, i) => (
-          <tr key={i}>
-            <td>{r.hostname || '—'}</td>
-            <td className="mono">{r.macAddress}</td>
-            <td>{r.signalDbm} dBm</td>
-            {kind === 'clients' ? (
-              <>
-                <td className="num">{formatBitrate(r.rxRateBps)}</td>
-                <td className="num">{formatBitrate(r.txRateBps)}</td>
-              </>
-            ) : (
-              <td className="num">{r.throughputMbps?.toFixed(1) ?? '0.0'} Mbps</td>
-            )}
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <DataTable
+      ariaLabel={kind === 'clients' ? 'Connected clients' : 'Mesh peers'}
+      columns={columns}
+      rows={rows ?? []}
+      rowKey={(r, i) => r.macAddress ?? String(i)}
+      emptyLabel={`No ${kind === 'clients' ? 'connected clients' : 'mesh peers'}.`}
+    />
   );
 }
 
@@ -781,7 +778,7 @@ export default function SettingsWireless() {
           </div>
 
           {radios.length === 0 ? (
-            <div className="lat-panel"><div className="empty-row">No radios detected.</div></div>
+            <div className="lat-panel"><div className="lat-empty">No radios detected.</div></div>
           ) : (
             radios.map(r => (
               <RadioCard

@@ -6,6 +6,7 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from './contexts/useAuth.js';
 import SetupDismissBanner from './components/SetupDismissBanner.jsx';
+import { MOBILE_BREAKPOINT } from './constants.js';
 import './Layout.css';
 
 // Nav items grouped by section. Operations = day-to-day use, System = admin.
@@ -43,7 +44,13 @@ const OVERFLOW_TABS = [
 export default function Layout() {
   const { logout } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
-  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  // `<=`, not `<`: the CSS breakpoint is `max-width: 768px`, which is
+  // inclusive, so at exactly 768 (iPad portrait) the stylesheets are already
+  // in their mobile form. A strict `<` here rendered the desktop sidebar
+  // shell around single-column mobile content at that one width.
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth <= MOBILE_BREAKPOINT
+  );
   const [sheetOpen, setSheetOpen] = useState(false);
 
   useEffect(() => {
@@ -52,7 +59,7 @@ export default function Layout() {
       if (timeoutId != null) return;
       timeoutId = setTimeout(() => {
         timeoutId = null;
-        setIsMobile(window.innerWidth < 768);
+        setIsMobile(window.innerWidth <= MOBILE_BREAKPOINT);
       }, 100);
     };
     window.addEventListener('resize', onResize);
@@ -60,6 +67,15 @@ export default function Layout() {
       window.removeEventListener('resize', onResize);
       if (timeoutId != null) clearTimeout(timeoutId);
     };
+  }, []);
+
+  // The shell owns the body's layout reset. This was a `body:has(.layout-*)`
+  // rule in Layout.css, but :has() is unsupported on the stock browsers of
+  // some field devices and cannot be lowered by the build target, so the rule
+  // was silently discarded there. A class is supported everywhere.
+  useEffect(() => {
+    document.body.classList.add('lat-shell-active');
+    return () => document.body.classList.remove('lat-shell-active');
   }, []);
 
   // Mobile: bottom tab bar

@@ -44,17 +44,6 @@
   border: 1px solid var(--border-subtle);
 }
 
-.firmware-panel .status-strip .kv {
-  display: grid;
-  grid-template-columns: 96px 1fr;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 11px;
-  border-bottom: none;
-  padding: 2px 0;
-  min-width: 0;
-}
-
 .firmware-panel .status-strip .kv .k {
   color: var(--muted);
   letter-spacing: 0.08em;
@@ -160,13 +149,13 @@
   font-family: var(--font-mono);
 }
 
-.firmware-updates-table .release-tag {
+.firmware-panel .release-tag {
   color: var(--accent);
   font-weight: 600;
   font-family: var(--font-mono);
 }
 
-.firmware-updates-table .asset-cell {
+.firmware-panel .asset-cell {
   color: var(--muted);
   max-width: 360px;
   overflow: hidden;
@@ -174,7 +163,7 @@
   white-space: nowrap;
 }
 
-.firmware-updates-table tr.selected {
+.firmware-panel .selected {
   background: rgba(0, 229, 255, 0.08);
 }
 
@@ -500,7 +489,7 @@
 }
 
 /* ── Mobile ───────────────────────────────────────────────────── */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .settings-firmware-list {
     padding: 12px;
     gap: 12px;
@@ -520,11 +509,7 @@
     grid-template-columns: 1fr;
   }
 
-  .firmware-updates-table {
-    font-size: 10px;
-  }
-
-  .firmware-updates-table .asset-cell {
+  .firmware-panel .asset-cell {
     max-width: none;
     white-space: normal;
   }

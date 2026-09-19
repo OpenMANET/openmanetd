@@ -102,3 +102,20 @@ export const MSG_TYPE = {
   PTT_DOWN:   0x09, // Client -> Server: push-to-talk pressed
   PTT_UP:     0x0A, // Client -> Server: push-to-talk released
 };
+
+// -----------------------------------------------------------------------------
+// Layout
+// -----------------------------------------------------------------------------
+
+// Widest viewport that still gets the bottom tab bar and single-column grids.
+// The boundary is INCLUSIVE at both ends: CSS uses `max-width: 768px`, so
+// Layout.jsx must test `innerWidth <= MOBILE_BREAKPOINT`. A strict `<` put the
+// desktop sidebar shell around mobile-styled content at exactly 768 — iPad
+// portrait width.
+//
+// CSS cannot import this value, so each stylesheet repeats the literal `768px`
+// with a comment naming this constant as the source of truth. constants.test.js
+// pins this JS value and parses every `@media` query under src/ that mentions
+// 768px, rejecting any that is not the `max-width` form — so the CSS half is
+// pinned too, query by query rather than file by file.
+export const MOBILE_BREAKPOINT = 768;

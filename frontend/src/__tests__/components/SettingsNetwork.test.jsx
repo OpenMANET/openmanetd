@@ -70,21 +70,48 @@ describe('TestNetworkInterfacesRender', () => {
     mockListStaticDHCPLeases.mockResolvedValue(STATIC_LEASES);
 
     render(<SettingsNetworkPage />);
+    // DataTable renders every row as both a <td> and a mobile
+    // .lat-card-head/.kv .v, so a bare screen.getByText(name) now matches
+    // twice. Scope to the table's <td> cells only.
+    const inTable = (text) => screen.getAllByText(text).filter((el) => el.closest('td'));
     await waitFor(() => {
-      expect(screen.getByText('eth0')).toBeTruthy();
-      expect(screen.getByText('wlh0')).toBeTruthy();
+      expect(inTable('eth0').length).toBeGreaterThanOrEqual(1);
+      expect(inTable('wlh0').length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText('br-lan').length).toBeGreaterThanOrEqual(1);
     });
     // Type labels
-    expect(screen.getByText('Ethernet')).toBeTruthy();
-    expect(screen.getByText('HaLow Mesh')).toBeTruthy();
-    expect(screen.getByText('Bridge')).toBeTruthy();
+    expect(inTable('Ethernet').length).toBe(1);
+    expect(inTable('HaLow Mesh').length).toBe(1);
+    expect(inTable('Bridge').length).toBe(1);
     // Status badges
-    expect(screen.getAllByText('Up').length).toBe(2);
-    expect(screen.getAllByText('Down').length).toBe(1);
+    expect(inTable('Up').length).toBe(2);
+    expect(inTable('Down').length).toBe(1);
     // IP addresses
-    expect(screen.getByText('192.168.1.1')).toBeTruthy();
-    expect(screen.getByText('10.41.1.1')).toBeTruthy();
+    expect(inTable('192.168.1.1').length).toBe(1);
+    expect(inTable('10.41.1.1').length).toBe(1);
+  });
+});
+
+describe('TestNetworkInterfacesFallbacks', () => {
+  it('shows fallback text for an unknown type, missing MAC, and zero MTU', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({
+      interfaces: [
+        { name: 'usb0', type: 42, status: 2, ipAddress: '10.0.0.9', macAddress: '', rxBytes: 0, txBytes: 0, mtu: 0 },
+      ],
+    });
+    mockGetDHCPServerConfig.mockResolvedValue({ config: null });
+    mockListActiveDHCPLeases.mockResolvedValue({ leases: [] });
+    mockListStaticDHCPLeases.mockResolvedValue({ leases: [] });
+
+    const { container } = render(<SettingsNetworkPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-table tbody tr')).toBeTruthy();
+    });
+    const cells = [...container.querySelector('.lat-table tbody tr').querySelectorAll('td')];
+    // name(0), type(1), status(2), ip(3), mac(4), rx(5), tx(6), mtu(7)
+    expect(cells[1].textContent).toBe('Unknown'); // IFACE_TYPE_LABELS fallback
+    expect(cells[4].textContent).toBe('—'); // macAddress fallback
+    expect(cells[7].textContent).toBe('—'); // mtu fallback
   });
 });
 
@@ -145,9 +172,12 @@ describe('TestDHCPActiveLeases', () => {
 
     // Click to expand active leases
     fireEvent.click(screen.getByText(/Active Leases \(2\)/));
-    expect(screen.getByText('laptop')).toBeTruthy();
-    expect(screen.getByText('phone')).toBeTruthy();
-    expect(screen.getByText('192.168.1.101')).toBeTruthy();
+    // DataTable renders every row as both a <td> and a mobile
+    // .lat-card-head/.kv .v, so a bare screen.getByText(name) now matches
+    // twice — same convention as TestNetworkInterfacesRender above.
+    expect(screen.getAllByText('laptop').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('phone').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('192.168.1.101').length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -162,7 +192,78 @@ describe('TestDHCPStaticLeases', () => {
     await waitFor(() => screen.getByText('DHCP Server'));
 
     fireEvent.click(screen.getByText(/Static Reservations \(1\)/));
-    expect(screen.getByText('printer')).toBeTruthy();
-    expect(screen.getByText('192.168.1.10')).toBeTruthy();
+    expect(screen.getAllByText('printer').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('192.168.1.10').length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('TestDHCPLeasesFallbacks', () => {
+  it('shows dash fallbacks for a lease missing hostname, MAC, and IP', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({ interfaces: [] });
+    mockGetDHCPServerConfig.mockResolvedValue(DHCP_CONFIG);
+    // hostname: '' hits `r.hostname || '—'`; macAddress/ipAddress: null hit
+    // `r.macAddress ?? '—'` / `r.ipAddress ?? '—'`. macAddress: null also
+    // exercises the rowKey fallback (`r.macAddress ?? String(i)`) on both
+    // the active and static lease tables (same LeasesTable component).
+    mockListActiveDHCPLeases.mockResolvedValue({
+      leases: [{ hostname: '', macAddress: null, ipAddress: null, expiresSeconds: 60 }],
+    });
+    mockListStaticDHCPLeases.mockResolvedValue({
+      leases: [{ hostname: '', macAddress: null, ipAddress: null }],
+    });
+
+    render(<SettingsNetworkPage />);
+    await waitFor(() => screen.getByText('DHCP Server'));
+
+    fireEvent.click(screen.getByText(/Active Leases \(1\)/));
+    const activeTable = screen.getByText(/Active Leases \(1\)/).closest('.disclosure').querySelector('.lat-table');
+    const activeCells = [...activeTable.querySelectorAll('tbody tr td')].map((td) => td.textContent);
+    expect(activeCells[0]).toBe('—'); // hostname
+    expect(activeCells[1]).toBe('—'); // macAddress
+    expect(activeCells[2]).toBe('—'); // ipAddress
+
+    fireEvent.click(screen.getByText(/Static Reservations \(1\)/));
+    const staticTable = screen.getByText(/Static Reservations \(1\)/).closest('.disclosure').querySelector('.lat-table');
+    const staticCells = [...staticTable.querySelectorAll('tbody tr td')].map((td) => td.textContent);
+    expect(staticCells[0]).toBe('—');
+    expect(staticCells[1]).toBe('—');
+    expect(staticCells[2]).toBe('—');
+  });
+});
+
+describe('TestDHCPLeasesMobileCards', () => {
+  it('renders active leases as both table rows and cards', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({ interfaces: [] });
+    mockGetDHCPServerConfig.mockResolvedValue(DHCP_CONFIG);
+    mockListActiveDHCPLeases.mockResolvedValue(ACTIVE_LEASES);
+    mockListStaticDHCPLeases.mockResolvedValue(STATIC_LEASES);
+
+    render(<SettingsNetworkPage />);
+    await waitFor(() => screen.getByText('DHCP Server'));
+    fireEvent.click(screen.getByText(/Active Leases \(2\)/));
+
+    const tabular = screen.getByText(/Active Leases \(2\)/).closest('.disclosure').querySelector('.lat-tabular');
+    expect(tabular).toBeTruthy();
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    expect(tableRows).toBe(2);
+    expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
+  });
+});
+
+describe('TestSettingsNetworkMobileCards', () => {
+  it('renders interfaces as both table rows and cards', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({ interfaces: INTERFACES });
+    mockGetDHCPServerConfig.mockResolvedValue(DHCP_CONFIG);
+    mockListActiveDHCPLeases.mockResolvedValue(ACTIVE_LEASES);
+    mockListStaticDHCPLeases.mockResolvedValue(STATIC_LEASES);
+
+    const { container } = render(<SettingsNetworkPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-tabular')).toBeTruthy();
+    });
+    const tabular = container.querySelector('.lat-tabular');
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    expect(tableRows).toBeGreaterThan(0);
+    expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
   });
 });

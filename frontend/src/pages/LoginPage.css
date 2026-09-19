@@ -99,7 +99,7 @@
 }
 
 /* ── Mobile ────────────────────────────────────────────────────────────── */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .login-screen { padding: 16px; align-items: flex-start; padding-top: 72px; }
   .login-corner { font-size: 9px; }
   .login-corner.tl { top: 12px; left: 16px; }

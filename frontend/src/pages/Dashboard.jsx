@@ -30,6 +30,7 @@ import { useBLOSStatus } from '../hooks/useBLOSStatus.js';
 import { useNetworkInterfaces } from '../hooks/useNetworkInterfaces.js';
 import { pushSparklineSample, useSparklineSamples } from '../services/sparklineStore.js';
 import { classifyAlerts, findLostPeers } from './dashboardAlerts.js';
+import DataTable from '../components/DataTable.jsx';
 import './Dashboard.css';
 
 // Key used by the module-scoped sparkline store. Kept as a constant so
@@ -317,6 +318,66 @@ function extractAddr(detail) {
   return m ? m[0] : detail.split('—')[0].trim() || detail;
 }
 
+// ── DataTable column specs ──────────────────────────────────────────────────
+
+// Column spec for the mesh peers panel. A factory rather than a module-level
+// const — like SettingsFirmware's releaseColumns and SettingsWireless's
+// stationColumns — because the Last column formats against `now`, which
+// ticks on every poll. The caller wraps this in useMemo(() => ..., [now])
+// so it's only rebuilt when `now` actually changes.
+function meshPeerColumns(now) {
+  return [
+    { key: 'name', label: 'Node', render: (p) => p.name },
+    { key: 'mac', label: 'MAC', className: 'mono', render: (p) => p.mac || '—' },
+    { key: 'hops', label: 'Hops', render: (p) => p.hops },
+    { key: 'throughput', label: 'Throughput', render: (p) => formatMbps(p.throughput) },
+    {
+      key: 'txRate',
+      label: 'TX Rate',
+      render: (p) => (
+        <>
+          {p.txRate}
+          {p.txDetail && <div className="mono">{p.txDetail}</div>}
+        </>
+      ),
+    },
+    { key: 'rssi', label: 'RSSI', render: (p) => (p.rssi ? `${p.rssi}` : '—') },
+    {
+      key: 'sig',
+      label: 'Signal',
+      render: (p) => (
+        <div className="sig-bars">
+          {p.sig.map((cls, i) => <span key={i} className={cls} />)}
+        </div>
+      ),
+    },
+    { key: 'last', label: 'Last', render: (p) => formatLast(p.lastMs, now) },
+  ];
+}
+
+const INTERFACE_COLUMNS = [
+  {
+    key: 'name',
+    label: 'Iface',
+    render: (iface) => (
+      <>
+        <span className={`dot-i ${statusBadge(iface.status).dot}`} />
+        {iface.name}
+      </>
+    ),
+  },
+  { key: 'addr', label: 'Addr', className: 'mono', render: (iface) => iface.ipAddress || '—' },
+  {
+    key: 'state',
+    label: 'State',
+    cellClass: (iface) => statusBadge(iface.status).cls,
+    render: (iface) => statusBadge(iface.status).label,
+  },
+  { key: 'role', label: 'Role', render: (iface) => roleForInterface(iface) },
+  { key: 'rx', label: 'RX', className: 'mono', render: (iface) => formatBytes(iface.rxBytes) },
+  { key: 'tx', label: 'TX', className: 'mono', render: (iface) => formatBytes(iface.txBytes) },
+];
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
@@ -415,6 +476,7 @@ export default function DashboardPage() {
     () => buildPeerRows(topology, neighbors, neighborHistoryRef, now),
     [topology, neighbors, now],
   );
+  const peerColumns = useMemo(() => meshPeerColumns(now), [now]);
 
   // Track which peers we are currently seeing so the alerts panel can
   // surface ones that have disappeared. Stamping happens on every
@@ -649,42 +711,13 @@ export default function DashboardPage() {
           <div className="panel-head">
             <h3>Mesh Peers · Live</h3>
           </div>
-          <div className="table-scroll">
-            <table className="lat-table">
-              <thead>
-                <tr>
-                  <th>Node</th><th>MAC</th><th>Hops</th><th>Throughput</th>
-                  <th>TX Rate</th><th>RSSI</th><th>Signal</th><th>Last</th>
-                </tr>
-              </thead>
-              <tbody>
-                {peerRows.length === 0 && (
-                  <tr><td colSpan={8} className="mono">No neighbors reporting</td></tr>
-                )}
-                {peerRows.map((p) => (
-                  <tr key={p.key}>
-                    <td>{p.name}</td>
-                    <td className="mono">{p.mac || '—'}</td>
-                    <td>{p.hops}</td>
-                    <td>{formatMbps(p.throughput)}</td>
-                    <td>
-                      {p.txRate}
-                      {p.txDetail && <div className="mono">{p.txDetail}</div>}
-                    </td>
-                    <td>{p.rssi ? `${p.rssi}` : '—'}</td>
-                    <td>
-                      <div className="sig-bars">
-                        {p.sig.map((cls, i) => (
-                          <span key={i} className={cls} />
-                        ))}
-                      </div>
-                    </td>
-                    <td>{formatLast(p.lastMs, now)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            ariaLabel="Mesh peers"
+            columns={peerColumns}
+            rows={peerRows}
+            rowKey={(p) => p.key}
+            emptyLabel="No neighbors reporting"
+          />
         </div>
 
         <div className="lat-panel">
@@ -744,36 +777,13 @@ export default function DashboardPage() {
 
         <div className="lat-panel col-span-2">
           <div className="panel-head"><h3>Network Interfaces</h3></div>
-          <div className="table-scroll">
-            <table className="lat-table">
-              <thead>
-                <tr>
-                  <th>Iface</th><th>Addr</th><th>State</th><th>Role</th><th>RX</th><th>TX</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleInterfaces.length === 0 && (
-                  <tr><td colSpan={6} className="mono">No network data</td></tr>
-                )}
-                {visibleInterfaces.map((iface) => {
-                  const badge = statusBadge(iface.status);
-                  return (
-                    <tr key={iface.name}>
-                      <td>
-                        <span className={`dot-i ${badge.dot}`} />
-                        {iface.name}
-                      </td>
-                      <td className="mono">{iface.ipAddress || '—'}</td>
-                      <td className={badge.cls}>{badge.label}</td>
-                      <td>{roleForInterface(iface)}</td>
-                      <td className="mono">{formatBytes(iface.rxBytes)}</td>
-                      <td className="mono">{formatBytes(iface.txBytes)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            ariaLabel="Network interfaces"
+            columns={INTERFACE_COLUMNS}
+            rows={visibleInterfaces}
+            rowKey={(iface) => iface.name}
+            emptyLabel="No network data"
+          />
         </div>
 
       </div>

@@ -28,6 +28,7 @@ import { GNSSSource } from '../../gen/openmanet/gnss/v1/gnss_pb.js';
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   mockGetGNSSStatus.mockReset();
   mockGetGNSSConfig.mockReset();
   mockUpdateGNSSConfig.mockReset();
@@ -169,6 +170,23 @@ describe('TestGpsStatusGlobePanel', () => {
   });
 });
 
+describe('TestGpsGlobeResizeObserverGuard', () => {
+  it('still renders the globe panel when ResizeObserver is unavailable', async () => {
+    // Target devices may run a browser predating ResizeObserver. The
+    // sizing effect's `if (typeof ResizeObserver === 'undefined') return
+    // undefined;` guard exists for exactly that case — without it,
+    // `new ResizeObserver(...)` on an undefined global throws and the
+    // effect (and thus the render) blows up.
+    vi.stubGlobal('ResizeObserver', undefined);
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+    render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Globe · WGS84/ })).toBeTruthy();
+    });
+  });
+});
+
 // ── MGRS ────────────────────────────────────────────────────────────────────
 
 describe('TestGpsStatusMGRS', () => {
@@ -236,6 +254,29 @@ describe('TestGpsStatusSatellites', () => {
     fireEvent.click(screen.getByText('USED'));
     // Only 2 used satellites remain.
     expect(container.querySelectorAll('.gps-panel-snr tbody tr').length).toBe(2);
+  });
+});
+
+describe('TestGpsStatusSatelliteFallbacks', () => {
+  it('shows dashes for elevation, azimuth, and SNR when the driver omits them', async () => {
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue({
+      position: STATUS_3D_FIX.position,
+      satelliteStatus: {
+        satellitesUsed: 1,
+        satellitesInView: 1,
+        satellites: [{ prn: 9, elevation: null, azimuth: null, snr: null, used: false }],
+      },
+    });
+    const { container } = render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(container.querySelectorAll('.gps-panel-snr tbody tr').length).toBe(1);
+    });
+    const row = container.querySelectorAll('.gps-panel-snr tbody tr td');
+    // prn(0), constellation(1), elev(2), azim(3), snr(4), used(5)
+    expect(row[2].textContent).toBe('—');
+    expect(row[3].textContent).toBe('—');
+    expect(row[4].textContent).toBe('—');
   });
 });
 
@@ -450,6 +491,35 @@ describe('TestGpsStatus2DFix', () => {
 
 // ── Polling ─────────────────────────────────────────────────────────────────
 
+// ── Mobile card rendering (DataTable) ───────────────────────────────────────
+
+describe('TestGpsSnrMobileCards', () => {
+  it('renders satellite rows as both table rows and cards', async () => {
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+    const { container } = render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.gps-panel-snr .lat-tabular')).toBeTruthy();
+    });
+    const tabular = container.querySelector('.gps-panel-snr .lat-tabular');
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    const cards = tabular.querySelectorAll('.lat-cardlist .lat-card').length;
+    expect(tableRows).toBeGreaterThan(0);
+    expect(cards).toBe(tableRows);
+  });
+
+  it('heads each satellite card with its PRN', async () => {
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+    const { container } = render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-card-head')).toBeTruthy();
+    });
+    const head = container.querySelector('.gps-panel-snr .lat-card-head');
+    expect(head.textContent).toMatch(/^\d+$/);
+  });
+});
+
 describe('TestGpsStatusPolling', () => {
   it('polls for status updates on interval', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -467,5 +537,31 @@ describe('TestGpsStatusPolling', () => {
     });
 
     vi.useRealTimers();
+  });
+});
+
+// ── Touch hints ─────────────────────────────────────────────────────────────
+
+// Standard config/status fixtures rendered; returns the RTL result so
+// callers can query the DOM.
+function renderGpsStatus() {
+  mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+  mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+  return render(<GpsStatusPage />);
+}
+
+describe('TestGpsTouchHints', () => {
+  it('offers a pointer-appropriate globe hint for each input type', async () => {
+    const { container } = renderGpsStatus();
+    await waitFor(() => {
+      expect(container.querySelector('.gps-globe-hint')).toBeTruthy();
+    });
+    // Both variants are in the DOM; CSS picks one by pointer type. The coarse
+    // variant must not promise scroll-to-zoom, which touch cannot perform.
+    const fine = container.querySelector('.gps-globe-hint .hint-fine');
+    const coarse = container.querySelector('.gps-globe-hint .hint-coarse');
+    expect(fine.textContent).toContain('scroll to zoom');
+    expect(coarse.textContent).not.toContain('scroll');
+    expect(coarse.textContent).toContain('Drag to rotate');
   });
 });

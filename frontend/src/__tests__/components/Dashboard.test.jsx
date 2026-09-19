@@ -391,6 +391,14 @@ describe('TestDashboardPanels', () => {
 
   it('peers-live table headers show Throughput instead of TQ', async () => {
     mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    // DataTable renders no <table> at all when there are no rows, so a
+    // neighbor is required here to exercise the header row.
+    fetchMeshStatus.mockResolvedValue({
+      status: { connected: true, neighbors: 1, mesh_interfaces: 1, is_gateway: false },
+      nodes: [],
+      neighbors: [{ name: 'foxtrot_mesh0', mac: 'aa:bb:cc:dd:ee:06', signal: -60, throughput: 1_000_000, iface: 'mesh0', tx: null, rx: null }],
+      interfaces: [],
+    });
     const { container } = render(<DashboardPage />);
     await waitFor(() => screen.getByText('Mesh Peers · Live'));
     // The mesh-peers table <th> row should carry a Throughput column
@@ -528,8 +536,12 @@ describe('TestDashboardPeerTxRate', () => {
     });
   }
 
+  // DataTable renders every row as both a <td> and a mobile
+  // .lat-card-head/.kv .v, so a bare screen.getByText(name) now matches
+  // twice. These helpers scope to the table's <td> cells only.
   function peerRow(name) {
-    return screen.getByText(name).closest('tr');
+    const td = screen.getAllByText(name).find((el) => el.tagName === 'TD');
+    return td.closest('tr');
   }
 
   function cells(row) {
@@ -538,6 +550,9 @@ describe('TestDashboardPeerTxRate', () => {
 
   it('adds a TX Rate column after Throughput', async () => {
     mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    // DataTable renders no <table> at all when there are no rows, so a
+    // neighbor is required here to exercise the header row.
+    meshWith([{ name: 'foxtrot_mesh0', mac: 'aa:bb:cc:dd:ee:06', signal: -60, throughput: 1_000_000, iface: 'mesh0', tx: null, rx: null }]);
     const { container } = render(<DashboardPage />);
     await waitFor(() => screen.getByText('Mesh Peers · Live'));
 
@@ -553,7 +568,7 @@ describe('TestDashboardPeerTxRate', () => {
     meshWith([{ name: 'bravo_mesh1', mac: 'aa:bb:cc:dd:ee:01', signal: -61, throughput: 60_000_000, iface: 'mesh1', tx: HE40, rx: HT20 }]);
     render(<DashboardPage />);
 
-    await waitFor(() => screen.getByText('bravo'));
+    await waitFor(() => expect(screen.getAllByText('bravo').length).toBeGreaterThan(0));
     const row = cells(peerRow('bravo'));
     expect(row[4]).toContain('86.7 Mbps');
     expect(row[4]).toContain('mesh1 · HE40 · MCS7 · 2SS');
@@ -564,7 +579,7 @@ describe('TestDashboardPeerTxRate', () => {
     meshWith([{ name: 'gamma_mesh0', mac: 'aa:bb:cc:dd:ee:02', signal: -75, throughput: 0, iface: 'mesh0', tx: null, rx: null }]);
     render(<DashboardPage />);
 
-    await waitFor(() => screen.getByText('gamma'));
+    await waitFor(() => expect(screen.getAllByText('gamma').length).toBeGreaterThan(0));
     expect(cells(peerRow('gamma'))[4]).toBe('—');
   });
 
@@ -573,7 +588,7 @@ describe('TestDashboardPeerTxRate', () => {
     meshWith([{ name: 'delta_mesh0', mac: 'aa:bb:cc:dd:ee:03', signal: -70, throughput: 0, iface: 'mesh0', tx: { bitrateKbps: 54, phy: 0, widthMhz: 0, mcs: -1, nss: -1 }, rx: null }]);
     render(<DashboardPage />);
 
-    await waitFor(() => screen.getByText('delta'));
+    await waitFor(() => expect(screen.getAllByText('delta').length).toBeGreaterThan(0));
     const cell = cells(peerRow('delta'))[4];
     expect(cell).toContain('54 Kbps');
     expect(cell).toContain('mesh0');
@@ -589,11 +604,56 @@ describe('TestDashboardPeerTxRate', () => {
     ]);
     render(<DashboardPage />);
 
-    await waitFor(() => screen.getByText('echo'));
-    expect(screen.getAllByText('echo')).toHaveLength(1);
+    await waitFor(() => expect(screen.getAllByText('echo').length).toBeGreaterThan(0));
+    // Exactly one table row for "echo" — the two radios collapse into a
+    // single peer entry, not two. (DataTable also renders a matching
+    // .lat-card-head for the mobile card, hence filtering to <td>.)
+    expect(screen.getAllByText('echo').filter((el) => el.tagName === 'TD')).toHaveLength(1);
     const row = cells(peerRow('echo'));
     expect(row[4]).toContain('86.7 Mbps');
     expect(row[4]).toContain('mesh1 · HE40');
     expect(row[5]).toBe('-55'); // RSSI still the strongest radio
+  });
+
+  it('shows a dash for MAC and RSSI when the driver reports neither', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    // mac: '' and signal: 0 are both falsy, so meshPeerColumns' `p.mac ||
+    // '—'` and `p.rssi ? ... : '—'` fallbacks must both fire.
+    meshWith([{ name: 'hotel_mesh0', mac: '', signal: 0, throughput: 0, iface: 'mesh0', tx: null, rx: null }]);
+    render(<DashboardPage />);
+
+    await waitFor(() => expect(screen.getAllByText('hotel').length).toBeGreaterThan(0));
+    const row = cells(peerRow('hotel'));
+    expect(row[1]).toBe('—'); // MAC fallback
+    expect(row[5]).toBe('—'); // RSSI fallback
+  });
+});
+
+// ── Mobile card rendering (DataTable) ──────────────────────────────────────
+
+describe('TestDashboardMobileCards', () => {
+  it('renders mesh peers as both table rows and cards', async () => {
+    mockGetDashboardStatus.mockResolvedValue(makeDashboardResponse());
+    mockListNetworkInterfaces.mockResolvedValue(makeNetworkInterfaceList());
+    fetchMeshStatus.mockResolvedValue({
+      status: { connected: true, neighbors: 1, mesh_interfaces: 1, is_gateway: false },
+      nodes: [],
+      neighbors: [
+        { name: 'bravo_mesh1', mac: 'aa:bb:cc:dd:ee:01', signal: -61, throughput: 60_000_000, iface: 'mesh1', tx: null, rx: null },
+      ],
+      interfaces: [],
+    });
+    const { container } = render(<DashboardPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-tabular')).toBeTruthy();
+    });
+    const tabulars = container.querySelectorAll('.lat-tabular');
+    // Mesh Peers and Network Interfaces both render through DataTable.
+    expect(tabulars).toHaveLength(2);
+    for (const t of tabulars) {
+      const tableRows = t.querySelectorAll('.lat-table tbody tr').length;
+      const cards = t.querySelectorAll('.lat-cardlist .lat-card').length;
+      expect(cards).toBe(tableRows);
+    }
   });
 });

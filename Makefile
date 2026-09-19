@@ -38,6 +38,7 @@ alfred: ## Make Alfred for Go Bindings
 frontend: ## Build the React frontend (outputs to static/).
 	@find static/ -mindepth 1 ! -path 'static/whisper' ! -path 'static/whisper/*' -delete 2>/dev/null || true
 	cd frontend && pnpm install && pnpm run build
+	cd frontend && node scripts/check-css-target.mjs ../static/assets
 
 .PHONY: sqlc-gen
 sqlc-gen: ## Generate sqlc code

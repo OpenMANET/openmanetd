@@ -42,20 +42,10 @@
   .blos-grid .lat-panel.col-span-2,
   .blos-grid .lat-panel.col-span-3 { grid-column: span 2; }
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .blos-grid { grid-template-columns: 1fr; }
   .blos-grid .lat-panel.col-span-2,
   .blos-grid .lat-panel.col-span-3 { grid-column: span 1; }
-}
-
-.blos-empty {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--dim);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 16px 8px;
-  text-align: center;
 }
 
 .blos-spark {
@@ -95,7 +85,7 @@
   gap: 8px;
   margin-top: 4px;
 }
-.blos-actions .lat-btn { min-height: 40px; }
+.blos-actions .lat-btn { min-height: 44px; }
 
 .panel-head-right {
   margin-left: auto;
@@ -163,7 +153,7 @@
     content: attr(data-label);
   }
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .blos-peer-row { grid-template-columns: 1fr; }
 }
 
@@ -194,6 +184,6 @@
 .blos-event-subject { color: var(--muted); }
 .blos-event-msg { color: var(--text); }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .blos-event-row { grid-template-columns: 1fr; gap: 2px; }
 }
