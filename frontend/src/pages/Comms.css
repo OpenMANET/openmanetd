@@ -358,12 +358,27 @@
 /* Matches MOBILE_BREAKPOINT in src/constants.js. */
 @media (max-width: 768px) {
   /* Four buttons across 336px leaves 84px each — enough width, but the
-     primitive's 5px vertical padding is far under the 44px touch target. */
+     primitive's 5px vertical padding is far under the 44px touch target.
+     display/align-items mirrors the .setup-dismiss-banner .lat-btn fix in
+     Layout.css so content stays centered at the taller height. */
   .ch-tiles-panel .ch-all-row .lat-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-height: 44px;
     padding: 0;
   }
   /* Channel tiles stay two-across: 160px each is readable, and one-across
      would push the transcript below three screens of scroll. */
   .ch-tiles-grid { gap: 6px; }
+  /* RX/TX/replay pills on every tile are on screen at 360px (ChannelGrid
+     tiles mode) and were 26px tall — 18px under the 44px floor, worse than
+     the all-row buttons above. Only height changes; the 1fr 1fr 36px grid
+     still fits at 336px since column widths are untouched. */
+  .ch-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+  }
 }
