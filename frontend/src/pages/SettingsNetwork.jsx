@@ -103,33 +103,15 @@ function InterfacesPanel() {
   );
 }
 
-function LeasesTable({ rows, columns }) {
-  if (!rows || rows.length === 0) {
-    return <div className="net-empty">No entries.</div>;
-  }
+function LeasesTable({ rows, columns, ariaLabel }) {
   return (
-    <div className="table-scroll">
-      <table className="lat-table">
-        <thead>
-          <tr>
-            {columns.map((c) => (
-              <th key={c.key} className={c.num ? 'num' : ''}>{c.label}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i}>
-              {columns.map((c) => (
-                <td key={c.key} className={`${c.mono ? 'mono' : ''} ${c.num ? 'num' : ''}`.trim()}>
-                  {c.render ? c.render(r) : (r[c.key] ?? '—')}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      ariaLabel={ariaLabel}
+      columns={columns}
+      rows={rows ?? []}
+      rowKey={(r, i) => r.macAddress || i}
+      emptyLabel="No entries."
+    />
   );
 }
 
@@ -170,15 +152,15 @@ function DHCPPanel() {
 
   const activeColumns = [
     { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
-    { key: 'macAddress', label: 'MAC', mono: true },
-    { key: 'ipAddress', label: 'IP', mono: true },
-    { key: 'expiresSeconds', label: 'Expires', num: true, render: (r) => `${r.expiresSeconds}s` },
+    { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
+    { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
+    { key: 'expiresSeconds', label: 'Expires', className: 'num', render: (r) => `${r.expiresSeconds}s` },
   ];
 
   const staticColumns = [
     { key: 'hostname', label: 'Hostname', render: (r) => r.hostname || '—' },
-    { key: 'macAddress', label: 'MAC', mono: true },
-    { key: 'ipAddress', label: 'IP', mono: true },
+    { key: 'macAddress', label: 'MAC', className: 'mono', render: (r) => r.macAddress ?? '—' },
+    { key: 'ipAddress', label: 'IP', className: 'mono', render: (r) => r.ipAddress ?? '—' },
   ];
 
   return (
@@ -242,7 +224,7 @@ function DHCPPanel() {
             </button>
             {showActive && (
               <div className="disclosure-body">
-                <LeasesTable rows={activeLeases} columns={activeColumns} />
+                <LeasesTable rows={activeLeases} columns={activeColumns} ariaLabel="Active DHCP leases" />
               </div>
             )}
           </div>
@@ -259,7 +241,7 @@ function DHCPPanel() {
             </button>
             {showStatic && (
               <div className="disclosure-body">
-                <LeasesTable rows={staticLeases} columns={staticColumns} />
+                <LeasesTable rows={staticLeases} columns={staticColumns} ariaLabel="Static DHCP reservations" />
               </div>
             )}
           </div>

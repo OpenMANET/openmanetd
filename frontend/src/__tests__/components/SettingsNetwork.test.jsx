@@ -149,9 +149,12 @@ describe('TestDHCPActiveLeases', () => {
 
     // Click to expand active leases
     fireEvent.click(screen.getByText(/Active Leases \(2\)/));
-    expect(screen.getByText('laptop')).toBeTruthy();
-    expect(screen.getByText('phone')).toBeTruthy();
-    expect(screen.getByText('192.168.1.101')).toBeTruthy();
+    // DataTable renders every row as both a <td> and a mobile
+    // .lat-card-head/.kv .v, so a bare screen.getByText(name) now matches
+    // twice — same convention as TestNetworkInterfacesRender above.
+    expect(screen.getAllByText('laptop').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('phone').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('192.168.1.101').length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -166,8 +169,27 @@ describe('TestDHCPStaticLeases', () => {
     await waitFor(() => screen.getByText('DHCP Server'));
 
     fireEvent.click(screen.getByText(/Static Reservations \(1\)/));
-    expect(screen.getByText('printer')).toBeTruthy();
-    expect(screen.getByText('192.168.1.10')).toBeTruthy();
+    expect(screen.getAllByText('printer').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('192.168.1.10').length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('TestDHCPLeasesMobileCards', () => {
+  it('renders active leases as both table rows and cards', async () => {
+    mockListNetworkInterfaces.mockResolvedValue({ interfaces: [] });
+    mockGetDHCPServerConfig.mockResolvedValue(DHCP_CONFIG);
+    mockListActiveDHCPLeases.mockResolvedValue(ACTIVE_LEASES);
+    mockListStaticDHCPLeases.mockResolvedValue(STATIC_LEASES);
+
+    render(<SettingsNetworkPage />);
+    await waitFor(() => screen.getByText('DHCP Server'));
+    fireEvent.click(screen.getByText(/Active Leases \(2\)/));
+
+    const tabular = screen.getByText(/Active Leases \(2\)/).closest('.disclosure').querySelector('.lat-tabular');
+    expect(tabular).toBeTruthy();
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    expect(tableRows).toBe(2);
+    expect(tabular.querySelectorAll('.lat-cardlist .lat-card')).toHaveLength(tableRows);
   });
 });
 
