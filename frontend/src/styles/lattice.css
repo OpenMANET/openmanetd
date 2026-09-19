@@ -94,6 +94,9 @@ html, body {
   flex-direction: column;
   gap: 10px;
   position: relative;
+  /* Grid/flex children default to min-width:auto, which lets a nowrap table
+     inside a panel force the whole page wider than the viewport. */
+  min-width: 0;
 }
 .lat-panel.col-span-2 { grid-column: span 2; }
 .lat-panel.col-span-3 { grid-column: span 3; }
@@ -505,9 +508,14 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
 
 /* ------------------------------------------------------------------ kv */
 
+/* Two-column grid rather than space-between flex: a fixed label column stops
+   long values wrapping inside themselves, which broke coordinates mid-token
+   ("39° 47'" / "26.90\" N") on narrow viewports. The 112px figure matches the
+   status-strip pattern already used by SettingsNetwork and SettingsWireless. */
 .kv {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  align-items: baseline;
   font-size: 11px;
   padding: 3px 0;
   border-bottom: 1px dashed rgba(255, 255, 255, 0.04);
@@ -524,6 +532,9 @@ button.lat-select:disabled { color: var(--dim); cursor: not-allowed; }
 .kv .v {
   color: var(--text);
   font-family: var(--font-mono);
+  text-align: right;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .kv .v.ok { color: var(--ok); }
 .kv .v.warn { color: var(--warn); }
@@ -722,7 +733,7 @@ input[type="range"].lat-slider:disabled {
 .lat-table .badge-crit { color: var(--crit); }
 .lat-table .mono { font-family: var(--font-mono); color: var(--muted); }
 
-.table-scroll { overflow-x: auto; }
+.table-scroll { overflow-x: auto; max-width: 100%; }
 
 /* ------------------------------------------------------------------ status dot */
 
@@ -863,6 +874,39 @@ input[type="range"].lat-slider:disabled {
 .yaml-preview .s { color: var(--ok); }
 .yaml-preview .n { color: var(--warn); }
 .yaml-preview .c { color: var(--dim); font-style: italic; }
+
+/* ------------------------------------------------------------------ mobile */
+/* Matches MOBILE_BREAKPOINT in src/constants.js. Below this width the shell
+   shows the bottom tab bar, which is the signal that the user is on a touch
+   device: targets grow to 44px and density drops. */
+
+@media (max-width: 768px) {
+  .lat-panel { padding: 12px; }
+
+  /* Narrower label column — 112px is a third of a 360px viewport. */
+  .kv { grid-template-columns: 96px 1fr; }
+
+  /* 36px eats a third of the panel width at 360px. */
+  .big-num { font-size: 28px; }
+  .big-num .unit { font-size: 11px; }
+
+  /* Touch targets. The desktop primitives are deliberately untouched — this
+     is a mobile-scoped padding bump, per .claude/rules/frontend.md. */
+  .lat-panel .panel-head .actions button {
+    min-height: 44px;
+    padding: 6px 12px;
+  }
+  .lat-panel .panel-head {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .lat-view-toolbar .lat-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 8px 14px;
+  }
+}
 
 /* ------------------------------------------------------------------ accessibility */
 
