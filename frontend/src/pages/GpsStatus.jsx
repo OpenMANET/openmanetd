@@ -21,6 +21,7 @@ import {
   timestampToDate,
 } from '../utils/gnss.js';
 import LatSelect from '../components/LatSelect.jsx';
+import DataTable from '../components/DataTable.jsx';
 import './GpsStatus.css';
 
 const gnssClient = createClient(GNSSService, transport);
@@ -457,6 +458,33 @@ function PositionPanel({ position, mgrs }) {
 
 // ── Satellite SNR table panel ───────────────────────────────────────────────
 
+const SNR_COLUMNS = [
+  { key: 'prn', label: 'PRN', render: (sat) => sat.prn },
+  { key: 'constellation', label: 'Constellation', render: (sat) => prnToConstellation(sat.prn) },
+  {
+    key: 'elev',
+    label: 'Elev',
+    render: (sat) => (sat.elevation != null ? `${sat.elevation.toFixed(0)}°` : '—'),
+  },
+  {
+    key: 'azim',
+    label: 'Azim',
+    render: (sat) => (sat.azimuth != null ? `${sat.azimuth.toFixed(0).padStart(3, '0')}°` : '—'),
+  },
+  {
+    key: 'snr',
+    label: 'SNR',
+    cellClass: (sat) => snrBadge(sat.snr),
+    render: (sat) => (sat.snr != null ? sat.snr.toFixed(0) : '—'),
+  },
+  {
+    key: 'used',
+    label: 'Used',
+    cellClass: (sat) => (sat.used ? 'badge-ok' : 'badge-crit'),
+    render: (sat) => (sat.used ? '✓' : '✗'),
+  },
+];
+
 function SatelliteSnrPanel({ satelliteStatus }) {
   const [filter, setFilter] = useState('all');
   const sats = satelliteStatus?.satellites ?? [];
@@ -483,43 +511,13 @@ function SatelliteSnrPanel({ satelliteStatus }) {
           </button>
         </div>
       </div>
-      {rows.length === 0 ? (
-        <div className="gps-empty">No satellite data available.</div>
-      ) : (
-        <div className="gps-table-scroll">
-          <table className="lat-table">
-            <thead>
-              <tr>
-                <th>PRN</th>
-                <th>Constellation</th>
-                <th>Elev</th>
-                <th>Azim</th>
-                <th>SNR</th>
-                <th>Used</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((sat, i) => {
-                const snrClass = snrBadge(sat.snr);
-                const usedClass = sat.used ? 'badge-ok' : 'badge-crit';
-                const usedGlyph = sat.used ? '✓' : '✗';
-                const elev = sat.elevation != null ? `${sat.elevation.toFixed(0)}°` : '—';
-                const azim = sat.azimuth != null ? `${sat.azimuth.toFixed(0).padStart(3, '0')}°` : '—';
-                return (
-                  <tr key={`${sat.prn}-${i}`}>
-                    <td>{sat.prn}</td>
-                    <td>{prnToConstellation(sat.prn)}</td>
-                    <td>{elev}</td>
-                    <td>{azim}</td>
-                    <td className={snrClass}>{sat.snr != null ? sat.snr.toFixed(0) : '—'}</td>
-                    <td className={usedClass}>{usedGlyph}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable
+        ariaLabel="Satellite SNR"
+        columns={SNR_COLUMNS}
+        rows={rows}
+        rowKey={(sat, i) => `${sat.prn}-${i}`}
+        emptyLabel="No satellite data available."
+      />
     </div>
   );
 }

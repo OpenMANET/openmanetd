@@ -450,6 +450,35 @@ describe('TestGpsStatus2DFix', () => {
 
 // ── Polling ─────────────────────────────────────────────────────────────────
 
+// ── Mobile card rendering (DataTable) ───────────────────────────────────────
+
+describe('TestGpsSnrMobileCards', () => {
+  it('renders satellite rows as both table rows and cards', async () => {
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+    const { container } = render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.gps-panel-snr .lat-tabular')).toBeTruthy();
+    });
+    const tabular = container.querySelector('.gps-panel-snr .lat-tabular');
+    const tableRows = tabular.querySelectorAll('.lat-table tbody tr').length;
+    const cards = tabular.querySelectorAll('.lat-cardlist .lat-card').length;
+    expect(tableRows).toBeGreaterThan(0);
+    expect(cards).toBe(tableRows);
+  });
+
+  it('heads each satellite card with its PRN', async () => {
+    mockGetGNSSConfig.mockResolvedValue(CONFIG_DISABLED);
+    mockGetGNSSStatus.mockResolvedValue(STATUS_3D_FIX);
+    const { container } = render(<GpsStatusPage />);
+    await waitFor(() => {
+      expect(container.querySelector('.lat-card-head')).toBeTruthy();
+    });
+    const head = container.querySelector('.gps-panel-snr .lat-card-head');
+    expect(head.textContent).toMatch(/^\d+$/);
+  });
+});
+
 describe('TestGpsStatusPolling', () => {
   it('polls for status updates on interval', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

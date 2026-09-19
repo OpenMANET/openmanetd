@@ -156,23 +156,9 @@
 
 /* ── Satellite SNR panel ────────────────────────────────────────────────── */
 
-.gps-table-scroll {
-  overflow-x: auto;
-  width: 100%;
-}
-
 .lat-panel .panel-head .actions button.gps-filter-active {
   color: var(--accent);
   border-bottom: 1px solid var(--accent);
-}
-
-.gps-empty {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  padding: 16px 0;
-  text-align: center;
 }
 
 /* ── Output protocols panel ─────────────────────────────────────────────── */
