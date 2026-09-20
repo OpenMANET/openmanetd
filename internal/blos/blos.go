@@ -58,6 +58,10 @@ func NewBLOS(cfg *config.Config, logger zerolog.Logger) (*BLOS, error) {
 		return nil, nil
 	}
 
+	// One shared LocalAPI client for prefs and status so the daemon holds a
+	// single keep-alive connection to tailscaled instead of one per caller.
+	tsClient := &LocalTailscaleClient{}
+
 	r := &BLOS{
 		cfg:                cfg,
 		logger:             logger,
@@ -65,12 +69,12 @@ func NewBLOS(cfg *config.Config, logger zerolog.Logger) (*BLOS, error) {
 		uciNetworkConfig:   network.NewUCINetworkConfigReader(),
 		uciFirewallConfig:  firewall.NewUCIFirewallConfigReader(),
 		interfaceManager:   &RealInterfaceManager{},
-		tsClient:           &LocalTailscaleClient{},
+		tsClient:           tsClient,
 	}
 
 	// Initialize the status worker (not started yet)
 	interval := time.Duration(cfg.GetBLOSStatusWorkerInterval()) * time.Second
-	r.statusWorker = NewStatusWorker(&LocalStatusClient{}, interval, logger)
+	r.statusWorker = NewStatusWorker(tsClient, interval, logger)
 
 	return r, nil
 }
