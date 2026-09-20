@@ -43,8 +43,17 @@ type BLOS struct {
 // I/O beyond that. Call Start(ctx) to configure interfaces and begin polling.
 // Returns (nil, nil) if the node is not in gateway mode.
 func NewBLOS(cfg *config.Config, logger zerolog.Logger) (*BLOS, error) {
+	return newBLOS(cfg, logger, batmanadv.GetMeshConfig)
+}
+
+// meshConfigFunc reads the batman-adv mesh configuration for an interface.
+// It is a parameter of newBLOS so tests can substitute a fake for the
+// batctl-backed batmanadv.GetMeshConfig.
+type meshConfigFunc func(iface string) (*batmanadv.MeshConfig, error)
+
+func newBLOS(cfg *config.Config, logger zerolog.Logger, getMeshConfig meshConfigFunc) (*BLOS, error) {
 	// Get mesh config to determine if we are a gateway
-	meshCfg, err := batmanadv.GetMeshConfig(cfg.GetAlfredBatInterface())
+	meshCfg, err := getMeshConfig(cfg.GetAlfredBatInterface())
 	if err != nil {
 		logger.Error().Err(err).Msg("Error getting mesh config")
 
