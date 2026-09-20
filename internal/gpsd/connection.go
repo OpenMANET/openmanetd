@@ -151,6 +151,19 @@ func (g *GPSService) readGPSD() {
 		return
 	}
 
+	// Whatever ends the read loop (peer hang-up, read error, shutdown),
+	// release the descriptor now instead of leaving it to the finalizer
+	// while connectionHandler dials a replacement.
+	defer func() {
+		_ = conn.Close()
+
+		g.mu.Lock()
+		if g.conn == conn {
+			g.conn = nil
+		}
+		g.mu.Unlock()
+	}()
+
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		select {
