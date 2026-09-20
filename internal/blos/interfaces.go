@@ -2,6 +2,7 @@ package blos
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -22,25 +23,45 @@ type TailscaleClient interface {
 }
 
 // LocalTailscaleClient is the production implementation using the Tailscale SDK.
-type LocalTailscaleClient struct{}
+//
+// It wraps exactly one local.Client for the lifetime of the value. A
+// local.Client lazily builds a private http.Transport whose keep-alive
+// connection to the tailscaled unix socket never expires and cannot be
+// closed, so constructing a fresh client per call leaks one file
+// descriptor (and the matching accepted socket inside tailscaled) every
+// time. The zero value is ready to use and must not be copied once used.
+type LocalTailscaleClient struct {
+	lc local.Client
+}
 
 // Status returns the current Tailscale daemon status.
 func (c *LocalTailscaleClient) Status(ctx context.Context) (*ipnstate.Status, error) {
-	return local.Status(ctx)
+	status, err := c.lc.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tailscale status: %w", err)
+	}
+
+	return status, nil
 }
 
 // GetPrefs returns the current Tailscale preferences.
 func (c *LocalTailscaleClient) GetPrefs(ctx context.Context) (*ipn.Prefs, error) {
-	lc := &local.Client{}
+	prefs, err := c.lc.GetPrefs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tailscale get prefs: %w", err)
+	}
 
-	return lc.GetPrefs(ctx)
+	return prefs, nil
 }
 
 // EditPrefs updates Tailscale preferences.
 func (c *LocalTailscaleClient) EditPrefs(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error) {
-	lc := &local.Client{}
+	prefs, err := c.lc.EditPrefs(ctx, mp)
+	if err != nil {
+		return nil, fmt.Errorf("tailscale edit prefs: %w", err)
+	}
 
-	return lc.EditPrefs(ctx, mp)
+	return prefs, nil
 }
 
 // InterfaceManager defines an interface for managing network interfaces.
