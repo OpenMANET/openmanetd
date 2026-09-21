@@ -1,5 +1,5 @@
 // This investigation probe writes only temporary files. It demonstrates the
-// stale-tree failure and a refresh-before-write control; it is not a fix.
+// preservation of external edits, with and without an explicit caller refresh.
 package main
 
 import (
@@ -83,10 +83,7 @@ config wifi-iface 'default_radio1'
 	disk := uci.NewTree(dir)
 	got, _ := disk.Get("wireless", "default_radio1", "network")
 
-	want := "ahwlan"
-	if refresh {
-		want = "batmesh0"
-	}
+	want := "batmesh0"
 
 	if len(got) != 1 || got[0] != want {
 		return fmt.Errorf("refresh=%v: got %v, expected %s", refresh, got, want)

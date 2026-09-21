@@ -1246,3 +1246,35 @@ func TestEnsureSecondaryMeshPolicyOptions_EmptySection(t *testing.T) {
 		t.Fatal("expected error for empty section name")
 	}
 }
+
+func TestWirelessReloadInvalidatesCachedNetwork(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"wireless": "config wifi-device 'radio0'\n option channel '36'\n",
+		"network":  "config interface 'batmesh0'\n option proto 'batadv_hardif'\n option master 'old-bat'\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reader := &UCIWirelessConfigReader{tree: uci.NewTree(dir)}
+	reader.Get("network", "batmesh0", "master")
+
+	external := uci.NewTree(dir)
+	if err := external.SetType("network", "batmesh0", "master", uci.TypeOption, "bat0"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := external.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reader.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := reader.Get("network", "batmesh0", "master")
+	assert.True(t, ok)
+	assert.Equal(t, []string{"bat0"}, got)
+}

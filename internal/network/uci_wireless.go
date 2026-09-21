@@ -366,7 +366,16 @@ func (r *UCIWirelessConfigReader) Commit() error {
 }
 
 func (r *UCIWirelessConfigReader) ReloadConfig() error {
-	return r.tree.LoadConfig(wirelessConfigName, true)
+	if err := r.tree.LoadConfig(wirelessConfigName, true); err != nil {
+		return fmt.Errorf("reload wireless: %w", err)
+	}
+
+	// Hardif validation and creation use this same tree. Discard its cached
+	// network package so the next access sees external edits as well.
+	// Load lazily: AP-only operations do not require a network package.
+	r.tree.Revert(networkConfigName)
+
+	return nil
 }
 
 type wirelessSection struct {

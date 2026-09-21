@@ -77,3 +77,9 @@ Experiment and conditional package MR are described in the packages plan. GPSD d
 - Repository golangci-lint for the new investigation command: zero issues.
 
 Host test commands needed Go 1.26.3 and CGO_CFLAGS=-D_GNU_SOURCE for the PAM dependency. No production changes, full firmware build, electrical checks, or RF/fix acquisition tests were performed.
+
+## Implementation (fix/halow-gps)
+
+Single-radio and batch operations now refresh wireless before any mutation. The production reader also invalidates cached network state, loading it afresh if hardif operations need it. Real-file RPC regression coverage checks that both paths preserve external HaLow binding and vendor options, and batch changes survive. Failed pre-write refresh prevents commits. This fixes the demonstrated sequential stale-cache bug; external writers racing the same save are not serialized by the service mutex.
+
+The investigation command now expects batmesh0 in both scenarios. Issue 3 follows the user's simplified choice: package procps-ng-pkill rather than redesigning GPIO ownership. Packages also adds explicit GPS carrier selection and an optional, default-off GPSD read-only setting for issue 4 diagnosis. Hardware verification remains required.

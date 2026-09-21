@@ -829,6 +829,8 @@ func TestUpdateRadioSettings_ReloadFailure(t *testing.T) {
 	if resp.Message == nil {
 		t.Error("expected message explaining reload failure")
 	}
+
+	assert.False(t, reader.commitCalled, "refresh failure must prevent writes")
 }
 
 func TestUpdateRadioSettings_NilSettings(t *testing.T) {
@@ -1962,7 +1964,7 @@ func TestApplyRadioSettingsBatch_TwoRadiosOneReload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, reader.reloadCalls, "one reload for the whole batch")
+	assert.Equal(t, 2, reader.reloadCalls, "refresh before batch and re-read after commit")
 	assert.Equal(t, 1, rl.count(), "one service reload for the whole batch")
 
 	ch, _ := reader.Get("wireless", "radio2", "channel")
@@ -1986,7 +1988,7 @@ func TestApplyRadioSettingsBatch_StageErrorSkipsReload(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "radio9")
 	assert.Equal(t, 0, rl.count(), "no service reload when staging fails")
-	assert.Equal(t, 0, reader.reloadCalls, "a failed batch must not reload")
+	assert.Equal(t, 1, reader.reloadCalls, "refresh before staging, no post-commit reload")
 }
 
 func TestApplyRadioSettingsBatch_ReloadErrorSurfaces(t *testing.T) {
