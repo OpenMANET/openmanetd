@@ -98,13 +98,17 @@ func TestSendCoTToMulticast(t *testing.T) {
 		Mode:      3,
 	}
 
-	// Test that CoT message can be created without errors
-	err := gps.sendCoTToMulticast()
-	// We don't check for connection errors since multicast might not be available in test env
-	// Just verify the function doesn't panic and handles the position correctly
-	if err != nil && !strings.Contains(err.Error(), "multicast") && !strings.Contains(err.Error(), "network") && !strings.Contains(err.Error(), "dial") {
-		t.Errorf("Unexpected error creating CoT message: %v", err)
-	}
+	sender := &fakeMulticastSender{}
+	gps.SendMulticast = sender.send
+
+	require.NoError(t, gps.sendCoTToMulticast())
+
+	packets := sender.sent()
+	require.Len(t, packets, 1)
+
+	typ, uid := decodeMesh(t, packets[0])
+	assert.Equal(t, radioUnitType, typ)
+	assert.Equal(t, nodeCallsign(), uid)
 }
 
 func TestSendCoTToMulticast_InvalidPosition(t *testing.T) {
@@ -202,23 +206,20 @@ func TestSendCoTToMulticast_HAE_Calculation(t *testing.T) {
 		GeoidSeparation: -33.5, // Geoid separation for New York area
 	}
 
-	// The function will create a CoT message
-	// We can't easily verify the internal HAE calculation without mocking,
-	// but we can at least ensure it doesn't error with geoid separation
-	err := gps.sendCoTToMulticast()
+	sender := &fakeMulticastSender{}
+	gps.SendMulticast = sender.send
 
-	// May get network errors, but shouldn't get position errors
-	if err != nil && strings.Contains(err.Error(), "no valid GPS position") {
-		t.Errorf("Should not get position error with valid position and geoid separation: %v", err)
-	}
+	require.NoError(t, gps.sendCoTToMulticast())
 
 	// Test with zero geoid separation (HAE should equal MSL)
 	gps.position.GeoidSeparation = 0
-	err = gps.sendCoTToMulticast()
+	require.NoError(t, gps.sendCoTToMulticast())
 
-	if err != nil && strings.Contains(err.Error(), "no valid GPS position") {
-		t.Errorf("Should not get position error with valid position and zero geoid separation: %v", err)
-	}
+	packets := sender.sent()
+	require.Len(t, packets, 2)
+
+	assert.InDelta(t, 10.0+(-33.5), decodeMeshHAE(t, packets[0]), 1e-9, "HAE = MSL + geoid separation")
+	assert.InDelta(t, 10.0, decodeMeshHAE(t, packets[1]), 1e-9, "HAE = MSL when geoid separation is zero")
 }
 
 func TestSendCoTAsExternalGPS_InvalidPosition(t *testing.T) {

@@ -482,6 +482,11 @@ func (g *GPSService) sendCoTMulticast(data []byte) error {
 		return errors.New("no multicast-capable interface available for CoT send")
 	}
 
+	write := g.writeMulticast
+	if write == nil {
+		write = writeMulticastOn
+	}
+
 	dst := &net.UDPAddr{IP: net.ParseIP(config.ATAKSAAddress), Port: atakSAMulticastPortNum}
 
 	var (
@@ -490,7 +495,7 @@ func (g *GPSService) sendCoTMulticast(data []byte) error {
 	)
 
 	for i := range candidates {
-		if err := writeMulticastOn(&candidates[i], dst, data); err != nil {
+		if err := write(&candidates[i], dst, data); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", candidates[i].Name, err))
 
 			continue

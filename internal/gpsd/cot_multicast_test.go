@@ -57,6 +57,16 @@ func decodeMesh(t *testing.T, data []byte) (typ, uid string) {
 	return msg.GetCotEvent().GetType(), msg.GetCotEvent().GetUid()
 }
 
+func decodeMeshHAE(t *testing.T, data []byte) float64 {
+	t.Helper()
+
+	msg, _, err := cot.ReadProtoMesh(bufio.NewReader(bytes.NewReader(data)))
+	require.NoError(t, err)
+	require.NotNil(t, msg.GetCotEvent())
+
+	return msg.GetCotEvent().GetHae()
+}
+
 func newNoLeaseGPS(sender *fakeMulticastSender, leases func() (*network.DHCPLeasesResponse, error)) *GPSService {
 	return &GPSService{
 		Log:           zerolog.Nop(),
@@ -331,19 +341,76 @@ func TestSendIfRequiredAsCoT_staleLeaseStillMulticasts(t *testing.T) {
 	assert.Len(t, sender.sent(), 2, "a lease whose device no longer answers ARP must not block multicast")
 }
 
-// TestSendCoTMulticast_realInterfaces exercises the real pinned sender on
-// whatever up multicast-capable interfaces the host has. It is also the
-// test binary run inside an isolated network namespace without a default
-// route to prove the "network is unreachable" regression is gone.
-func TestSendCoTMulticast_realInterfaces(t *testing.T) {
-	if len(selectMulticastInterfaces(config.DefaultMeshNetInterface, net.InterfaceByName, net.Interfaces)) == 0 {
-		t.Skip("no up multicast-capable interface on this host")
+// fakeMulticastWriter records per-interface writes and fails the
+// interfaces named in failOn, so sendCoTMulticast's fallback and error
+// aggregation are exercised without touching a real socket.
+type fakeMulticastWriter struct {
+	mu     sync.Mutex
+	writes []string
+	dsts   []string
+	failOn map[string]bool
+}
+
+func (f *fakeMulticastWriter) write(ifi *net.Interface, dst *net.UDPAddr, _ []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.writes = append(f.writes, ifi.Name)
+	f.dsts = append(f.dsts, dst.String())
+
+	if f.failOn[ifi.Name] {
+		return errors.New("network is unreachable")
 	}
 
-	gps := &GPSService{Log: zerolog.Nop()}
+	return nil
+}
 
-	data, err := cot.MakeProtoMeshPacketV1(cot.MakePing("openmanet-test"))
-	require.NoError(t, err)
+func newTwoBridgeGPS(w *fakeMulticastWriter) *GPSService {
+	return &GPSService{
+		Log:             zerolog.Nop(),
+		interfaceByName: func(string) (*net.Interface, error) { return nil, errors.New("no such interface") },
+		listInterfaces: func() ([]net.Interface, error) {
+			return []net.Interface{
+				{Index: 4, Name: "br-lan", Flags: net.FlagUp | net.FlagMulticast},
+				{Index: 5, Name: "bat0", Flags: net.FlagUp | net.FlagMulticast},
+			}, nil
+		},
+		writeMulticast: w.write,
+	}
+}
 
-	require.NoError(t, gps.sendCoTMulticast(data))
+func TestSendCoTMulticast_writesToSAGroupOnConfiguredMesh(t *testing.T) {
+	w := &fakeMulticastWriter{}
+	gps := &GPSService{
+		Log: zerolog.Nop(),
+		interfaceByName: func(name string) (*net.Interface, error) {
+			return &net.Interface{Index: 7, Name: name, Flags: net.FlagUp | net.FlagMulticast}, nil
+		},
+		writeMulticast: w.write,
+	}
+
+	require.NoError(t, gps.sendCoTMulticast([]byte{0xbf}))
+
+	assert.Equal(t, []string{config.DefaultMeshNetInterface}, w.writes)
+	assert.Equal(t, []string{"239.2.3.1:6969"}, w.dsts)
+}
+
+func TestSendCoTMulticast_succeedsWhenOneFallbackInterfaceAccepts(t *testing.T) {
+	w := &fakeMulticastWriter{failOn: map[string]bool{"br-lan": true}}
+	gps := newTwoBridgeGPS(w)
+
+	require.NoError(t, gps.sendCoTMulticast([]byte{0xbf}))
+
+	assert.Equal(t, []string{"br-lan", "bat0"}, w.writes, "every candidate is attempted")
+}
+
+func TestSendCoTMulticast_failsWhenEveryInterfaceRejects(t *testing.T) {
+	w := &fakeMulticastWriter{failOn: map[string]bool{"br-lan": true, "bat0": true}}
+	gps := newTwoBridgeGPS(w)
+
+	err := gps.sendCoTMulticast([]byte{0xbf})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "br-lan")
+	assert.ErrorContains(t, err, "bat0")
 }

@@ -121,8 +121,12 @@ type GPSService struct {
 	// interfaceAddrs and arpProbe override (*net.Interface).Addrs and the
 	// ARP liveness probe used by checkDeviceActive; nil means the real
 	// implementations. Tests set these to simulate a LAN without raw sockets.
-	interfaceAddrs    func(*net.Interface) ([]net.Addr, error)
-	arpProbe          func(*net.Interface, netip.Addr) error
+	interfaceAddrs func(*net.Interface) ([]net.Addr, error)
+	arpProbe       func(*net.Interface, netip.Addr) error
+	// writeMulticast overrides the per-interface datagram write used by
+	// sendCoTMulticast; nil means writeMulticastOn. Tests set this so the
+	// fallback and error-aggregation logic runs without a real socket.
+	writeMulticast    func(*net.Interface, *net.UDPAddr, []byte) error
 	done              chan struct{}
 	Config            *config.Config
 	cancel            context.CancelFunc
