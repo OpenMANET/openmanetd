@@ -3,6 +3,7 @@ package gpsd
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,7 +108,21 @@ type GPSService struct {
 	// GetDHCPLeases overrides the DHCP lease lookup used to identify
 	// directly-connected EUDs (e.g. for CoT sender validation). Falls back
 	// to network.GetCurrentDHCPLeases when nil; tests set this to a fake.
-	GetDHCPLeases     func() (*network.DHCPLeasesResponse, error)
+	GetDHCPLeases func() (*network.DHCPLeasesResponse, error)
+	// SendMulticast overrides the datagram send used for CoT multicast
+	// (ping + radio marker). Falls back to sendCoTMulticast when nil; tests
+	// set this to capture the emitted packets.
+	SendMulticast func([]byte) error
+	// interfaceByName and listInterfaces override net.InterfaceByName and
+	// net.Interfaces for multicast egress selection; nil means the real
+	// functions. Tests set these to drive selectMulticastInterfaces.
+	interfaceByName func(string) (*net.Interface, error)
+	listInterfaces  func() ([]net.Interface, error)
+	// interfaceAddrs and arpProbe override (*net.Interface).Addrs and the
+	// ARP liveness probe used by checkDeviceActive; nil means the real
+	// implementations. Tests set these to simulate a LAN without raw sockets.
+	interfaceAddrs    func(*net.Interface) ([]net.Addr, error)
+	arpProbe          func(*net.Interface, netip.Addr) error
 	done              chan struct{}
 	Config            *config.Config
 	cancel            context.CancelFunc
