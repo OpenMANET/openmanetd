@@ -1,11 +1,13 @@
 module github.com/openmanet/openmanetd
 
-go 1.26.3
+go 1.27.1
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2
+	buf.build/go/protovalidate v1.4.0
 	connectrpc.com/connect v1.21.0
 	connectrpc.com/cors v0.1.0
+	connectrpc.com/validate v0.7.0
 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be
 	github.com/coreywagehoft/go-tak v1.2.0
 	github.com/creack/pty v1.1.24
@@ -27,53 +29,50 @@ require (
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10
 	github.com/rs/cors v1.11.1
 	github.com/rs/zerolog v1.35.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/sstallion/go-hid v0.15.0
 	github.com/stretchr/testify v1.12.1
 	github.com/vishvananda/netlink v1.3.1
+	github.com/warthog618/go-gpiocdev v0.9.1
+	go.yaml.in/yaml/v3 v3.0.5
+	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.98.2
+	tailscale.com v1.104.0
 )
 
-require github.com/warthog618/go-gpiocdev v0.9.1
-
-require github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-
-require cel.dev/cel-go v0.32.0 // indirect
-
 require (
-	buf.build/go/protovalidate v1.4.0
+	cel.dev/cel-go v0.32.0 // indirect
 	cel.dev/expr v0.25.3 // indirect
-	connectrpc.com/validate v0.7.0
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
-	github.com/coder/websocket v1.8.12 // indirect
-	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced // indirect
-	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
+	github.com/dblohm7/wingoes v0.0.0-20260526185140-fb298caac7ca // indirect
+	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
+	github.com/go-json-experiment/json v0.0.0-20260820222146-c27c302e5fc3 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hdevalence/ed25519consensus v0.2.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/native v1.1.0 // indirect
-	github.com/jsimonetti/rtnetlink v1.4.0 // indirect
-	github.com/mattn/go-colorable v0.1.14 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/jsimonetti/rtnetlink v1.4.2 // indirect
+	github.com/mattn/go-colorable v0.1.15 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mdlayher/ethernet v0.0.0-20220221185849-529eae5b6118 // indirect
 	github.com/mdlayher/genetlink v1.4.0 // indirect
 	github.com/mdlayher/netlink v1.11.2 // indirect
 	github.com/mdlayher/packet v1.1.2 // indirect
-	github.com/mdlayher/socket v0.6.0 // indirect
+	github.com/mdlayher/socket v0.7.0 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
+	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -86,13 +85,11 @@ require (
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	go.yaml.in/yaml/v3 v3.0.5
-	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
-	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/exp v0.0.0-20260820142414-ca536658362e // indirect
+	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
+	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
+	golang.zx2c4.com/wireguard/windows v1.0.1 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 )
