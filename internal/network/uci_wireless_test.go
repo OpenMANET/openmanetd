@@ -10,6 +10,7 @@ import (
 
 	"github.com/digineo/go-uci/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetWirelessMeshPassphraseFromPath(t *testing.T) {
@@ -1277,4 +1278,17 @@ func TestWirelessReloadInvalidatesCachedNetwork(t *testing.T) {
 	got, ok := reader.Get("network", "batmesh0", "master")
 	assert.True(t, ok)
 	assert.Equal(t, []string{"bat0"}, got)
+}
+
+func TestWirelessReloadConfig_missingFile(t *testing.T) {
+	path := writeWirelessFixture(t, "config wifi-device 'radio0'\n option channel '36'\n")
+	reader := &UCIWirelessConfigReader{tree: uci.NewTree(filepath.Dir(path))}
+	require.NoError(t, reader.ReloadConfig())
+
+	// A cached config must not hide a failed refresh from disk.
+	require.NoError(t, os.Remove(path))
+
+	err := reader.ReloadConfig()
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.ErrorContains(t, err, "reload wireless")
 }
