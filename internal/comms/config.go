@@ -194,6 +194,8 @@ type CommsConfig struct {
 	ROIPCOSGPIOMask    byte
 }
 
+const bs22SCODeviceSpec = "bt_sco"
+
 // NewComms copies cfg and returns a pointer ready for Start.
 func NewComms(cfg CommsConfig) *CommsConfig {
 	mcastPorts := make([]McastPortConfig, len(cfg.McastPorts))
@@ -277,6 +279,28 @@ func (cfg *CommsConfig) applyDefaults() {
 	}
 
 	cfg.ControlSource = normalizeControlSource(cfg.ControlSource)
+
+	// BS-22 HM uses Bluetooth SCO. In the combined BS-22 mode, resolve the
+	// audio path to BlueALSA SCO by default.
+	if cfg.ControlSource == controlSourceBS22 {
+		cfg.BluetoothAudioDeviceHint = bs22SCODeviceSpec
+		cfg.BluetoothInputDevice = bs22SCODeviceSpec
+		cfg.BluetoothOutputDevice = bs22SCODeviceSpec
+	}
+
+	// XEVENT-only mode accepts explicit BlueALSA ALSA device specs. If none
+	// are supplied, use the logical SCO alias for both directions.
+	if cfg.ControlSource == controlSourceBlueALSAXEvent {
+		if cfg.BluetoothAudioDeviceHint == "" {
+			cfg.BluetoothAudioDeviceHint = bs22SCODeviceSpec
+		}
+		if cfg.BluetoothInputDevice == "" {
+			cfg.BluetoothInputDevice = cfg.BluetoothAudioDeviceHint
+		}
+		if cfg.BluetoothOutputDevice == "" {
+			cfg.BluetoothOutputDevice = cfg.BluetoothAudioDeviceHint
+		}
+	}
 
 	// Apply ROIP-specific defaults after ControlSource is normalised.
 	if cfg.ControlSource == controlSourceROIP {

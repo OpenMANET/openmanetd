@@ -48,6 +48,14 @@ type nanopttBackend struct {
 }
 
 func init() {
+	control.Register(controlSourceBS22, func(deps control.ControlDeps) (control.EventSource, error) {
+		return control.NewBS22EventSource(deps.Log), nil
+	})
+
+	control.Register(controlSourceBlueALSAXEvent, func(deps control.ControlDeps) (control.EventSource, error) {
+		return control.NewBlueALSAXEventSource(deps.Log), nil
+	})
+
 	control.Register("openvlm", func(deps control.ControlDeps) (control.EventSource, error) {
 		return control.NewOpenVLMSource(deps.Log), nil
 	})
@@ -118,6 +126,8 @@ func (cfg *CommsConfig) buildControlDeps(rt *CommsRuntime) (control.ControlDeps,
 	switch cfg.ControlSource {
 	case defaultCtrlSrc:
 		deps.Backend = &openvlmBackend{}
+	case controlSourceBS22, controlSourceBlueALSAXEvent:
+		// Bluetooth event sources connect to BlueZ and BlueALSA directly.
 	case controlSourceROIP:
 		deps.Backend = &roipBackend{
 			COSGPIOMask:    cfg.ROIPCOSGPIOMask,

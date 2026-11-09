@@ -11,17 +11,20 @@ import (
 const (
 	defaultControlSourceOpenVLM = "openvlm"
 	defaultControlSourceNanoPTT = "nanoptt"
+	controlSourceBS22           = "bs22"
+	controlSourceBlueALSAXEvent = "bluealsa_xevent"
 	controlSourceROIP           = "roip"
 	controlSourceWeb            = "web"
-	controlSourceBluealsaXEvent = "bluealsa_xevent"
 )
 
 // normalizeControlSource maps raw config strings to canonical control source names.
 // Unrecognized values (including empty string) default to "openvlm".
 func normalizeControlSource(src string) string {
 	switch strings.ToLower(strings.TrimSpace(src)) {
-	case controlSourceBluealsaXEvent:
-		return controlSourceBluealsaXEvent
+	case controlSourceBS22:
+		return controlSourceBS22
+	case controlSourceBlueALSAXEvent:
+		return controlSourceBlueALSAXEvent
 	case defaultControlSourceNanoPTT:
 		return defaultControlSourceNanoPTT
 	case controlSourceROIP:

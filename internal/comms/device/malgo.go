@@ -11,6 +11,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const (
+	bs22SCOAlias           = "bt_sco"
+	bluealsaSCODefaultSpec = "bluealsa:PROFILE=sco"
+)
+
 // AudioDeviceInfo is a backend-neutral descriptor returned by ResolveAudio.
 // It carries only the fields the audio package consumes so callers do not
 // have to import malgo directly — the device package is the sole importer
@@ -46,6 +51,11 @@ func ResolveAudio(ctx *malgo.AllocatedContext, spec string, wantInput bool) (Aud
 		return AudioDeviceInfo{}, errors.New("device.ResolveAudio: nil malgo context")
 	}
 
+	spec = strings.TrimSpace(spec)
+	if info, ok, err := resolveDirectBlueALSA(spec, wantInput); ok {
+		return info, err
+	}
+
 	kind := malgo.Playback
 	if wantInput {
 		kind = malgo.Capture
@@ -78,6 +88,16 @@ func ResolveAudio(ctx *malgo.AllocatedContext, spec string, wantInput bool) (Aud
 		return newAudioDeviceInfo(devs[idx], wantInput), nil
 	}
 
+	if strings.EqualFold(spec, bs22SCOAlias) {
+		for i := range devs {
+			if isLikelySCODeviceName(devs[i].Name()) {
+				return newAudioDeviceInfo(devs[i], wantInput), nil
+			}
+		}
+
+		return newRawALSAAudioDeviceInfo(bluealsaSCODefaultSpec, wantInput)
+	}
+
 	for i := range devs {
 		if devs[i].Name() == spec {
 			return newAudioDeviceInfo(devs[i], wantInput), nil
@@ -91,7 +111,16 @@ func ResolveAudio(ctx *malgo.AllocatedContext, spec string, wantInput bool) (Aud
 		}
 	}
 
-	return AudioDeviceInfo{}, fmt.Errorf("audio device %q not found", spec)
+	return AudioDeviceInfo{}, fmt.Errorf("audio device %q not found for %s (available: %s)", spec, kindName(wantInput), listDeviceNames(devs))
+}
+
+func resolveDirectBlueALSA(spec string, wantInput bool) (AudioDeviceInfo, bool, error) {
+	if spec == "" || !strings.HasPrefix(strings.ToLower(spec), "bluealsa") {
+		return AudioDeviceInfo{}, false, nil
+	}
+
+	info, err := newRawALSAAudioDeviceInfo(spec, wantInput)
+	return info, true, err
 }
 
 func kindName(wantInput bool) string {
@@ -117,6 +146,51 @@ func newAudioDeviceInfo(d malgo.DeviceInfo, wantInput bool) AudioDeviceInfo {
 		MaxChannels: maxChannels,
 		IsInput:     wantInput,
 	}
+}
+
+func newRawALSAAudioDeviceInfo(spec string, wantInput bool) (AudioDeviceInfo, error) {
+	id, err := deviceIDFromALSAName(spec)
+	if err != nil {
+		return AudioDeviceInfo{}, err
+	}
+
+	return AudioDeviceInfo{Name: spec, ID: id, MaxChannels: 1, IsInput: wantInput}, nil
+}
+
+func deviceIDFromALSAName(name string) (malgo.DeviceID, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return malgo.DeviceID{}, errors.New("empty ALSA device name")
+	}
+	if len(name) >= 256 {
+		return malgo.DeviceID{}, fmt.Errorf("ALSA device name too long: %d", len(name))
+	}
+
+	var id malgo.DeviceID
+	copy(id[:], name)
+	id[len(name)] = 0
+	return id, nil
+}
+
+func isLikelySCODeviceName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "sco") || strings.Contains(n, "hfp") || strings.Contains(n, "hsp") || strings.Contains(n, "handsfree")
+}
+
+func listDeviceNames(devs []malgo.DeviceInfo) string {
+	if len(devs) == 0 {
+		return "none"
+	}
+
+	names := make([]string, 0, len(devs))
+	for i := range devs {
+		name := strings.TrimSpace(devs[i].Name())
+		if name == "" {
+			name = fmt.Sprintf("<unnamed-%d>", i)
+		}
+		names = append(names, name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // LogAudioDevices logs every capture and playback device at Debug level.
