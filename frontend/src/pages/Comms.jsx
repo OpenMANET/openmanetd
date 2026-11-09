@@ -8,6 +8,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import './Comms.css';
+import { Link } from 'react-router-dom';
 import { CHANNELS_DEF, MSG_TYPE, RX_WAVE_HISTORY, VOX_HANGTIME_MS } from '../constants.js';
 import { connect as wsConnect, disconnect as wsDisconnect, setCallbacks as wsSetCallbacks, sendToggle as wsSendToggle, sendByte as wsSendByte, send as wsSend, isOpen as wsIsOpen } from '../services/websocketService.js';
 import { initAudio, decodeAndPlay, resetTxTimestamp, startMic, stopMic, setVolume, setMicGain, playBuffer, startMicMonitor, enumerateDevices, setOutputDevice, setMicDevice, setEncoderCallback, clearEncoderCallback } from '../services/audioEngine.js';
@@ -689,6 +690,7 @@ export default function CommsPage() {
           <div className="crumb">Push-to-talk · Live transcript · {channelCount} channels</div>
         </div>
         <div className="lat-view-toolbar">
+          <Link className="lat-btn ghost" to="/settings/bluetooth">BLUETOOTH</Link>
           <button
             className={`lat-btn ${audioExpanded ? '' : 'ghost'}`}
             type="button"

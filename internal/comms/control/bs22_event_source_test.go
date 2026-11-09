@@ -229,8 +229,8 @@ func TestBS22PTTEventFromPacket(t *testing.T) {
 }
 
 func TestBS22HMCommandBytes(t *testing.T) {
-	got := bs22HMCommandBytes(bs22HMVendorID, bs22HMSetBLEAudio, bs22HMSetBLEAudioEnabled)
-	want := []byte{0x10, 0x0A, 0x00, 0x0F, 0x01}
+	got := bs22HMCommandBytes(bs22HMVendorID, 0x1234, 0x56)
+	want := []byte{0x10, 0x0A, 0x12, 0x34, 0x56}
 
 	if len(got) != len(want) {
 		t.Fatalf("len(bs22HMCommandBytes()) = %d, want %d", len(got), len(want))
@@ -281,7 +281,7 @@ func TestNextBS22PrimeBackoff(t *testing.T) {
 	}
 }
 
-func TestBS22EventSource_PrimeBLE(t *testing.T) {
+func TestBS22EventSource_PrimeBLEPreservesHFPAudio(t *testing.T) {
 	var writes [][]byte
 	src := &bs22EventSource{
 		log: zerolog.Nop(),
@@ -298,7 +298,6 @@ func TestBS22EventSource_PrimeBLE(t *testing.T) {
 
 	want := [][]byte{
 		{0x10, 0x0A, 0x00, 0x0D},
-		{0x10, 0x0A, 0x00, 0x0F, 0x01},
 	}
 
 	if len(writes) != len(want) {
@@ -424,5 +423,50 @@ func TestIsBlueZUnsupportedMethodError(t *testing.T) {
 				t.Fatalf("isBlueZUnsupportedMethodError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSelectedBS22DoesNotSwitchToOtherConnectedDevice(t *testing.T) {
+	device, managed := bs22BindingFixture()
+	other := dbus.ObjectPath("/org/bluez/hci1/dev_11_22_33_44_55_66")
+	managed[other] = map[string]map[string]dbus.Variant{bluezDeviceInterface: {"Name": dbus.MakeVariant("BS-22"), "Connected": dbus.MakeVariant(true)}}
+	source, err := NewSelectedBS22EventSource(zerolog.Nop(), device.Path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := source.(*bs22EventSource)
+	got, ok := selected.findDevice(managed)
+	if !ok || got.Path != device.Path {
+		t.Fatal("selected another accessory")
+	}
+	delete(managed, device.Path)
+	if _, ok := selected.findDevice(managed); ok {
+		t.Fatal("fell back to unrelated accessory after removal")
+	}
+	fallback := selected.xeventFactory(zerolog.Nop()).(*blueALSAXEventSource)
+	if fallback.acceptsRFCOMM("/org/bluealsa/hci1/dev_11_22_33_44_55_66/rfcomm") {
+		t.Fatal("accepted another accessory's PTT")
+	}
+}
+
+func TestBS22EventSource_PrimeBLEReportsFailure(t *testing.T) {
+	expected := errors.New("not connected")
+	src := &bs22EventSource{writeValue: func(_ *dbus.Conn, _ dbus.ObjectPath, _ []byte) error { return expected }}
+	require.ErrorIs(t, src.primeBLE(nil, bs22BLEBinding{WritePath: "/org/bluez/hci0/dev_test/char"}), expected)
+}
+
+func TestIsBlueZDisconnectedError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"named", dbus.NewError("org.bluez.Error.NotConnected", []interface{}{"disconnected"}), true},
+		{"bluez572", dbus.NewError("org.bluez.Error.Failed", []interface{}{"Not connected"}), true},
+		{"authentication", dbus.NewError("org.bluez.Error.AuthenticationFailed", []interface{}{"Authentication Failed"}), false},
+		{"other", errors.New("operation failed"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { require.Equal(t, tc.want, isBlueZDisconnectedError(tc.err)) })
 	}
 }

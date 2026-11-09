@@ -123,6 +123,7 @@ func openMalgoPlayback(
 	cfg.PeriodSizeInFrames = periodFrames
 	cfg.PerformanceProfile = malgo.LowLatency
 	cfg.Alsa.NoMMap = 0
+	applyBluetoothTiming(&cfg, dev.Name)
 
 	chunker := newPlaybackChunker(beepBuf, playoutFrame)
 

@@ -5,6 +5,11 @@ package audio
 // docs/instrumentation-snapshot.md — keep that file in sync when
 // adding or renaming fields here.
 type AudioEncoderSnapshot struct {
+	// CapturePeak and PreEncodePeak are maximum PCM magnitudes before and
+	// after gain for queued TX frames in the current PTT cycle (0..32768).
+	CapturePeak   int32 `json:"capture_peak"`
+	PreEncodePeak int32 `json:"pre_encode_peak"`
+
 	// FramesCaptured is the monotonic count of audio frames delivered by
 	// the capture callback since the start of the current PTT cycle
 	// (reset in SetTxEnabled(true)). Approximately 50 frames per second
@@ -63,6 +68,8 @@ func (be *BroadcastEncoder) Snapshot(dst *AudioEncoderSnapshot) {
 		return
 	}
 
+	dst.CapturePeak = be.capturePeak.Load()
+	dst.PreEncodePeak = be.preEncodePeak.Load()
 	dst.FramesCaptured = be.framesCaptured.Load()
 	dst.FramesDropped = be.framesDropped.Load()
 	dst.FramesEncoded = be.framesEncoded.Load()

@@ -11,6 +11,7 @@
 //   - the basic UI elements (PTT button, channel grid container) are present.
 
 import React from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 
@@ -87,18 +88,18 @@ afterEach(() => {
 
 describe('TestCommsRender', () => {
   it('renders the page without crashing and shows the PTT button', () => {
-    const { container } = render(<CommsPage />);
+    const { container } = render(<MemoryRouter><CommsPage /></MemoryRouter>);
     expect(container.querySelector('.ptt-ring')).toBeInTheDocument();
     expect(container.querySelector('.ptt-ring').textContent).toMatch(/TX/);
   });
 
   it('shows WS DOWN in the topbar when not connected', () => {
-    render(<CommsPage />);
+    render(<MemoryRouter><CommsPage /></MemoryRouter>);
     expect(screen.getByText(/WS DOWN/i)).toBeInTheDocument();
   });
 
   it('shows the AUDIO and WHISPER toolbar actions', () => {
-    render(<CommsPage />);
+    render(<MemoryRouter><CommsPage /></MemoryRouter>);
     expect(screen.getByRole('button', { name: /^AUDIO$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^WHISPER$/i })).toBeInTheDocument();
   });
@@ -115,7 +116,7 @@ describe('TestCommsIntervalsVisibilityGated', () => {
       const { fetchCommsStatus } = await import('../../services/commsApi.js');
       const { checkSilenceAndTranscribe } = await import('../../services/whisperService.js');
 
-      render(<CommsPage />);
+      render(<MemoryRouter><CommsPage /></MemoryRouter>);
 
       // Allow any synchronous mount-time effects to run, then advance the
       // clock far enough to cover the longest converted interval (10s).

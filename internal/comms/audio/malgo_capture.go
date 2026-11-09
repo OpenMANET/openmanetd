@@ -65,6 +65,7 @@ func openMalgoCapture(
 	cfg.PerformanceProfile = malgo.Conservative
 	cfg.Periods = periods
 	cfg.Alsa.NoMMap = 0
+	applyBluetoothTiming(&cfg, dev.Name)
 
 	stream := &malgoCaptureStream{
 		accum:     make([]int16, audiopool.FrameSize),

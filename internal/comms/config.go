@@ -125,6 +125,12 @@ func (rt *CommsRuntime) SetBroadcast(bs BroadcastCapture) {
 // owned by *Service (returned by Start via SetDefault) so the static
 // config and the per-startup runtime have distinct lifetimes.
 type CommsConfig struct {
+	// BluetoothSession is supplied only by the Bluetooth lifecycle owner. Saved
+	// comms configuration alone must never authorize radio connections or TX.
+	BluetoothSession    BluetoothSession
+	testToneC           <-chan chan error
+	BluetoothDevicePath string
+
 	Log        zerolog.Logger
 	AuxHandler control.AuxEventHandler
 	Interrupt  chan os.Signal
@@ -202,6 +208,8 @@ func NewComms(cfg CommsConfig) *CommsConfig {
 	copy(mcastPorts, cfg.McastPorts)
 
 	return &CommsConfig{
+		BluetoothSession:         cfg.BluetoothSession,
+		BluetoothDevicePath:      cfg.BluetoothDevicePath,
 		Log:                      cfg.Log,
 		Interrupt:                cfg.Interrupt,
 		Enable:                   cfg.Enable,
@@ -283,9 +291,13 @@ func (cfg *CommsConfig) applyDefaults() {
 	// BS-22 HM uses Bluetooth SCO. In the combined BS-22 mode, resolve the
 	// audio path to BlueALSA SCO by default.
 	if cfg.ControlSource == controlSourceBS22 {
-		cfg.BluetoothAudioDeviceHint = bs22SCODeviceSpec
-		cfg.BluetoothInputDevice = bs22SCODeviceSpec
-		cfg.BluetoothOutputDevice = bs22SCODeviceSpec
+		spec := bs22SCODeviceSpec
+		if selected, err := cfg.selectedBluetoothAudioSpec(); err == nil {
+			spec = selected
+		}
+		cfg.BluetoothAudioDeviceHint = spec
+		cfg.BluetoothInputDevice = spec
+		cfg.BluetoothOutputDevice = spec
 	}
 
 	// XEVENT-only mode accepts explicit BlueALSA ALSA device specs. If none

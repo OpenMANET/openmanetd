@@ -10,6 +10,7 @@ import (
 	connectcors "connectrpc.com/cors"
 	"connectrpc.com/validate"
 	blosconnect "github.com/openmanet/openmanetd/internal/api/openmanet/blos/v1/blosv1connect"
+	bluetoothconnect "github.com/openmanet/openmanetd/internal/api/openmanet/bluetooth/v1/bluetoothv1connect"
 	commsconnect "github.com/openmanet/openmanetd/internal/api/openmanet/comms/v1/commsv1connect"
 	dashboardconnect "github.com/openmanet/openmanetd/internal/api/openmanet/dashboard/v1/dashboardv1connect"
 	gnssconnect "github.com/openmanet/openmanetd/internal/api/openmanet/gnss/v1/gnssv1connect"
@@ -49,6 +50,7 @@ type APIServer struct {
 	GPS                   *gpsd.GPSService
 	BLOSManager           blos.BLOSLifecycle
 	CommsManager          comms.CommsLifecycle
+	BluetoothManager      handlers.BluetoothManager
 	Mixer                 handlers.AudioMixer
 	Interfaces            handlers.InterfaceProvider
 	DHCP                  handlers.DHCPConfigProvider
@@ -141,6 +143,8 @@ func NewAPIServer(cfg APIServer) *APIServer {
 	}
 
 	api.Handle(services.NewStatusServiceHandler(statusSvc, connect.WithInterceptors(validateInterceptor)))
+
+	api.Handle(bluetoothconnect.NewBluetoothServiceHandler(&handlers.BluetoothService{Log: cfg.Log, Manager: cfg.BluetoothManager}, connect.WithInterceptors(validateInterceptor)))
 
 	api.Handle(commsconnect.NewCommsServiceHandler(&handlers.CommsService{
 		Cfg:          cfg.Cfg,

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,10 @@ type rfcommPathLister func(*dbus.Conn) ([]dbus.ObjectPath, error)
 type rfcommOpener func(context.Context, *dbus.Conn, dbus.ObjectPath) (io.ReadCloser, error)
 
 type blueALSAXEventSource struct {
+	channelSteps   chan int
+	speakerVolumes chan int
+	selectedRFCOMM dbus.ObjectPath
+
 	log            zerolog.Logger
 	dial           systemBusDialer
 	listRFCOMM     rfcommPathLister
@@ -57,7 +62,9 @@ type blueALSARFCOMMMonitor struct {
 // NewBlueALSAXEventSource monitors BlueALSA DBus messages and emits PTT press/release events.
 func NewBlueALSAXEventSource(log zerolog.Logger) EventSource {
 	return &blueALSAXEventSource{
-		log: log,
+		log:            log,
+		channelSteps:   make(chan int, 8),
+		speakerVolumes: make(chan int, 16),
 		dial: func() (*dbus.Conn, error) {
 			return dbus.ConnectSystemBus()
 		},
@@ -71,6 +78,12 @@ func (s *blueALSAXEventSource) Events(ctx context.Context) <-chan PTTEvent {
 
 	go func() {
 		defer close(ch)
+		if s.speakerVolumes != nil {
+			defer close(s.speakerVolumes)
+		}
+		if s.channelSteps != nil {
+			defer close(s.channelSteps)
+		}
 
 		if s.dial == nil {
 			return
@@ -116,6 +129,9 @@ func (s *blueALSAXEventSource) Events(ctx context.Context) <-chan PTTEvent {
 		var monitors sync.WaitGroup
 
 		startMonitor := func(path dbus.ObjectPath) {
+			if !s.acceptsRFCOMM(path) {
+				return
+			}
 			activeMu.Lock()
 			if _, exists := active[path]; exists {
 				activeMu.Unlock()
@@ -250,6 +266,12 @@ func (s *blueALSAXEventSource) emitEventName(ctx context.Context, out chan<- PTT
 	var ev PTTEvent
 
 	switch eventName {
+	case "NEXT_CH":
+		queueChannelStep(s.channelSteps, 1)
+		return true
+	case "PREV_CH":
+		queueChannelStep(s.channelSteps, -1)
+		return true
 	case "PTT_DOWN":
 		ev = PTTDown
 	case "PTT_UP":
@@ -284,6 +306,7 @@ func (s *blueALSAXEventSource) shouldSuppressDuplicate(eventName string) bool {
 func (s *blueALSAXEventSource) consumeRFCOMM(ctx context.Context, out chan<- PTTEvent, r io.Reader) bool {
 	buf := make([]byte, 4096)
 	var held bool
+	volumeReady := false
 
 	for {
 		n, err := r.Read(buf)
@@ -291,6 +314,25 @@ func (s *blueALSAXEventSource) consumeRFCOMM(ctx context.Context, out chan<- PTT
 			return held
 		}
 		if n > 0 {
+			for _, line := range strings.FieldsFunc(string(buf[:n]), func(r rune) bool { return r == '\r' || r == '\n' }) {
+				// The headset advertises its initial gain during HFP setup.
+				// Only later commands are user adjustments; otherwise reconnect
+				// can replace the separately saved listening level with 15.
+				if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "AT+XEVENT=BSHM:") {
+					volumeReady = true
+				}
+				if gain, ok := blueALSAAccessoryVolume(line); ok && volumeReady {
+					queueChannelStep(s.speakerVolumes, gain)
+				}
+			}
+			// RFCOMM1.Open is a command handler, not a passive monitor.
+			// BlueALSA leaves commands without a built-in handler to us.
+			if w, ok := r.(io.Writer); ok {
+				if err := replyBlueALSACommands(w, string(buf[:n])); err != nil {
+					s.log.Debug().Err(err).Msg("BlueALSA: RFCOMM reply failed")
+					return held
+				}
+			}
 			for _, eventName := range blueALSAEventNames(string(buf[:n])) {
 				if !s.emitEventName(ctx, out, eventName) {
 					return held
@@ -316,7 +358,9 @@ func (s *blueALSAXEventSource) consumeRFCOMM(ctx context.Context, out chan<- PTT
 }
 
 func addDBusMatch(conn *dbus.Conn, rule string) error {
-	return conn.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, rule).Err
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.AddMatch", 0, rule).Err
 }
 
 func listBlueALSARFCOMMPaths(conn *dbus.Conn) ([]dbus.ObjectPath, error) {
@@ -325,7 +369,9 @@ func listBlueALSARFCOMMPaths(conn *dbus.Conn) ([]dbus.ObjectPath, error) {
 	}
 
 	var managed map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	call := conn.Object(bluealsaService, bluealsaManagerPath).Call(bluealsaManagedObjectsMethod, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	call := conn.Object(bluealsaService, bluealsaManagerPath).CallWithContext(ctx, bluealsaManagedObjectsMethod, 0)
 	if call.Err != nil {
 		return nil, call.Err
 	}
@@ -570,4 +616,53 @@ func logBlueZSignal(log zerolog.Logger, sig *dbus.Signal) {
 			}
 		}
 	}
+}
+
+func (s *blueALSAXEventSource) acceptsRFCOMM(path dbus.ObjectPath) bool {
+	return s.selectedRFCOMM == "" || s.selectedRFCOMM == path
+}
+
+// replyBlueALSACommands handles only commands absent from BlueALSA 4.3's
+// built-in handlers. It also forwards built-in commands to this socket, so
+// replying to every AT message would send duplicate responses. Each read is
+// one complete SOCK_SEQPACKET message from BlueALSA.
+func replyBlueALSACommands(w io.Writer, packet string) error {
+	for _, line := range strings.FieldsFunc(packet, func(r rune) bool { return r == '\r' || r == '\n' }) {
+		line = strings.ToUpper(strings.TrimSpace(line))
+		var reply string
+		switch {
+		case strings.HasPrefix(line, "AT+CLIP"), line == "AT+CNUM":
+			// OpenMANET is not a telephone gateway and has no caller-ID or subscriber-number service.
+			// An explicit refusal lets the headset finish optional setup.
+			reply = "\r\nERROR\r\n"
+		case strings.HasPrefix(line, "AT+XEVENT="):
+			// This acknowledges receipt, independently of PTT de-duplication.
+			// Non-PTT events are still ignored by the event dispatcher.
+			reply = "\r\nOK\r\n"
+		default:
+			continue
+		}
+		if d, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok {
+			if err := d.SetWriteDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, reply); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *blueALSAXEventSource) ChannelEvents() <-chan int { return s.channelSteps }
+
+func (s *blueALSAXEventSource) SpeakerVolumes() <-chan int { return s.speakerVolumes }
+func blueALSAAccessoryVolume(line string) (int, bool) {
+	line = strings.ToUpper(strings.TrimSpace(line))
+	value, ok := strings.CutPrefix(line, "AT+VGS=")
+	if !ok {
+		return 0, false
+	}
+	gain, err := strconv.Atoi(value)
+	return gain, err == nil && gain >= 0 && gain <= 15
 }

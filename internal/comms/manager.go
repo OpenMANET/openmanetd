@@ -24,15 +24,18 @@ type startFunc func(ctx context.Context) error
 // CommsManager owns the comms lifecycle and serializes enable/disable operations.
 // It implements CommsLifecycle.
 type CommsManager struct {
-	cfg     *config.Config
-	logger  zerolog.Logger
-	mixer   *alsa.Volume
-	buildFn func() *CommsConfig
-	startFn func(*CommsConfig) startFunc
-	cancel  context.CancelFunc
-	done    chan struct{}
-	mu      sync.Mutex
-	running bool
+	cfg              *config.Config
+	logger           zerolog.Logger
+	mixer            *alsa.Volume
+	buildFn          func() *CommsConfig
+	startFn          func(*CommsConfig) startFunc
+	cancel           context.CancelFunc
+	done             chan struct{}
+	mu               sync.Mutex
+	running          bool
+	bluetoothRunning bool
+	bluetoothTone    chan chan error
+	bluetoothRestore *CommsConfig
 }
 
 // NewCommsManager creates a new CommsManager. The manager is created at
@@ -144,13 +147,22 @@ func (m *CommsManager) Enable() error {
 		return nil
 	}
 
-	cc := m.buildFn()
+	return m.enableLocked(context.Background(), m.buildFn())
+}
 
+// enableLocked is shared by ordinary comms and the Bluetooth lifecycle owner.
+func (m *CommsManager) enableLocked(parent context.Context, cc *CommsConfig) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	if err := cc.Validate(); err != nil {
 		return err
 	}
+	if !cc.bluetoothConnectionAllowed() {
+		return ErrBluetoothDisabled
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
 
 	start := m.startFn(cc)
@@ -177,10 +189,15 @@ func (m *CommsManager) Disable() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.bluetoothRestore = nil
+	m.bluetoothRunning = false
+	m.disableLocked()
+}
+
+func (m *CommsManager) disableLocked() {
 	if !m.running {
 		return
 	}
-
 	m.cancel()
 	<-m.done
 

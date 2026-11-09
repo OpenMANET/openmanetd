@@ -261,6 +261,10 @@ func (cfg *CommsConfig) drainPlaybackBuffer(rt *CommsRuntime) {
 // the capture callback still runs (the VOX tap continues to observe mic
 // frames) but encoded frames never hit the wire.
 func (cfg *CommsConfig) beginTransmission(rt *CommsRuntime) {
+	if !cfg.transmissionAllowed() {
+		return
+	}
+
 	if rt.Broadcasting.Load() {
 		cfg.Log.Debug().Msg("PTTDown ignored; already broadcasting")
 
@@ -308,6 +312,11 @@ func (cfg *CommsConfig) beginTransmission(rt *CommsRuntime) {
 		return
 	}
 
+	// Consent/readiness may have changed while the start tone was settling.
+	if !cfg.transmissionAllowed() {
+		cfg.stopTransmissionQuietly(rt)
+		return
+	}
 	bs.SetTxEnabled(true)
 
 	cfg.Log.Debug().Msg("TX gate opened")
@@ -358,6 +367,15 @@ func (cfg *CommsConfig) Run(parentCtx context.Context, rt *CommsRuntime, src con
 	// permanently dead sockets until Disable is called.
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
+	defer cfg.stopTransmissionQuietly(rt)
+	// Check lost permission even when the accessory cannot deliver a release.
+	// RTP itself is gated on every send; this tick resets the capture/UI state.
+	var consentC <-chan time.Time
+	if cfg.usesBluetooth() {
+		consentTick := time.NewTicker(100 * time.Millisecond)
+		defer consentTick.Stop()
+		consentC = consentTick.C
+	}
 
 	for _, pc := range rt.Ports {
 		if pc.Receiver != nil {
@@ -372,6 +390,17 @@ func (cfg *CommsConfig) Run(parentCtx context.Context, rt *CommsRuntime, src con
 	}
 
 	events := src.Events(ctx)
+	if cfg.usesBluetooth() {
+		defer func() {
+			cfg.stopTransmissionQuietly(rt)
+			if cfg.BluetoothSession != nil {
+				cfg.BluetoothSession.ObservePTT(false)
+			}
+			cancel()
+			for range events {
+			} // Join Bluetooth workers before hardware teardown.
+		}()
+	}
 
 	if aux, ok := src.(control.AuxEventSource); ok && cfg.AuxHandler != nil {
 		// The aux pump deliberately runs on the parent context, not the
@@ -381,6 +410,15 @@ func (cfg *CommsConfig) Run(parentCtx context.Context, rt *CommsRuntime, src con
 		// cancels the parent. Run-scoped cancellation would cut the drain
 		// short (pinned by TestRun_AuxEvents_DispatchedToHandler).
 		go cfg.runAuxPump(parentCtx, aux)
+	}
+
+	var speakerVolumes <-chan int
+	if volumes, ok := src.(control.SpeakerVolumeEventSource); ok {
+		speakerVolumes = volumes.SpeakerVolumes()
+	}
+	var channelSteps <-chan int
+	if channels, ok := src.(control.ChannelEventSource); ok {
+		channelSteps = channels.ChannelEvents()
 	}
 
 	// In-run audio recovery: when hardware audio failed at startup (or the
@@ -411,6 +449,21 @@ func (cfg *CommsConfig) Run(parentCtx context.Context, rt *CommsRuntime, src con
 			cfg.Log.Info().Msg("comms context canceled; exiting run loop")
 
 			return
+		case reply := <-cfg.testToneC:
+			if !cfg.bluetoothConnectionAllowed() || rt.Broadcast() == nil || rt.Broadcasting.Load() {
+				reply <- ErrNotRunning
+				continue
+			}
+			cfg.drainPlaybackBuffer(rt)
+			cfg.queueBeep(rt, rt.BeepBufferStart)
+			reply <- nil
+		case <-consentC:
+			if !cfg.bluetoothConnectionAllowed() {
+				return
+			}
+			if !cfg.transmissionAllowed() && rt.Broadcasting.Load() {
+				cfg.stopTransmissionQuietly(rt)
+			}
 		case <-recoverC:
 			recoverAttempts++
 
@@ -419,11 +472,39 @@ func (cfg *CommsConfig) Run(parentCtx context.Context, rt *CommsRuntime, src con
 
 				recoverC = nil
 			}
+		case gain, ok := <-speakerVolumes:
+			if !ok {
+				speakerVolumes = nil
+				continue
+			}
+			if cfg.usesBluetooth() && cfg.bluetoothConnectionAllowed() {
+				for _, pc := range rt.Ports {
+					if pc.setBluetoothVolume(gain) {
+						break
+					}
+				}
+			}
+		case step, ok := <-channelSteps:
+			if !ok {
+				channelSteps = nil
+				continue
+			}
+			if err := cfg.stepBluetoothChannel(rt, step); err != nil {
+				cfg.Log.Warn().Err(err).Msg("Bluetooth channel selection failed")
+			}
 		case ev, ok := <-events:
 			if !ok {
 				return
 			}
 
+			if cfg.usesBluetooth() && cfg.BluetoothSession != nil {
+				cfg.BluetoothSession.ObservePTT(ev == control.PTTDown)
+			}
+			// Setup reports physical presses but cannot open the capture TX gate.
+			if !cfg.transmissionAllowed() {
+				cfg.stopTransmissionQuietly(rt)
+				continue
+			}
 			switch ev {
 			case control.PTTDown:
 				cfg.beginTransmission(rt)

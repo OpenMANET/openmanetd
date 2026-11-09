@@ -208,6 +208,8 @@ type BroadcastEncoder struct {
 	deps             Deps
 	framesDropped    atomic.Int64
 	framesEncoded    atomic.Int64
+	capturePeak      atomic.Int32
+	preEncodePeak    atomic.Int32
 	captureGapMaxNs  atomic.Int64
 	encodeErrors     atomic.Int64
 	framesCaptured   atomic.Int64
@@ -274,6 +276,8 @@ func (be *BroadcastEncoder) SetTxEnabled(v bool) {
 		// callback.
 		be.framesCaptured.Store(0)
 		be.framesEncoded.Store(0)
+		be.capturePeak.Store(0)
+		be.preEncodePeak.Store(0)
 		be.framesDropped.Store(0)
 		be.encodeErrors.Store(0)
 		be.encodeDurMaxNs.Store(0)
@@ -390,6 +394,7 @@ func (be *BroadcastEncoder) encodeOne(fp *[]int16) {
 	defer audiopool.Int16Pool.Put(fp)
 
 	pcm := *fp
+	recordPCM16Peak(&be.capturePeak, pcm)
 
 	if q := micGainQ8(be.deps.MicGain); q != unityGainQ8 {
 		// Apply gain in Q8 fixed point, limited by the soft knee. The
@@ -401,6 +406,8 @@ func (be *BroadcastEncoder) encodeOne(fp *[]int16) {
 			pcm[i] = softKnee((int32(v) * q) >> gainQ8Shift)
 		}
 	}
+
+	recordPCM16Peak(&be.preEncodePeak, pcm)
 
 	bufPtr := audiopool.EncBufPool.Get().(*[]byte) //nolint:forcetypeassert
 
@@ -534,4 +541,24 @@ func (be *BroadcastEncoder) Close() error {
 	}
 
 	return nil
+}
+
+// recordPCM16Peak measures magnitude on the encode worker, without retaining
+// audio or adding work to the capture callback. int32 handles -32768 safely.
+func recordPCM16Peak(counter *atomic.Int32, pcm []int16) {
+	var peak int32
+	for _, sample := range pcm {
+		v := int32(sample)
+		if v < 0 {
+			v = -v
+		}
+		if v > peak {
+			peak = v
+		}
+	}
+	for old := counter.Load(); peak > old; old = counter.Load() {
+		if counter.CompareAndSwap(old, peak) {
+			return
+		}
+	}
 }

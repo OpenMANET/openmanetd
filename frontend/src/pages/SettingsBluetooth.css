@@ -1,0 +1,4 @@
+.bluetooth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-block: 12px; }
+.bluetooth-action { min-height: 44px; }
+.bluetooth-device, .bluetooth-preference { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-block: 12px; }
+.bluetooth-device > div { overflow-wrap: anywhere; }

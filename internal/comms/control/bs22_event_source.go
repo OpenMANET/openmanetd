@@ -29,7 +29,6 @@ const (
 	bluezAdapterConnectDeviceMethod    = bluezAdapterInterface + ".ConnectDevice"
 	bluezBearerLEInterface             = "org.bluez.Bearer.LE1"
 	bluezBearerLEConnectMethod         = bluezBearerLEInterface + ".Connect"
-	bluezDeviceConnectMethod           = bluezDeviceInterface + ".Connect"
 	bluezAddressTypePublic             = "public"
 	bluezAddressTypeRandom             = "random"
 	bs22Name                           = "BS-22"
@@ -38,10 +37,8 @@ const (
 	bs22HMNotifyUUID                   = "00001102-d102-11e1-9b23-00025b00a5a5"
 	bs22HMVendorID                     = 0x100A
 	bs22HMReadSettings                 = 13
-	bs22HMSetBLEAudio                  = 15
 	bs22HMKeyEventInd                  = 257
 	bs22HMResponseBit                  = 0x8000
-	bs22HMSetBLEAudioEnabled           = 1
 	bs22BLEConnectRetryInterval        = 5 * time.Second
 	bs22BLERescanInterval              = 2 * time.Second
 	bs22BLEPrimeRetryInitial           = 30 * time.Second
@@ -86,7 +83,18 @@ func (p bs22HMPacket) IsResponse() bool {
 	return p.Command&bs22HMResponseBit != 0
 }
 
+type BS22Readiness interface {
+	ObserveButtonsReady(bool)
+	ObserveHFPReady(bool)
+}
+
 type bs22EventSource struct {
+	channelSteps   chan int
+	speakerVolumes chan int
+	readiness      BS22Readiness
+	selectedDevice dbus.ObjectPath
+
+	manageHFP      bool
 	log            zerolog.Logger
 	dial           systemBusDialer
 	listManaged    bluezManagedLister
@@ -105,7 +113,10 @@ type bs22EventSource struct {
 // BlueALSA XEVENT events from the Classic HFP link.
 func NewBS22EventSource(log zerolog.Logger) EventSource {
 	return &bs22EventSource{
-		log: log,
+		log:            log,
+		channelSteps:   make(chan int, 8),
+		speakerVolumes: make(chan int, 16),
+		manageHFP:      true,
 		dial: func() (*dbus.Conn, error) {
 			return dbus.ConnectSystemBus()
 		},
@@ -117,11 +128,45 @@ func NewBS22EventSource(log zerolog.Logger) EventSource {
 	}
 }
 
+// NewSelectedBS22EventSource restricts both transports and fallback button
+// events to the accessory selected by the user. The caller owns session consent.
+func NewSelectedBS22EventSource(log zerolog.Logger, device dbus.ObjectPath, readiness BS22Readiness) (EventSource, error) {
+	if !device.IsValid() || !strings.HasPrefix(string(device), "/org/bluez/") || !strings.Contains(string(device), "/dev_") {
+		return nil, errors.New("select a Bluetooth accessory before starting comms")
+	}
+
+	source := NewBS22EventSource(log).(*bs22EventSource)
+	source.selectedDevice = device
+	source.readiness = readiness
+	source.xeventFactory = func(log zerolog.Logger) EventSource {
+		fallback := NewBlueALSAXEventSource(log).(*blueALSAXEventSource)
+		fallback.selectedRFCOMM = dbus.ObjectPath(strings.Replace(string(device), "/org/bluez/", "/org/bluealsa/", 1) + "/rfcomm")
+		return fallback
+	}
+	return source, nil
+}
+
+func (s *bs22EventSource) findDevice(managed bluezManagedObjectMap) (bs22DeviceInfo, bool) {
+	if s.selectedDevice == "" {
+		return findBS22Device(managed)
+	}
+	interfaces, ok := managed[s.selectedDevice]
+	if !ok {
+		return bs22DeviceInfo{}, false
+	}
+	return findBS22Device(bluezManagedObjectMap{s.selectedDevice: interfaces})
+}
+
 func (s *bs22EventSource) Events(ctx context.Context) <-chan PTTEvent {
 	out := make(chan PTTEvent, 4)
 	raw := make(chan PTTEvent, 8)
 
 	var wg sync.WaitGroup
+
+	if s.manageHFP {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.monitorHFP(ctx) }()
+	}
 
 	wg.Add(1)
 	go func() {
@@ -144,6 +189,13 @@ func (s *bs22EventSource) Events(ctx context.Context) <-chan PTTEvent {
 
 	go func() {
 		defer close(out)
+		if s.speakerVolumes != nil {
+			defer close(s.speakerVolumes)
+		}
+		if s.channelSteps != nil {
+			defer close(s.channelSteps)
+		}
+		defer wg.Wait() // Closing out proves all transport workers have stopped.
 
 		for {
 			select {
@@ -193,10 +245,34 @@ func (s *bs22EventSource) forwardBlueALSAFallback(ctx context.Context, out chan<
 	}
 
 	events := src.Events(ctx)
+	var volumes <-chan int
+	if volumeSource, ok := src.(SpeakerVolumeEventSource); ok {
+		volumes = volumeSource.SpeakerVolumes()
+	}
+	var steps <-chan int
+	if channels, ok := src.(ChannelEventSource); ok {
+		steps = channels.ChannelEvents()
+	}
+	defer func() {
+		for range events {
+		}
+	}() // Join on every cancellation path.
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case gain, ok := <-volumes:
+			if !ok {
+				volumes = nil
+				continue
+			}
+			queueChannelStep(s.speakerVolumes, gain)
+		case step, ok := <-steps:
+			if !ok {
+				steps = nil
+				continue
+			}
+			queueChannelStep(s.channelSteps, step)
 		case ev, ok := <-events:
 			if !ok {
 				return
@@ -262,6 +338,9 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 	var held bool
 
 	clearBinding := func() {
+		if s.readiness != nil {
+			s.readiness.ObserveButtonsReady(false)
+		}
 		if held {
 			// BlueZ cannot deliver the button release once the binding is gone.
 			sendPTTEvent(ctx, out, PTTUp)
@@ -279,10 +358,11 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 		managed, err := s.listManaged(conn)
 		if err != nil {
 			s.log.Debug().Err(err).Msg("BS-22 BLE: failed to enumerate BlueZ managed objects")
+			clearBinding()
 			return
 		}
 
-		device, ok := findBS22Device(managed)
+		device, ok := s.findDevice(managed)
 		if !ok {
 			clearBinding()
 			return
@@ -291,10 +371,11 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 		binding, ok := findBS22BLEBindingForDevice(managed, device)
 		if !ok || !device.Connected {
 			clearBinding()
-			// Avoid forcing a new connect sequence while the device is already
-			// connected. Re-connecting from this state can destabilize the active
-			// BR/EDR audio path on some controllers.
-			if !device.Connected && s.connectDevice != nil && time.Since(lastConnectAttempt) >= connectRetry {
+			// Device1.Connected is shared by BR/EDR and LE. When a Classic
+			// connection is up but the HM GATT service is absent, still request
+			// LE explicitly; otherwise the PTT source can silently remain on the
+			// wrong bearer indefinitely.
+			if s.connectDevice != nil && time.Since(lastConnectAttempt) >= connectRetry {
 				lastConnectAttempt = time.Now()
 				if err := s.connectDevice(conn, device); err != nil && !isIgnorableBlueZConnectError(err) {
 					s.log.Debug().
@@ -311,6 +392,12 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 			clearBinding()
 			if err := s.startNotify(conn, binding.NotifyPath); err != nil && !isIgnorableBlueZNotifyError(err) {
 				s.log.Debug().Err(err).Str("path", string(binding.NotifyPath)).Msg("BS-22 BLE: StartNotify failed")
+				if s.connectDevice != nil && time.Since(lastConnectAttempt) >= connectRetry {
+					lastConnectAttempt = time.Now()
+					if connectErr := s.connectDevice(conn, device); connectErr != nil && !isIgnorableBlueZConnectError(connectErr) {
+						s.log.Debug().Err(connectErr).Str("device", string(device.Path)).Msg("BS-22 BLE: connect request after StartNotify failure failed")
+					}
+				}
 				return
 			}
 
@@ -333,6 +420,19 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 		}
 
 		if err := s.primeBLE(conn, current); err != nil {
+			if isBlueZDisconnectedError(err) {
+				// Cached GATT objects can outlive LE while Classic keeps
+				// Device1.Connected true. Reconnect LE instead of backing off
+				// forever against the stale binding.
+				clearBinding()
+				if s.connectDevice != nil && time.Since(lastConnectAttempt) >= connectRetry {
+					lastConnectAttempt = time.Now()
+					if connectErr := s.connectDevice(conn, device); connectErr != nil && !isIgnorableBlueZConnectError(connectErr) {
+						s.log.Debug().Err(connectErr).Msg("BS-22 BLE: reconnect after control channel disconnect failed")
+					}
+				}
+				return
+			}
 			// Do not continuously retry priming on every rescan tick. On some
 			// stacks this can destabilize SCO/HFP negotiation. Keep passive HM
 			// notify + BlueALSA XEVENT fallback active and retry with a slow
@@ -348,9 +448,12 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 		}
 
 		primed = true
+		if s.readiness != nil {
+			s.readiness.ObserveButtonsReady(true)
+		}
 		primeBackoff = 0
 		nextPrimeAttemptAt = time.Time{}
-		s.log.Info().Str("device", current.Device.Address).Msg("BS-22 BLE: primed BLE audio mode")
+		s.log.Info().Str("device", current.Device.Address).Msg("BS-22 BLE: control channel ready; preserving HFP audio")
 	}
 
 	syncBinding()
@@ -390,17 +493,11 @@ func (s *bs22EventSource) runBLEMonitor(ctx context.Context, conn *dbus.Conn, si
 	}
 }
 
+// primeBLE checks the HM control channel without changing the audio route.
+// BS-22 bench capture with command 15 enabled produced silence even through
+// native ALSA. ReadSettings alone preserves HFP microphone audio and PTT events.
 func (s *bs22EventSource) primeBLE(conn *dbus.Conn, binding bs22BLEBinding) error {
-	for _, payload := range [][]byte{
-		bs22HMCommandBytes(bs22HMVendorID, bs22HMReadSettings),
-		bs22HMCommandBytes(bs22HMVendorID, bs22HMSetBLEAudio, bs22HMSetBLEAudioEnabled),
-	} {
-		if err := s.writeValue(conn, binding.WritePath, payload); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return s.writeValue(conn, binding.WritePath, bs22HMCommandBytes(bs22HMVendorID, bs22HMReadSettings))
 }
 
 func listBlueZManagedObjects(conn *dbus.Conn) (bluezManagedObjectMap, error) {
@@ -409,7 +506,7 @@ func listBlueZManagedObjects(conn *dbus.Conn) (bluezManagedObjectMap, error) {
 	}
 
 	var managed bluezManagedObjectMap
-	call := conn.Object(bluezService, bluezRootPath).Call(bluezManagedObjectsMethod, 0)
+	call := boundedBlueZCall(conn, bluezRootPath, bluezManagedObjectsMethod)
 	if call.Err != nil {
 		return nil, call.Err
 	}
@@ -425,7 +522,7 @@ func startBlueZNotify(conn *dbus.Conn, path dbus.ObjectPath) error {
 		return errors.New("nil DBus connection")
 	}
 
-	return conn.Object(bluezService, path).Call(bluezGattCharacteristicStartNotify, 0).Err
+	return boundedBlueZCall(conn, path, bluezGattCharacteristicStartNotify).Err
 }
 
 func writeBlueZCharacteristicValue(conn *dbus.Conn, path dbus.ObjectPath, data []byte) error {
@@ -434,7 +531,7 @@ func writeBlueZCharacteristicValue(conn *dbus.Conn, path dbus.ObjectPath, data [
 	}
 
 	options := map[string]dbus.Variant{}
-	return conn.Object(bluezService, path).Call(bluezGattCharacteristicWriteValue, 0, data, options).Err
+	return boundedBlueZCall(conn, path, bluezGattCharacteristicWriteValue, data, options).Err
 }
 
 func connectBlueZDevice(conn *dbus.Conn, device bs22DeviceInfo) error {
@@ -460,12 +557,6 @@ func connectBlueZDevice(conn *dbus.Conn, device bs22DeviceInfo) error {
 		lastErr = err
 	}
 
-	if err := connectBlueZClassicDevice(conn, device.Path); err == nil || isIgnorableBlueZConnectError(err) {
-		return nil
-	} else if !isBlueZUnsupportedMethodError(err) {
-		lastErr = err
-	}
-
 	if lastErr != nil {
 		return lastErr
 	}
@@ -482,7 +573,7 @@ func connectBlueZLEBearer(conn *dbus.Conn, path dbus.ObjectPath) error {
 		return errors.New("empty device path")
 	}
 
-	return conn.Object(bluezService, path).Call(bluezBearerLEConnectMethod, 0).Err
+	return boundedBlueZCall(conn, path, bluezBearerLEConnectMethod).Err
 }
 
 func connectBlueZAdapterDevice(conn *dbus.Conn, device bs22DeviceInfo) error {
@@ -503,19 +594,10 @@ func connectBlueZAdapterDevice(conn *dbus.Conn, device bs22DeviceInfo) error {
 		"AddressType": dbus.MakeVariant(normalizeBlueZAddressType(device.AddressType)),
 	}
 
-	return conn.Object(bluezService, device.AdapterPath).Call(bluezAdapterConnectDeviceMethod, 0, properties).Err
-}
-
-func connectBlueZClassicDevice(conn *dbus.Conn, path dbus.ObjectPath) error {
-	if conn == nil {
-		return errors.New("nil DBus connection")
-	}
-
-	if path == "" {
-		return errors.New("empty device path")
-	}
-
-	return conn.Object(bluezService, path).Call(bluezDeviceConnectMethod, 0).Err
+	// On BlueZ 5.72, ConnectDevice uses AddressType to choose LE public or
+	// random addressing. Do not fall back to Device1.Connect, which selects a
+	// bearer automatically for dual-mode devices.
+	return boundedBlueZCall(conn, device.AdapterPath, bluezAdapterConnectDeviceMethod, properties).Err
 }
 
 func findBS22Device(managed bluezManagedObjectMap) (bs22DeviceInfo, bool) {
@@ -804,11 +886,14 @@ func blueZErrorName(err error) string {
 	}
 
 	var dbusErr dbus.Error
-	if !errors.As(err, &dbusErr) {
-		return ""
+	if errors.As(err, &dbusErr) {
+		return dbusErr.Name
 	}
-
-	return dbusErr.Name
+	var dbusErrPtr *dbus.Error
+	if errors.As(err, &dbusErrPtr) && dbusErrPtr != nil {
+		return dbusErrPtr.Name
+	}
+	return ""
 }
 
 func normalizeBlueZAddressType(addressType string) string {
@@ -882,3 +967,26 @@ func containsFold(s, substr string) bool {
 
 	return strings.Contains(strings.ToUpper(s), strings.ToUpper(substr))
 }
+
+// Bound legacy transport helpers as well as lifecycle operations; shutdown must
+// never wait indefinitely for a controller or BlueZ reply.
+func boundedBlueZCall(conn *dbus.Conn, path dbus.ObjectPath, method string, args ...interface{}) *dbus.Call {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return conn.Object(bluezService, path).CallWithContext(ctx, method, 0, args...)
+}
+
+func isBlueZDisconnectedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if blueZErrorName(err) == "org.bluez.Error.NotConnected" {
+		return true
+	}
+	// BlueZ 5.72 sometimes uses Error.Failed with this exact body.
+	return strings.EqualFold(strings.TrimSpace(err.Error()), "Not connected")
+}
+
+func (s *bs22EventSource) ChannelEvents() <-chan int { return s.channelSteps }
+
+func (s *bs22EventSource) SpeakerVolumes() <-chan int { return s.speakerVolumes }

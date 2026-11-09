@@ -209,9 +209,8 @@ func TestCommsManager_EnableRejectsUnknownControlSource(t *testing.T) {
 	m := &CommsManager{
 		logger: zerolog.Nop(),
 		buildFn: func() *CommsConfig {
-			// "bluealsa_xevent" is preserved by normalizeControlSource but
-			// not registered in control.Lookup, so Validate must reject it.
-			return &CommsConfig{ControlSource: "bluealsa_xevent"}
+			// A genuinely unregistered source must fail before startup.
+			return &CommsConfig{ControlSource: "unsupported-source"}
 		},
 		startFn: func(_ *CommsConfig) startFunc {
 			return func(_ context.Context) error {

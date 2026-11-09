@@ -4,6 +4,7 @@ import './SettingsLayout.css';
 
 const TABS = [
   { to: '/settings', label: 'General', end: true },
+  { to: '/settings/bluetooth', label: 'Bluetooth', end: false },
   { to: '/settings/wireless', label: 'Wireless', end: false },
   { to: '/settings/network', label: 'Network', end: false },
   { to: '/settings/firmware', label: 'Firmware', end: false },
