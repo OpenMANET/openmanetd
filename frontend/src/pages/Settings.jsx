@@ -25,6 +25,8 @@ function controlSourceToString(cs) {
   switch (cs) {
     case ControlSource.OPENVLM: return 'openvlm';
     case ControlSource.NANOPTT: return 'nanoptt';
+    case ControlSource.BS22: return 'bs22';
+    case ControlSource.BLUEALSA_XEVENT: return 'bluealsa_xevent';
     default:                    return 'web';
   }
 }
@@ -33,6 +35,8 @@ function stringToControlSource(s) {
   switch (s) {
     case 'openvlm': return ControlSource.OPENVLM;
     case 'nanoptt': return ControlSource.NANOPTT;
+    case 'bs22': return ControlSource.BS22;
+    case 'bluealsa_xevent': return ControlSource.BLUEALSA_XEVENT;
     default:        return ControlSource.WEB;
   }
 }
@@ -432,6 +436,8 @@ export default function SettingsPage() {
                   { value: 'openvlm', label: 'OpenVLM (default)' },
                   { value: 'web',     label: 'Web UI' },
                   { value: 'nanoptt', label: 'nanoPTT' },
+                  { value: 'bs22', label: 'BTECH BS-22 (native Bluetooth)' },
+                  { value: 'bluealsa_xevent', label: 'BlueALSA XEVENT (Bluetooth audio)' },
                 ]}
               />
             </div>
