@@ -78,6 +78,8 @@ func TestGetCommsConfig_AllControlSources(t *testing.T) {
 		{"openvlm", commsv1.ControlSource_CONTROL_SOURCE_OPENVLM},
 		{"nanoptt", commsv1.ControlSource_CONTROL_SOURCE_NANOPTT},
 		{"web", commsv1.ControlSource_CONTROL_SOURCE_WEB},
+		{"bs22", commsv1.ControlSource_CONTROL_SOURCE_BS22},
+		{"bluealsa_xevent", commsv1.ControlSource_CONTROL_SOURCE_BLUEALSA_XEVENT},
 		{"", commsv1.ControlSource_CONTROL_SOURCE_OPENVLM},        // empty defaults to openvlm
 		{"unknown", commsv1.ControlSource_CONTROL_SOURCE_OPENVLM}, // unknown defaults to openvlm
 	}
@@ -195,6 +197,8 @@ func TestUpdateCommsConfig_AllControlSources(t *testing.T) {
 		{commsv1.ControlSource_CONTROL_SOURCE_OPENVLM, "openvlm"},
 		{commsv1.ControlSource_CONTROL_SOURCE_NANOPTT, "nanoptt"},
 		{commsv1.ControlSource_CONTROL_SOURCE_WEB, "web"},
+		{commsv1.ControlSource_CONTROL_SOURCE_BS22, "bs22"},
+		{commsv1.ControlSource_CONTROL_SOURCE_BLUEALSA_XEVENT, "bluealsa_xevent"},
 	}
 
 	for _, tt := range tests {

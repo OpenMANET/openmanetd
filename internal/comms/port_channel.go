@@ -293,3 +293,14 @@ func (pc *PortChannel) closePartial() {
 		_ = pc.RTCPSend.Close()
 	}
 }
+
+func (pc *PortChannel) setBluetoothVolume(gain int) bool {
+	pc.playbackMu.Lock()
+	stream := pc.PlaybackStream
+	pc.playbackMu.Unlock()
+	if volume, ok := stream.(interface{ SetBluetoothVolume(int) }); ok {
+		volume.SetBluetoothVolume(gain)
+		return true
+	}
+	return false
+}

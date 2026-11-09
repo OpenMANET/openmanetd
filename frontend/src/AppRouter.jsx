@@ -21,6 +21,7 @@ import LoginPage from './pages/LoginPage.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import SetupGate from './components/SetupGate.jsx';
 
+const SettingsBluetooth = lazy(() => import('./pages/SettingsBluetooth.jsx'));
 const SettingsTerminal = lazy(() => import('./pages/SettingsTerminal.jsx'));
 const SettingsLogs = lazy(() => import('./pages/SettingsLogs.jsx'));
 const SettingsWireless = lazy(() => import('./pages/SettingsWireless.jsx'));
@@ -43,6 +44,7 @@ export default function AppRouter() {
             <Route path="/blos" element={<BLOSPage />} />
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<SettingsPage />} />
+              <Route path="bluetooth" element={<SettingsBluetooth />} />
               <Route path="wireless" element={<SettingsWireless />} />
               <Route path="network" element={<SettingsNetwork />} />
               <Route path="firmware" element={<SettingsFirmware />} />

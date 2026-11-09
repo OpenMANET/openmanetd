@@ -125,6 +125,12 @@ func (rt *CommsRuntime) SetBroadcast(bs BroadcastCapture) {
 // owned by *Service (returned by Start via SetDefault) so the static
 // config and the per-startup runtime have distinct lifetimes.
 type CommsConfig struct {
+	// BluetoothSession is supplied only by the Bluetooth lifecycle owner. Saved
+	// comms configuration alone must never authorize radio connections or TX.
+	BluetoothSession    BluetoothSession
+	testToneC           <-chan chan error
+	BluetoothDevicePath string
+
 	Log        zerolog.Logger
 	AuxHandler control.AuxEventHandler
 	Interrupt  chan os.Signal
@@ -194,12 +200,16 @@ type CommsConfig struct {
 	ROIPCOSGPIOMask    byte
 }
 
+const bs22SCODeviceSpec = "bt_sco"
+
 // NewComms copies cfg and returns a pointer ready for Start.
 func NewComms(cfg CommsConfig) *CommsConfig {
 	mcastPorts := make([]McastPortConfig, len(cfg.McastPorts))
 	copy(mcastPorts, cfg.McastPorts)
 
 	return &CommsConfig{
+		BluetoothSession:         cfg.BluetoothSession,
+		BluetoothDevicePath:      cfg.BluetoothDevicePath,
 		Log:                      cfg.Log,
 		Interrupt:                cfg.Interrupt,
 		Enable:                   cfg.Enable,
@@ -277,6 +287,32 @@ func (cfg *CommsConfig) applyDefaults() {
 	}
 
 	cfg.ControlSource = normalizeControlSource(cfg.ControlSource)
+
+	// BS-22 HM uses Bluetooth SCO. In the combined BS-22 mode, resolve the
+	// audio path to BlueALSA SCO by default.
+	if cfg.ControlSource == controlSourceBS22 {
+		spec := bs22SCODeviceSpec
+		if selected, err := cfg.selectedBluetoothAudioSpec(); err == nil {
+			spec = selected
+		}
+		cfg.BluetoothAudioDeviceHint = spec
+		cfg.BluetoothInputDevice = spec
+		cfg.BluetoothOutputDevice = spec
+	}
+
+	// XEVENT-only mode accepts explicit BlueALSA ALSA device specs. If none
+	// are supplied, use the logical SCO alias for both directions.
+	if cfg.ControlSource == controlSourceBlueALSAXEvent {
+		if cfg.BluetoothAudioDeviceHint == "" {
+			cfg.BluetoothAudioDeviceHint = bs22SCODeviceSpec
+		}
+		if cfg.BluetoothInputDevice == "" {
+			cfg.BluetoothInputDevice = cfg.BluetoothAudioDeviceHint
+		}
+		if cfg.BluetoothOutputDevice == "" {
+			cfg.BluetoothOutputDevice = cfg.BluetoothAudioDeviceHint
+		}
+	}
 
 	// Apply ROIP-specific defaults after ControlSource is normalised.
 	if cfg.ControlSource == controlSourceROIP {

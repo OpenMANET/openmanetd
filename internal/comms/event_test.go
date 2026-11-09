@@ -45,6 +45,8 @@ func TestNormalizeControlSource(t *testing.T) {
 		{"  openvlm  ", "openvlm"},
 		{"nanoptt", "nanoptt"},
 		{"NANOPTT", "nanoptt"},
+		{"bs22", "bs22"},
+		{"BS22", "bs22"},
 		{"bluealsa_xevent", "bluealsa_xevent"},
 		{"BLUEALSA_XEVENT", "bluealsa_xevent"},
 		{"roip", "roip"},

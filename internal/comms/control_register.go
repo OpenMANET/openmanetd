@@ -3,8 +3,10 @@ package comms
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/godbus/dbus/v5"
 	"github.com/openmanet/openmanetd/internal/comms/control"
 )
 
@@ -18,6 +20,10 @@ import (
 
 // openvlmBackend is the ControlDeps.Backend payload for the OpenVLM HID source.
 type openvlmBackend struct{}
+type bs22Backend struct {
+	path      dbus.ObjectPath
+	readiness control.BS22Readiness
+}
 
 // roipBackend is the ControlDeps.Backend payload for the ROIP bridge source.
 // Under the unified capture design the ROIP VOX path subscribes to the
@@ -48,6 +54,18 @@ type nanopttBackend struct {
 }
 
 func init() {
+	control.Register(controlSourceBS22, func(deps control.ControlDeps) (control.EventSource, error) {
+		backend, ok := deps.Backend.(*bs22Backend)
+		if !ok {
+			return nil, errors.New("BS-22 requires a selected accessory")
+		}
+		return control.NewSelectedBS22EventSource(deps.Log, backend.path, backend.readiness)
+	})
+
+	control.Register(controlSourceBlueALSAXEvent, func(deps control.ControlDeps) (control.EventSource, error) {
+		return control.NewBlueALSAXEventSource(deps.Log), nil
+	})
+
 	control.Register("openvlm", func(deps control.ControlDeps) (control.EventSource, error) {
 		return control.NewOpenVLMSource(deps.Log), nil
 	})
@@ -118,6 +136,10 @@ func (cfg *CommsConfig) buildControlDeps(rt *CommsRuntime) (control.ControlDeps,
 	switch cfg.ControlSource {
 	case defaultCtrlSrc:
 		deps.Backend = &openvlmBackend{}
+	case controlSourceBS22:
+		deps.Backend = &bs22Backend{path: dbus.ObjectPath(cfg.BluetoothDevicePath), readiness: cfg.BluetoothSession}
+	case controlSourceBlueALSAXEvent:
+		// Bluetooth event sources connect to BlueZ and BlueALSA directly.
 	case controlSourceROIP:
 		deps.Backend = &roipBackend{
 			COSGPIOMask:    cfg.ROIPCOSGPIOMask,
@@ -149,7 +171,10 @@ func (cfg *CommsConfig) buildControlDeps(rt *CommsRuntime) (control.ControlDeps,
 // empty string (treated as the openvlm default) so callers may invoke it
 // either before or after normalizeControlSource has run.
 func (cfg *CommsConfig) Validate() error {
-	name := normalizeControlSource(cfg.ControlSource)
+	name := strings.ToLower(strings.TrimSpace(cfg.ControlSource))
+	if name == "" {
+		name = defaultCtrlSrc
+	}
 	if _, ok := control.Lookup(name); !ok {
 		return errors.New("comms: unknown ControlSource " + name)
 	}

@@ -62,6 +62,7 @@ func Start(staticFS fs.FS) {
 		),
 	}
 	commsManager := comms.NewCommsManager(cfg, logger.GetLogger("comms"), mixerVol)
+	bluetoothManager, stopBluetooth := startBluetooth(ctx, commsManager, cfg.GetConfigFilePath(), logger.GetLogger("bluetooth"))
 
 	if board.CommsSupported() && cfg.GetCommsEnable() {
 		if err := commsManager.Enable(); err != nil {
@@ -297,6 +298,9 @@ func Start(staticFS fs.FS) {
 		interfaceProvider.WifiInterfaces = wifiProvider.Interfaces
 	}
 
+	if bluetoothManager != nil {
+		apiServer.BluetoothManager = bluetoothManager
+	}
 	api := server.NewAPIServer(apiServer)
 
 	log.Info().Msg("OpenMANETd API Server starting on port 8087")
@@ -341,6 +345,7 @@ func Start(staticFS fs.FS) {
 
 	_ = database.CloseConnection()
 
+	stopBluetooth()
 	commsManager.Disable()
 	blosManager.Disable()
 

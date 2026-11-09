@@ -88,6 +88,10 @@ func buildPortDecoders(ports []*PortChannel) error {
 // is true and an rtpSess is configured. Send errors are logged at Debug level
 // and do not abort remaining ports.
 func (cfg *CommsConfig) sendToAllPorts(rt *CommsRuntime, payload []byte) {
+	if !cfg.transmissionAllowed() {
+		return
+	}
+
 	for _, pc := range rt.Ports {
 		if !pc.SendEnabled.Load() || pc.RTPSess == nil {
 			continue

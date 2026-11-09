@@ -43,6 +43,7 @@
 }
 
 @media (max-width: 768px) {
+  .settings-tabs { justify-content: flex-start; }
   /* Touch target only — the 480px block below still narrows horizontal
      padding for the six-tab row, and this rule doesn't touch it; height
      grows via min-height rather than more padding, matching Comms.css's

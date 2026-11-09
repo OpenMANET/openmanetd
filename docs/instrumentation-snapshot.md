@@ -43,7 +43,7 @@ Every snapshot is a single JSON object with this shape:
 
 ```json
 {
-  "schema_version": "1.6.0",
+  "schema_version": "1.7.0",
   "captured_at_start": "2026-04-09T12:34:56.789012345Z",
   "captured_at_end":   "2026-04-09T12:34:56.789013101Z",
   "daemon": { ... },
@@ -60,7 +60,7 @@ Every snapshot is a single JSON object with this shape:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | string | Semver of the envelope schema. Bump minor for additive fields, major for breaking changes. The current value is `1.6.0`. |
+| `schema_version` | string | Semver of the envelope schema. Bump minor for additive fields, major for breaking changes. The current value is `1.7.0`. |
 | `captured_at_start` | RFC3339 timestamp | Wall-clock time when the capture loop began reading counters. |
 | `captured_at_end` | RFC3339 timestamp | Wall-clock time when the capture loop finished. The difference `captured_at_end - captured_at_start` bounds the counter-read skew window; in practice this is microseconds, but it can stretch into milliseconds when the `wireless` section's cache is cold (the first `Refresh` after the 5 s TTL walks netlink under the registry mutex). |
 | `daemon.version` | string | openmanetd build version. Empty until the build system populates it. |
@@ -143,6 +143,8 @@ reflects the most recent completed cycle, not a cumulative lifetime.
 |---|---|---|
 | `frames_captured` | count | Audio frames delivered by the capture callback. Expected rate: 50/sec at a 20 ms frame cadence. |
 | `frames_dropped` | count | Captured frames the audio callback could not hand off to the encode goroutine because the encode channel was full. **Any non-zero value during active TX means the encode loop is behind.** |
+| `capture_peak` | PCM magnitude (0–32768) | Maximum absolute sample before gain among queued TX frames in the current PTT cycle. |
+| `pre_encode_peak` | PCM magnitude (0–32768) | Maximum absolute sample after gain, immediately before Opus encoding, in the current PTT cycle. |
 | `frames_encoded` | count | Successfully Opus-encoded and forwarded frames. In a healthy cycle `frames_encoded ≈ frames_captured - frames_dropped`. |
 | `encode_errors` | count | Opus `EncodeS16` failures. Should stay at 0. |
 | `capture_gap_max_ns` | nanoseconds | Maximum observed inter-arrival gap between successive capture callbacks. Values substantially larger than 20,000,000 (20 ms) indicate audio-thread preemption. |
@@ -539,3 +541,5 @@ only the Go standard library and zerolog. It can be lifted wholesale
 into another repository — only the producer-side `Snapshotter` adapters
 (in `internal/comms` and `internal/blos`) need to be adapted to the new
 domain. See the package GoDoc for the contract.
+
+For silent transmissions, compare `comms.broadcast_encoder.capture_peak` and `pre_encode_peak`. Low values in both locate the problem before Opus; a strong capture peak with a low pre-encode peak points to gain attenuation. Strong pre-encode peaks with quiet decoded packets require encoder/transport investigation. These peaks do not measure speech intelligibility and reset at the next PTT cycle.

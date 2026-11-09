@@ -293,3 +293,31 @@ func (m *mockRTPSender) Send(payload []byte) error {
 
 	return nil
 }
+
+// fakeBluetoothSession supplies explicit lifecycle consent to runtime tests.
+type fakeBluetoothSession struct {
+	mu        sync.Mutex // protects fields below
+	connected bool
+	active    bool
+	presses   []bool
+}
+
+func (f *fakeBluetoothSession) ConnectionAllowed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connected
+}
+func (f *fakeBluetoothSession) CanTransmit() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connected && f.active
+}
+func (f *fakeBluetoothSession) ObservePTT(pressed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.presses = append(f.presses, pressed)
+}
+
+func (f *fakeBluetoothSession) ObserveAudioReady(bool)   {}
+func (f *fakeBluetoothSession) ObserveButtonsReady(bool) {}
+func (f *fakeBluetoothSession) ObserveHFPReady(bool)     {}

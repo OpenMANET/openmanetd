@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/godbus/dbus/v5"
+	"github.com/openmanet/openmanetd/internal/bluetooth"
 
 	"github.com/digineo/go-uci/v2"
 	"net"
@@ -434,4 +436,47 @@ func (r *diskWirelessReader) ReloadConfig() error {
 	r.Revert("network")
 
 	return nil
+}
+
+type fakeBluetoothManager struct {
+	mu     sync.Mutex
+	status bluetooth.Status
+	calls  []string
+	err    error
+}
+
+func (f *fakeBluetoothManager) recordBluetooth(action string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, action)
+	return f.err
+}
+func (f *fakeBluetoothManager) Status(context.Context) (bluetooth.Status, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.status, f.err
+}
+func (f *fakeBluetoothManager) Begin(_ context.Context, path dbus.ObjectPath) error {
+	return f.recordBluetooth("begin:" + string(path))
+}
+func (f *fakeBluetoothManager) Discover(_ context.Context, d time.Duration) error {
+	return f.recordBluetooth("discover:" + d.String())
+}
+func (f *fakeBluetoothManager) Connect(_ context.Context, path dbus.ObjectPath) error {
+	return f.recordBluetooth("connect:" + string(path))
+}
+func (f *fakeBluetoothManager) Activate(context.Context) error { return f.recordBluetooth("activate") }
+func (f *fakeBluetoothManager) Disconnect(context.Context) error {
+	return f.recordBluetooth("disconnect")
+}
+func (f *fakeBluetoothManager) Off(context.Context) error      { return f.recordBluetooth("off") }
+func (f *fakeBluetoothManager) Forget(context.Context) error   { return f.recordBluetooth("forget") }
+func (f *fakeBluetoothManager) TestTone(context.Context) error { return f.recordBluetooth("tone") }
+func (f *fakeBluetoothManager) SetAutoEnable(_ context.Context, enabled bool) error {
+	return f.recordBluetooth(fmt.Sprintf("auto:%t", enabled))
+}
+func (f *fakeBluetoothManager) BluetoothCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }

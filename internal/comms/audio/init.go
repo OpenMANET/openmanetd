@@ -65,6 +65,14 @@ func (in *Init) BuildAudio(slots []PortSlot) (*BroadcastEncoder, device.AudioDev
 		}
 	}
 
+	// BlueALSA permits one playback client per PCM. Mix talkgroups before
+	// opening that endpoint; each port retains independent receive/beep gating.
+	if strings.HasPrefix(strings.ToLower(outDev.Name), "bluealsa") {
+		// Match the duration-based 20 ms Bluetooth hardware period.
+		playbackPeriod = uint32(audiopool.FrameSize)
+		slots = []PortSlot{sharedPlaybackSlot(slots)}
+	}
+
 	for i := range slots {
 		slot := slots[i]
 		if !slot.HasReceiver {
@@ -73,6 +81,21 @@ func (in *Init) BuildAudio(slots []PortSlot) (*BroadcastEncoder, device.AudioDev
 
 		beepBuf := slot.BeepBuf
 		playoutFrame := slot.PlayoutFrame
+
+		var speaker *bluetoothSpeaker
+		if strings.HasPrefix(strings.ToLower(outDev.Name), "bluealsa") {
+			var speakerErr error
+			speaker, speakerErr = openBluetoothSpeaker(outDev.Name)
+			if speakerErr != nil {
+				closeOpened()
+				return nil, zeroIn, fmt.Errorf("open Bluetooth speaker control: %w", speakerErr)
+			}
+			mixed := playoutFrame
+			playoutFrame = func(out []int16) {
+				mixed(out)
+				speaker.gate.process(out)
+			}
+		}
 
 		rawPlayback, openErr := openMalgoPlayback(
 			in.malgoCtx,
@@ -84,6 +107,9 @@ func (in *Init) BuildAudio(slots []PortSlot) (*BroadcastEncoder, device.AudioDev
 			playoutFrame,
 		)
 		if openErr != nil {
+			if speaker != nil {
+				speaker.close()
+			}
 			closeOpened()
 
 			return nil, zeroIn, fmt.Errorf("open playback stream for port %d: %w", slot.Port, openErr)
@@ -121,6 +147,12 @@ func (in *Init) BuildAudio(slots []PortSlot) (*BroadcastEncoder, device.AudioDev
 			Msg("comms: playback stream opened")
 
 		stream := device.NewMalgoStream(rawPlayback)
+		if speaker != nil {
+			stream = &speakerStream{AudioStream: stream, speaker: speaker}
+			// Include the bounded control command and settle time in the
+			// TX tone-emergence wait so a delayed beep cannot enter the mic.
+			in.PlaybackOutputLatency = max(in.PlaybackOutputLatency, ringLatency+500*time.Millisecond+speakerSettle)
+		}
 		slot.SetStream(stream)
 		opened = append(opened, stream)
 		in.playbackStreams = append(in.playbackStreams, stream)
@@ -158,6 +190,9 @@ func (in *Init) OpenBroadcastStream(inDev device.AudioDeviceInfo) (*BroadcastEnc
 	}
 
 	periodFrames := uint32(buildCapturePeriodFrames(in.CaptureFramesPerBuffer, in.CaptureLatencyMs))
+	if strings.HasPrefix(strings.ToLower(inDev.Name), "bluealsa") {
+		periodFrames = uint32(audiopool.FrameSize)
+	}
 	periods := uint32(buildCapturePeriods(in.CaptureLatencyMs, int(periodFrames)))
 
 	opener := func(onFrame func(samples []int16)) (captureStream, error) {

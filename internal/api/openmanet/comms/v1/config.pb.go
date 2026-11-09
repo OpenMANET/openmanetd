@@ -26,10 +26,12 @@ const (
 type ControlSource int32
 
 const (
-	ControlSource_CONTROL_SOURCE_UNSPECIFIED ControlSource = 0
-	ControlSource_CONTROL_SOURCE_OPENVLM     ControlSource = 1
-	ControlSource_CONTROL_SOURCE_NANOPTT     ControlSource = 2
-	ControlSource_CONTROL_SOURCE_WEB         ControlSource = 3
+	ControlSource_CONTROL_SOURCE_UNSPECIFIED     ControlSource = 0
+	ControlSource_CONTROL_SOURCE_OPENVLM         ControlSource = 1
+	ControlSource_CONTROL_SOURCE_NANOPTT         ControlSource = 2
+	ControlSource_CONTROL_SOURCE_WEB             ControlSource = 3
+	ControlSource_CONTROL_SOURCE_BS22            ControlSource = 4
+	ControlSource_CONTROL_SOURCE_BLUEALSA_XEVENT ControlSource = 5
 )
 
 // Enum value maps for ControlSource.
@@ -39,12 +41,16 @@ var (
 		1: "CONTROL_SOURCE_OPENVLM",
 		2: "CONTROL_SOURCE_NANOPTT",
 		3: "CONTROL_SOURCE_WEB",
+		4: "CONTROL_SOURCE_BS22",
+		5: "CONTROL_SOURCE_BLUEALSA_XEVENT",
 	}
 	ControlSource_value = map[string]int32{
-		"CONTROL_SOURCE_UNSPECIFIED": 0,
-		"CONTROL_SOURCE_OPENVLM":     1,
-		"CONTROL_SOURCE_NANOPTT":     2,
-		"CONTROL_SOURCE_WEB":         3,
+		"CONTROL_SOURCE_UNSPECIFIED":     0,
+		"CONTROL_SOURCE_OPENVLM":         1,
+		"CONTROL_SOURCE_NANOPTT":         2,
+		"CONTROL_SOURCE_WEB":             3,
+		"CONTROL_SOURCE_BS22":            4,
+		"CONTROL_SOURCE_BLUEALSA_XEVENT": 5,
 	}
 )
 
@@ -254,12 +260,15 @@ const file_openmanet_comms_v1_config_proto_rawDesc = "" +
 	"\fenable_comms\x18\x01 \x01(\bR\venableComms\x12H\n" +
 	"\x0econtrol_source\x18\x02 \x01(\x0e2!.openmanet.comms.v1.ControlSourceR\rcontrolSource\x12#\n" +
 	"\bcallsign\x18\x03 \x01(\tB\a\xbaH\x04r\x02\x18\fR\bcallsign\"\x1b\n" +
-	"\x19UpdateCommsConfigResponse*\xa8\x01\n" +
+	"\x19UpdateCommsConfigResponse*\x88\x02\n" +
 	"\rControlSource\x12\x1e\n" +
 	"\x1aCONTROL_SOURCE_UNSPECIFIED\x10\x00\x12)\n" +
 	"\x16CONTROL_SOURCE_OPENVLM\x10\x01\x1a\r\xaa\xd1\xf9\xd6\x03\aopenvlm\x12)\n" +
 	"\x16CONTROL_SOURCE_NANOPTT\x10\x02\x1a\r\xaa\xd1\xf9\xd6\x03\ananoptt\x12!\n" +
-	"\x12CONTROL_SOURCE_WEB\x10\x03\x1a\t\xaa\xd1\xf9\xd6\x03\x03webB\xd8\x01\n" +
+	"\x12CONTROL_SOURCE_WEB\x10\x03\x1a\t\xaa\xd1\xf9\xd6\x03\x03web\x12#\n" +
+	"\x13CONTROL_SOURCE_BS22\x10\x04\x1a\n" +
+	"\xaa\xd1\xf9\xd6\x03\x04bs22\x129\n" +
+	"\x1eCONTROL_SOURCE_BLUEALSA_XEVENT\x10\x05\x1a\x15\xaa\xd1\xf9\xd6\x03\x0fbluealsa_xeventB\xd8\x01\n" +
 	"\x16com.openmanet.comms.v1B\vConfigProtoP\x01ZGgithub.com/openmanet/openmanetd/internal/api/openmanet/comms/v1;commsv1\xa2\x02\x03OCX\xaa\x02\x12Openmanet.Comms.V1\xca\x02\x12Openmanet\\Comms\\V1\xe2\x02\x1eOpenmanet\\Comms\\V1\\GPBMetadata\xea\x02\x14Openmanet::Comms::V1b\x06proto3"
 
 var (

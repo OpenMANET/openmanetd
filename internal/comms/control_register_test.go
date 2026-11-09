@@ -13,6 +13,8 @@ import (
 func TestControlRegistry_KnownSourcesRegistered(t *testing.T) {
 	for _, name := range []string{
 		defaultCtrlSrc,
+		controlSourceBS22,
+		controlSourceBlueALSAXEvent,
 		controlSourceROIP,
 		controlSourceWeb,
 		defaultControlSourceNanoPTT,
@@ -35,9 +37,7 @@ func TestCommsConfig_Validate(t *testing.T) {
 	})
 
 	t.Run("unknown", func(t *testing.T) {
-		// "bluealsa_xevent" is preserved by normalizeControlSource but not
-		// installed in the registry, so Validate must reject it.
-		cfg := &CommsConfig{ControlSource: "bluealsa_xevent"}
+		cfg := &CommsConfig{ControlSource: "unsupported-source"}
 		assert.Error(t, cfg.Validate())
 	})
 }

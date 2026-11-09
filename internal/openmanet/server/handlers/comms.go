@@ -67,6 +67,10 @@ func controlSourceToProto(src string) commsv1.ControlSource {
 		return commsv1.ControlSource_CONTROL_SOURCE_NANOPTT
 	case "web":
 		return commsv1.ControlSource_CONTROL_SOURCE_WEB
+	case "bs22":
+		return commsv1.ControlSource_CONTROL_SOURCE_BS22
+	case "bluealsa_xevent":
+		return commsv1.ControlSource_CONTROL_SOURCE_BLUEALSA_XEVENT
 	default:
 		return commsv1.ControlSource_CONTROL_SOURCE_OPENVLM
 	}
@@ -79,6 +83,10 @@ func protoToControlSource(src commsv1.ControlSource) string {
 		return "nanoptt"
 	case commsv1.ControlSource_CONTROL_SOURCE_WEB:
 		return "web"
+	case commsv1.ControlSource_CONTROL_SOURCE_BS22:
+		return "bs22"
+	case commsv1.ControlSource_CONTROL_SOURCE_BLUEALSA_XEVENT:
+		return "bluealsa_xevent"
 	case commsv1.ControlSource_CONTROL_SOURCE_OPENVLM:
 		return "openvlm"
 	default:

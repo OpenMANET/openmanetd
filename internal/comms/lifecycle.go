@@ -29,7 +29,7 @@ import (
 // Extracted from Start so that Start's cognitive complexity stays under the
 // linter threshold and the audio sub-package wiring lives next to its other
 // per-port helpers.
-func (cfg *CommsConfig) startHardwareAudio(rt *CommsRuntime) (cleanup func(), err error) {
+func (cfg *CommsConfig) startHardwareAudio(rt *CommsRuntime) (func(), error) {
 	audioInit := &audio.Init{
 		Deps: audio.Deps{
 			Log:                    cfg.Log,
@@ -86,6 +86,9 @@ func (cfg *CommsConfig) startHardwareAudio(rt *CommsRuntime) (cleanup func(), er
 		return nil, hwErr
 	}
 
+	if cfg.BluetoothSession != nil {
+		cfg.BluetoothSession.ObserveAudioReady(true)
+	}
 	rt.SetBroadcast(broadcast)
 	rt.PlaybackOutputLatency = audioInit.PlaybackOutputLatency
 
@@ -94,17 +97,25 @@ func (cfg *CommsConfig) startHardwareAudio(rt *CommsRuntime) (cleanup func(), er
 	// idle port must not keep a malgo RT thread waking every 20 ms).
 	cfg.markAndSyncPlayback(rt)
 
+	return cfg.hardwareAudioCleanup(rt, cleanup), nil
+}
+
+// hardwareAudioCleanup captures the underlying closer independently of the
+// caller's return value. A named cleanup result must never capture itself when
+// the wrapper is returned: that caused recursive cleanup on Disconnect.
+func (cfg *CommsConfig) hardwareAudioCleanup(rt *CommsRuntime, closeHardware func()) func() {
 	// Detach the per-port streams before the hardware cleanup closes
 	// them, for the same freed-device reason as the failure path above.
-	wrapped := func() {
+	return func() {
+		if cfg.BluetoothSession != nil {
+			cfg.BluetoothSession.ObserveAudioReady(false)
+		}
 		for _, pc := range rt.Ports {
 			pc.clearPlaybackStream()
 		}
 
-		cleanup()
+		closeHardware()
 	}
-
-	return wrapped, nil
 }
 
 // markAndSyncPlayback records that StartHardware started every installed
@@ -438,7 +449,18 @@ func (cfg *CommsConfig) Start(ctx context.Context) error {
 		return nil
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	cfg.applyDefaults()
+	if !cfg.bluetoothConnectionAllowed() {
+		return ErrBluetoothDisabled
+	}
+	if cfg.ControlSource == controlSourceBS22 {
+		if _, err := cfg.selectedBluetoothAudioSpec(); err != nil {
+			return err
+		}
+	}
 
 	if cfg.ControlSource != controlSourceWeb {
 		if cfg.ControlSource == defaultCtrlSrc || cfg.ControlSource == controlSourceROIP {
