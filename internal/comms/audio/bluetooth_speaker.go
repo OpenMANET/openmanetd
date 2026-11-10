@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,15 +24,28 @@ const (
 	speakerIdleGain uint16 = 1 << 8
 )
 
+// A short, tapered local tone plays through the same hardware gain as speech.
+var speakerVolumeTone = func() [3 * audiopool.FrameSize]int16 {
+	var tone [3 * audiopool.FrameSize]int16
+	const ramp = audiopool.SampleRate / 200 // 5 ms at either end.
+	for i := range tone {
+		envelope := float64(min(i, len(tone)-1-i, ramp)) / float64(ramp)
+		tone[i] = int16(6553 * envelope * math.Sin(2*math.Pi*880*float64(i)/float64(audiopool.SampleRate)))
+	}
+	return tone
+}()
+
 // speakerGate buffers onset while the asynchronous volume command settles.
-// Queue fields belong exclusively to the playback callback. Only wanted and
-// ready cross threads; no D-Bus operations or locks run on the audio thread.
+// Queue fields and toneRemaining belong exclusively to the playback callback.
+// No D-Bus operations or locks run on the audio thread.
 type speakerGate struct {
 	volumeChanges chan uint16
 	volumeChanged func(uint16, bool)
 
 	wanted             atomic.Bool
 	ready              atomic.Bool
+	tonePending        atomic.Bool
+	toneRemaining      int // Samples of the volume tone left to play.
 	wake               chan struct{}
 	frames             [speakerQueueFrames][audiopool.FrameSize]int16
 	head, count, quiet int
@@ -50,6 +64,14 @@ func (g *speakerGate) request(on bool) {
 }
 
 func (g *speakerGate) process(out []int16) {
+	if g.tonePending.Swap(false) {
+		g.toneRemaining = len(speakerVolumeTone)
+	}
+	for i := range min(len(out), g.toneRemaining) {
+		sample := int(out[i]) + int(speakerVolumeTone[len(speakerVolumeTone)-g.toneRemaining])
+		out[i] = int16(max(-32768, min(32767, sample)))
+		g.toneRemaining--
+	}
 	audible := false
 	for _, v := range out {
 		if v != 0 {
@@ -98,22 +120,24 @@ func (g *speakerGate) run(ctx context.Context, set func(context.Context, bool) e
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	applied := false
+	gainDirty := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case gain := <-g.volumeChanges:
 			if g.volumeChanged != nil {
-				g.volumeChanged(gain, g.wanted.Load())
+				g.volumeChanged(gain, applied)
 			}
-			// Accessory has changed physical gain: reapply even if idle/audible
-			// state is unchanged. Restore the idle reference after each button press.
-			applied = !g.wanted.Load()
+			// Buffer the tone until the new listening gain has taken effect.
+			g.ready.Store(false)
+			g.tonePending.Store(true)
+			gainDirty = true
 		case <-g.wake:
 		case <-ticker.C:
 		}
 		want := g.wanted.Load()
-		if want == applied {
+		if want == applied && !gainDirty {
 			g.ready.Store(want)
 			continue
 		}
@@ -125,6 +149,7 @@ func (g *speakerGate) run(ctx context.Context, set func(context.Context, bool) e
 			continue
 		}
 		applied = want
+		gainDirty = false
 		if want {
 			timer := time.NewTimer(speakerSettle)
 			select {

@@ -182,3 +182,52 @@ func TestSpeakerVolumeChangeRemutesIdleAndKeepsListeningGain(t *testing.T) {
 		require.Equal(t, uint16(7<<8), <-calls, "next burst keeps user's level")
 	})
 }
+
+func TestSpeakerVolumeToneUsesUpdatedGain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		preferred := uint16(10 << 8)
+		g := &speakerGate{wake: make(chan struct{}, 1), volumeChanges: make(chan uint16, 1)}
+		g.volumeChanged = func(gain uint16, audible bool) {
+			preferred = preferredSpeakerGain(preferred, gain, audible)
+		}
+		var appliedGain uint16
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			g.run(ctx, func(_ context.Context, audible bool) error {
+				appliedGain = speakerIdleGain
+				if audible {
+					appliedGain = preferred
+				}
+				return nil
+			})
+		}()
+		t.Cleanup(func() { cancel(); <-done })
+
+		var frame, silence [audiopool.FrameSize]int16
+		for _, press := range []struct {
+			report uint16
+			want   uint16
+		}{{2 << 8, 11 << 8}, {0, 10 << 8}} {
+			g.volumeChanges <- press.report
+			synctest.Wait()
+			g.process(frame[:])
+			require.Equal(t, silence, frame, "tone must wait for gain to settle")
+			synctest.Wait()
+			require.Equal(t, press.want, appliedGain)
+			time.Sleep(speakerSettle)
+			synctest.Wait()
+			g.process(frame[:])
+			require.Equal(t, speakerVolumeTone[:audiopool.FrameSize], frame[:])
+
+			for range speakerTailFrames + len(speakerVolumeTone)/audiopool.FrameSize {
+				clear(frame[:])
+				g.process(frame[:])
+			}
+			synctest.Wait()
+			require.Equal(t, silence, frame)
+			require.Equal(t, speakerIdleGain, appliedGain)
+		}
+	})
+}
