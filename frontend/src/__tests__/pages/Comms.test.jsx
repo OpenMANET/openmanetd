@@ -13,7 +13,9 @@
 import React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { initAudio, startMic } from '../../services/audioEngine.js';
+import { send, sendByte } from '../../services/websocketService.js';
 
 // ---------- transport / engine / whisper / mesh stubs -----------------------
 
@@ -102,6 +104,17 @@ describe('TestCommsRender', () => {
     render(<MemoryRouter><CommsPage /></MemoryRouter>);
     expect(screen.getByRole('button', { name: /^AUDIO$/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^WHISPER$/i })).toBeInTheDocument();
+  });
+
+  it('starts listening without opening the microphone or sending voice', async () => {
+    render(<MemoryRouter><CommsPage /></MemoryRouter>);
+    expect(initAudio).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Start listening' }));
+    await screen.findByText(/AUDIO ON/i);
+    expect(initAudio).toHaveBeenCalledTimes(1);
+    expect(startMic).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(sendByte).not.toHaveBeenCalled();
   });
 });
 

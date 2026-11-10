@@ -11,6 +11,7 @@ import (
 )
 
 const bluetoothVolumePath = "/etc/openmanetd/bluetooth-speaker-volume.json"
+const defaultBluetoothSpeakerGain uint16 = 8 << 8
 
 // Serialize startup/recovery access. No disk access occurs in audio callbacks.
 var bluetoothVolumeMu sync.Mutex
@@ -44,6 +45,12 @@ func writeBluetoothVolume(path, address string, observed uint16, recovering bool
 		if saved.Address == address && ((recovering && (observed == 0 || observed == speakerIdleGain)) || observed == saved.Volume) {
 			return saved.Volume, nil
 		}
+	}
+	// A first connection may see BlueALSA's retained idle gain from a
+	// previous installation. Use an audible default when no preference
+	// exists for this accessory. The idle gate still keeps the speaker quiet.
+	if recovering && (observed == 0 || observed == speakerIdleGain) {
+		observed = defaultBluetoothSpeakerGain
 	}
 	data, err = json.Marshal(bluetoothVolume{Address: address, Volume: observed})
 	if err != nil {

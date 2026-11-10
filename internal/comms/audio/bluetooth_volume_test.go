@@ -24,10 +24,10 @@ func TestBluetoothVolumeSurvivesMutedRecovery(t *testing.T) {
 	volume, err = rememberBluetoothVolume(path, "AA:BB", 0)
 	require.NoError(t, err)
 	require.Equal(t, uint16(5<<8), volume)
-	// A new, muted accessory must not inherit the previous accessory's gain.
+	// A new, muted accessory starts at the default, not the previous gain.
 	volume, err = rememberBluetoothVolume(path, "CC:DD", 0)
 	require.NoError(t, err)
-	require.Zero(t, volume)
+	require.Equal(t, defaultBluetoothSpeakerGain, volume)
 }
 
 func TestBluetoothVolumeCannotSaveDoesNotProceed(t *testing.T) {
@@ -81,6 +81,18 @@ func TestBluetoothVolumeSurvivesQuietIdleRecovery(t *testing.T) {
 		require.Equal(t, speakerIdleGain, got)
 		got, err = rememberBluetoothVolume(path, "CC:DD", speakerIdleGain)
 		require.NoError(t, err)
-		require.Equal(t, speakerIdleGain, got, "different accessories never inherit saved gain")
+		require.Equal(t, defaultBluetoothSpeakerGain, got, "different accessories never inherit saved gain")
+	}
+}
+
+func TestBluetoothVolumeFirstConnectionUsesAudibleGain(t *testing.T) {
+	for _, idle := range []uint16{0, speakerIdleGain} {
+		path := filepath.Join(t.TempDir(), "volume.json")
+		got, err := rememberBluetoothVolume(path, "AA:BB", idle)
+		require.NoError(t, err)
+		require.Equal(t, defaultBluetoothSpeakerGain, got)
+		got, err = rememberBluetoothVolume(path, "AA:BB", idle)
+		require.NoError(t, err)
+		require.Equal(t, defaultBluetoothSpeakerGain, got)
 	}
 }

@@ -690,6 +690,7 @@ export default function CommsPage() {
           <div className="crumb">Push-to-talk · Live transcript · {channelCount} channels</div>
         </div>
         <div className="lat-view-toolbar">
+          {!audioOn ? <button className="lat-btn primary" type="button" onClick={initAudioOnce}>Start listening</button> : null}
           <Link className="lat-btn ghost" to="/settings/bluetooth">BLUETOOTH</Link>
           <button
             className={`lat-btn ${audioExpanded ? '' : 'ghost'}`}
