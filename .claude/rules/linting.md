@@ -8,7 +8,7 @@ paths:
 
 `golangci-lint run --timeout 5m` must report `0 issues.` (it covers `go vet`). The Stop hook runs it on changed packages before a turn can end; `make lint-go` runs it repo-wide with `--fix`.
 
-`.golangci.yml` enables the `gofmt` formatter, so `--fix` also applies gofmt's canonical formatting and no separate `gofmt -w` pass is needed. If `golangci-lint run --fix` is clean but `gofmt -l` is not, check that `gofmt` is still under `formatters.enable`.
+`.golangci.yml` does not enable any formatter, so golangci-lint does not check gofmt. Formatting is a separate gate: `gofmt -l` must print nothing (`make fmt` fixes it). The PostToolUse hook gofmts each edited Go file and the Stop hook runs `gofmt -l` on changed files.
 
 ## When lint flags something
 

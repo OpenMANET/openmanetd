@@ -143,7 +143,7 @@ Not allowed: colours, fonts, or font sizes outside the tokens; descendant select
 
 ## Workflow
 
-- Hot-reload dev server against a remote daemon: `cd frontend && VITE_API_TARGET=http://<host>:8081 pnpm run dev`. Proxies (`vite.config.js`): `/ws`, `/api`, `/whisper` → `VITE_API_TARGET` (default `http://localhost:8080`); `/rpc` → `VITE_RPC_TARGET` (default `http://localhost:8087`) with the `/rpc` prefix stripped.
+- Hot-reload dev server against a remote daemon: `cd frontend && VITE_API_TARGET=http://<host>:8081 pnpm run dev`. `vite.config.js` proxies `/ws`, `/api`, `/auth`, `/rpc`, and `/whisper` unchanged to `VITE_API_TARGET` (default `http://localhost:8080`); the frontend daemon forwards `/rpc` and `/auth` to the API server, so dev mirrors production's single origin.
 - ESLint (`frontend/eslint.config.js`) covers `src/**/*.{js,jsx}` except `src/gen/`. The PostToolUse hook runs `eslint --fix` on each edited file; `pnpm -C frontend run lint:fix` fixes the tree.
 - The daemon serves `static/`, embedded at compile time — run `make frontend` before exercising a change through the binary.
 - Done means `make lint-frontend` and `make test-frontend` pass and the page has been checked by hand at 360px and at desktop width; layout isn't tested automatically.

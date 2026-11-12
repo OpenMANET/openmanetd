@@ -34,7 +34,7 @@ internal/api/                     AUTO-GENERATED protobuf + ConnectRPC Go stubs 
 internal/frontend/                HTTP server: serves React SPA, proxies /api/* and /ws to port 8087
 internal/database/                SQLite: schema.sql + query.sql; models/ is generated
 internal/config/                  Viper-backed config (reads /etc/openmanetd/config.yml)
-internal/comms/                   Opus/RTP audio (portaudio, CGO required)
+internal/comms/                   Opus/RTP push-to-talk audio (malgo/miniaudio, CGO required)
 internal/blos/                    BLOS/Tailscale overlay
 internal/mgmt/                    Alfred mesh management + wireless config
 internal/instrumentation/         Periodic JSON runtime snapshot (field reference: docs/instrumentation-snapshot.md)
@@ -51,7 +51,7 @@ Ports: API + WebSocket = **8087**. Frontend server = **8081** (proxies `/api/*` 
 - **Never edit generated code**: `internal/api/` and `frontend/src/gen/` (edit `proto/`, run `make buf`), `internal/database/models/` (edit `internal/database/schema.sql` / `query.sql`, run `make sqlc-gen`; config in `sqlc.yaml`). A hook denies these edits.
 - **`proto/` is a git submodule.** If empty: `git submodule update --init --recursive`, then `make buf`.
 - **`static/` must be populated** before compiling the root package — `//go:embed static/*` in `static.go` fails otherwise. Run `make frontend` first, or use `make build`.
-- **CGO is required** for the full build (`go-sqlite3`, `malgo`/miniaudio, `go-alfred`). `make build-lite` skips comms/whisper. The DevContainer has the native libraries.
+- **CGO is required** for every build (`go-sqlite3`, `malgo`/miniaudio, `go-alfred`); there is no pure-Go fallback. `make build-lite` only drops the embedded whisper WASM and UPX-compresses. The DevContainer has the native libraries.
 - **No `WriteTimeout` on the API server** — intentional; long-lived CommsService streams need it.
 - **Targets are resource-constrained**: embedded ARM boards and MIPS routers. Go must compile for `linux/amd64`, `linux/arm64`, and `linux/mipsle`, be concurrency-safe, and be frugal with memory and CPU.
 - **Dev ≠ runtime.** Development happens on `linux/amd64` or `linux/arm64`. Production binaries are built and cross-compiled by the OpenMANET firmware repository.
