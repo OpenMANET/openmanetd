@@ -28,13 +28,16 @@ type Config struct {
 	// risks blocking the operator's tab close.
 	GraceShutdown time.Duration
 
-	// PongWait is how long the session waits for any frame, pong
-	// included, before it treats the client as gone and ends. It frees
-	// the single session slot when a tab disappears without closing.
+	// PongWait is how long the session waits for the client's next pong
+	// before it treats the client as gone and ends. It frees the single
+	// session slot when a tab disappears without closing.
 	PongWait time.Duration
 
-	// PingPeriod is how often the session pings the client. It must be
-	// shorter than PongWait so a live client's pong arrives in time.
+	// PingPeriod is how often the session pings the client. A pong may
+	// arrive up to PongWait-PingPeriod after its ping, so keep PingPeriod
+	// well below PongWait: a ping queues behind shell output already in
+	// the socket, which can take tens of seconds to drain on a slow mesh
+	// link.
 	PingPeriod time.Duration
 
 	// MaxMessageSize is the largest WebSocket message, in bytes, the
@@ -54,13 +57,14 @@ func DefaultConfig() Config {
 		},
 		GraceShutdown:  2 * time.Second,
 		PongWait:       defaultPongWait,
-		PingPeriod:     defaultPongWait * 9 / 10,
+		PingPeriod:     defaultPongWait / 3,
 		MaxMessageSize: 64 * 1024,
 	}
 }
 
 // defaultPongWait matches the audio WebSocket's keepalive
-// (internal/websocket/client.go).
+// (internal/websocket/client.go). The terminal pings three times per
+// PongWait rather than once, so a pong may be 40s late.
 const defaultPongWait = 60 * time.Second
 
 // withKeepaliveDefaults returns c with any non-positive keepalive field

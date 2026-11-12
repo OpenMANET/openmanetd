@@ -269,3 +269,59 @@ func TestManager_zeroKeepaliveFieldsUseDefaults(t *testing.T) {
 
 	assert.Never(t, func() bool { return !mgr.InUse() }, 300*time.Millisecond, 20*time.Millisecond)
 }
+
+// TestManager_defaultKeepaliveToleratesDelayedPongs runs the default ping
+// and pong timings scaled down 100x against a client whose pongs arrive a
+// third of PongWait late, as when a ping waits behind queued shell output on
+// a slow mesh link. The session must stay open.
+func TestManager_defaultKeepaliveToleratesDelayedPongs(t *testing.T) {
+	const scale = 100
+
+	def := terminal.DefaultConfig()
+	cfg := keepaliveConfig()
+	cfg.PongWait = def.PongWait / scale
+	cfg.PingPeriod = def.PingPeriod / scale
+	pongDelay := cfg.PongWait / 3
+
+	mgr := terminal.New(zerolog.Nop(), cfg)
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+
+	var pongs sync.WaitGroup
+
+	c.SetPingHandler(func(data string) error {
+		pongs.Add(1)
+		time.AfterFunc(pongDelay, func() {
+			defer pongs.Done()
+
+			_ = c.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
+		})
+
+		return nil
+	})
+
+	readerDone := make(chan struct{})
+
+	go func() {
+		defer close(readerDone)
+
+		for {
+			if _, _, rerr := c.ReadMessage(); rerr != nil {
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = c.Close()
+
+		<-readerDone
+		pongs.Wait()
+	})
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	assert.Never(t, func() bool { return !mgr.InUse() }, 4*cfg.PongWait, 20*time.Millisecond)
+}
