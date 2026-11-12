@@ -67,12 +67,23 @@ edit_json() {
 	jq -cn --arg f "$1" --arg s "${2:-}" '{tool_name: "Edit", tool_input: {file_path: $f, new_string: $s}}'
 }
 
+# with_cwd <dir>: jq filter fragment adding the session cwd when given.
+with_cwd='+ (if $d == "" then {} else {cwd: $d} end)'
+
 bash_json() {
-	jq -cn --arg c "$1" '{tool_name: "Bash", tool_input: {command: $c}}'
+	jq -cn --arg c "$1" --arg d "${2:-}" "{tool_name: \"Bash\", tool_input: {command: \$c}} $with_cwd"
 }
 
 stop_json() {
-	jq -cn --arg s "$1" '{hook_event_name: "Stop", session_id: $s}'
+	jq -cn --arg s "$1" --arg d "${2:-}" "{hook_event_name: \"Stop\", session_id: \$s} $with_cwd"
+}
+
+# seed_main <message>: commit the current tree on main, then branch feature from it.
+seed_main() {
+	git -C "$repo" checkout -q main
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "$1"
+	git -C "$repo" checkout -q -B feature
 }
 
 # --- guard-generated -------------------------------------------------------
@@ -153,6 +164,27 @@ expect_code 0 "commit-msg ignores non-commit commands"
 commit_and_check "Merge branch 'main' into feature"
 expect_code 0 "commit-msg skips merge commits"
 
+# The commit is judged in the repository it landed in.
+git -C "$repo" commit -q --allow-empty -m "feat: good root commit"
+mkdir -p "$repo/sub"
+git -C "$repo/sub" init -q -b main
+git -C "$repo/sub" config user.email test@example.com
+git -C "$repo/sub" config user.name test
+git -C "$repo/sub" commit -q --allow-empty -m "Bad Nested."
+run commit-msg.sh "$(bash_json "cd sub && git commit -m x" "$repo")"
+expect_code 2 "commit-msg checks a commit made after cd into a nested repo"
+expect_err "Bad Nested\|breaks the commit message rules" "commit-msg reports the nested commit"
+run commit-msg.sh "$(bash_json "cd sub && git commit -m x" "$repo/sub")"
+expect_code 2 "commit-msg handles a cwd that already reflects the cd"
+run commit-msg.sh "$(bash_json "git -C sub commit -m x" "$repo")"
+expect_code 2 "commit-msg checks a commit made with git -C"
+run commit-msg.sh "$(bash_json "git commit -m x" "$repo")"
+expect_code 0 "commit-msg judges the root commit when the command ran in the root"
+git -C "$repo" worktree add -q "$tmp/commitmsg-wt" -b wt
+git -C "$tmp/commitmsg-wt" commit -q --allow-empty -m "Bad Worktree."
+run commit-msg.sh "$(bash_json "git commit -m x" "$tmp/commitmsg-wt")"
+expect_code 2 "commit-msg checks the worktree the session is in"
+
 # --- stop-gate -------------------------------------------------------------
 new_repo stopgate
 run stop-gate.sh "$(stop_json s1)"
@@ -205,6 +237,70 @@ expect_code 0 "stop-gate passes token-only CSS"
 
 OPENMANETD_STOP_GATE=off run stop-gate.sh "$(stop_json s5)"
 expect_code 0 "stop-gate can be disabled"
+
+# Build runs for deletions and generated code, not only edited files.
+new_repo build
+mkdir -p "$repo/a" "$repo/b" "$repo/static"
+echo x >"$repo/static/index.html"
+printf 'package a\n\nfunc F() int { return 1 }\n' >"$repo/a/a.go"
+printf 'package b\n\nimport "example.com/hooktest/a"\n\nfunc G() int { return a.F() }\n' >"$repo/b/b.go"
+seed_main "feat: seed packages"
+rm "$repo/a/a.go"
+run stop-gate.sh "$(stop_json b1)"
+expect_code 2 "stop-gate builds after a deletion-only Go change"
+expect_err "go build" "stop-gate reports the build failure"
+git -C "$repo" checkout -q -- a/a.go
+mkdir -p "$repo/internal/api"
+printf 'package api\n\nfunc Broken( {\n' >"$repo/internal/api/gen.go"
+run stop-gate.sh "$(stop_json b2)"
+expect_code 2 "stop-gate builds when only generated Go changed"
+rm -rf "$repo/internal/api"
+
+# Removed snapshot fields need the doc too.
+new_repo snapdelete
+mkdir -p "$repo/internal/comms" "$repo/docs"
+printf 'package comms\n\ntype FooSnapshot struct {\n\tA int `json:"a"`\n}\n' >"$repo/internal/comms/snapshot.go"
+printf '| `a` |\n' >"$repo/docs/instrumentation-snapshot.md"
+seed_main "feat: seed snapshot"
+git -C "$repo" rm -q internal/comms/snapshot.go
+run stop-gate.sh "$(stop_json d1)"
+expect_code 2 "stop-gate flags a deleted snapshot file"
+expect_err "instrumentation-snapshot.md" "stop-gate names the doc for a deleted file"
+git -C "$repo" checkout -q HEAD -- internal/comms/snapshot.go
+printf 'package comms\n\ntype Foo struct{}\n' >"$repo/internal/comms/snapshot.go"
+run stop-gate.sh "$(stop_json d2)"
+expect_code 2 "stop-gate flags a removed snapshot struct"
+
+# A pass recorded while a validator was missing is not reused once it exists.
+new_repo eslint
+printf 'frontend/node_modules/\n' >"$repo/.gitignore"
+mkdir -p "$repo/frontend/src"
+printf 'export const x = 1\n' >"$repo/frontend/src/x.js"
+run stop-gate.sh "$(stop_json e1)"
+expect_code 0 "stop-gate passes when eslint is unavailable"
+expect_out "could not run: eslint" "stop-gate tells the user eslint was skipped"
+mkdir -p "$repo/frontend/node_modules/.bin"
+printf '#!/bin/sh\necho "x.js: lint error" >&2\nexit 1\n' >"$repo/frontend/node_modules/.bin/eslint"
+chmod +x "$repo/frontend/node_modules/.bin/eslint"
+run stop-gate.sh "$(stop_json e2)"
+expect_code 2 "stop-gate re-checks once eslint is installed"
+expect_err "lint error" "stop-gate reports the eslint failure"
+
+# Hooks act on the worktree the session is in.
+new_repo wtree
+git -C "$repo" worktree add -q "$tmp/wtree-wt" -b wt-feature
+mkdir -p "$tmp/wtree-wt/pkg"
+printf 'package pkg\n\nfunc   F(  x int)int{\nreturn x}\n' >"$tmp/wtree-wt/pkg/f.go"
+run stop-gate.sh "$(stop_json w1 "$tmp/wtree-wt")"
+expect_code 2 "stop-gate checks the worktree the session is in"
+run stop-gate.sh "$(stop_json w2 "$tmp")"
+expect_code 0 "stop-gate falls back to the project outside any checkout"
+mkdir -p "$tmp/wtree-wt/internal/comms"
+printf 'package comms\n\ntype FooSnapshot struct {\n\tA int `json:"a"`\n}\n' >"$tmp/wtree-wt/internal/comms/snapshot.go"
+run post-edit.sh "$(edit_json "$tmp/wtree-wt/internal/comms/snapshot.go" 'A int `json:"a"`')"
+expect_out 'instrumentation-snapshot.md' "post-edit reminds about the snapshot doc inside a worktree"
+run guard-generated.sh "$(edit_json "$tmp/wtree-wt/internal/api/foo.pb.go")"
+expect_out '"permissionDecision":"deny"' "guard denies generated code inside a worktree"
 
 # --- trace-instructions ----------------------------------------------------
 OPENMANETD_TRACE_INSTRUCTIONS=1 OPENMANETD_TRACE_LOG="$tmp/trace.log" \

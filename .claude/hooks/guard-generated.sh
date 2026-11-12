@@ -7,7 +7,7 @@ set -u
 read_input
 file=$(input_field '.tool_input.file_path // .tool_input.notebook_path')
 [ -n "$file" ] || exit 0
-is_generated "$(rel_path "$file")" || exit 0
+is_generated "$(rel_path "$file" "$(checkout_root "$(dirname "$file")")")" || exit 0
 
 reason="$file is generated. Edit the .proto source under proto/ (then make buf) or internal/database/schema.sql / query.sql (then make sqlc-gen) instead."
 jq -cn --arg r "$reason" \

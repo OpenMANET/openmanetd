@@ -15,8 +15,8 @@ set -u
 read_input
 file=$(input_field '.tool_input.file_path')
 [ -n "$file" ] && [ -f "$file" ] || exit 0
-root=$(project_dir)
-rel=$(rel_path "$file")
+root=$(checkout_root "$(dirname "$file")")
+rel=$(rel_path "$file" "$root")
 is_generated "$rel" && exit 0
 
 # run_make <target>: run a make target and report a failure to Claude.

@@ -30,10 +30,61 @@ commit_msg_errors() {
 	return 0
 }
 
+# join_dir <base> <dir>: dir resolved against base (a leading ~ is $HOME).
+join_dir() {
+	local dir=${2/#\~/$HOME}
+	case $dir in
+	/*) printf '%s' "$dir" ;;
+	*) printf '%s/%s' "$1" "$dir" ;;
+	esac
+}
+
+# commit_repo <command>: top level of the repository the command's
+# `git commit` ran in. Starts from the Bash tool's cwd (a worktree, or the
+# project directory), then applies the last `cd <dir>` before the commit and
+# any `git -C <dir>` on it, so commits in proto/ or another worktree are judged
+# in their own repository.
+commit_repo() {
+	local cmd=$1 base dir match before word next cdir top
+	local -a opts
+	local re='(^|[^[:alnum:]_-])git(([[:space:]]+-[cC][[:space:]]+[^[:space:]]+)*)[[:space:]]+commit([[:space:]]|$)'
+	[[ $cmd =~ $re ]] || return 1
+	match=${BASH_REMATCH[0]}
+	read -ra opts <<<"${BASH_REMATCH[2]}"
+
+	base=$(input_field '.cwd')
+	[ -d "$base" ] || base=$(project_dir)
+	dir=$base
+
+	before=${cmd%%"$match"*}
+	cdir=$(grep -oE '(^|[;&|[:space:](])cd[[:space:]]+[^;&|[:space:])]+' <<<"$before" | tail -n 1 | awk '{print $NF}')
+	cdir=${cdir//\"/}
+	cdir=${cdir//\'/}
+	if [ -n "$cdir" ] && [[ $cdir != *'$'* && $cdir != *'`'* && $cdir != - ]]; then
+		dir=$(join_dir "$dir" "$cdir")
+	fi
+
+	next=""
+	for word in "${opts[@]}"; do
+		if [ "$next" = C ]; then
+			word=${word//\"/}
+			dir=$(join_dir "$dir" "${word//\'/}")
+		fi
+		next=""
+		[ "$word" = -C ] && next=C
+	done
+
+	# If the cwd already reflects the cd, the joined path won't exist; fall back.
+	top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) ||
+		top=$(git -C "$base" rev-parse --show-toplevel 2>/dev/null) ||
+		top=$(project_dir)
+	printf '%s' "$top"
+}
+
 read_input
 cmd=$(input_field '.tool_input.command')
-grep -qE '(^|[^[:alnum:]_-])git([[:space:]]+-[cC][[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)' <<<"$cmd" || exit 0
-cd "$(project_dir)" 2>/dev/null || exit 0
+repo=$(commit_repo "$cmd") || exit 0
+cd "$repo" 2>/dev/null || exit 0
 
 # Only judge a commit made just now; a failed `git commit` leaves an older HEAD.
 committed=$(git log -1 --format=%ct 2>/dev/null) || exit 0

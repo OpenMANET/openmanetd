@@ -24,10 +24,34 @@ project_dir() {
 	git rev-parse --show-toplevel 2>/dev/null || pwd
 }
 
-# rel_path <path>: path relative to the project root, unchanged if outside it.
+# common_dir <dir>: absolute git common directory of the checkout at dir.
+common_dir() {
+	(cd "$1" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+}
+
+# checkout_root [dir]: top level of the checkout containing dir when it is the
+# project's own checkout or one of its git worktrees, otherwise the project
+# directory. A session that has moved into a worktree reports it as its cwd,
+# so hooks act on that worktree instead of always on the main checkout.
+checkout_root() {
+	local proj top
+	proj=$(project_dir)
+	top=$(git -C "${1:-$proj}" rev-parse --show-toplevel 2>/dev/null) || {
+		printf '%s' "$proj"
+		return
+	}
+
+	if [ "$(common_dir "$top")" = "$(common_dir "$proj")" ]; then
+		printf '%s' "$top"
+	else
+		printf '%s' "$proj"
+	fi
+}
+
+# rel_path <path> [root]: path relative to root (default: the project
+# directory), unchanged if outside it.
 rel_path() {
-	local root
-	root=$(project_dir)
+	local root=${2:-$(project_dir)}
 	case $1 in
 	"$root"/*) printf '%s' "${1#"$root"/}" ;;
 	*) printf '%s' "$1" ;;

@@ -5,8 +5,10 @@
 # with main, plus staged, unstaged, and untracked files) and blocks the end of
 # the turn with exit 2 until it is clean:
 #
-#   Go        gofmt, golangci-lint (new issues in changed packages), go build
-#   Docs      instrumentation snapshot fields documented
+#   Go        gofmt and golangci-lint (new issues) on changed hand-written files;
+#             go build whenever any Go, module, or proto path changed, including
+#             deleted and generated files
+#   Docs      instrumentation snapshot fields documented, including removals
 #   Frontend  eslint on changed files; Lattice colour/radius checks on added lines
 #   Proto     buf lint, buf format
 #   SQL       sqlc diff (generated models in sync)
@@ -14,9 +16,14 @@
 # Edits made through Bash (sed -i, heredocs) are caught too, because the gate
 # reads git state instead of tool calls.
 #
-# A tree state that passed is cached and not checked again. A tree state that
-# failed blocks at most once per session, so Claude can still stop and explain
-# a failure it cannot fix instead of looping.
+# A tree state that passed is cached and not checked again; the cache key
+# includes which validators were available, so installing one re-runs the
+# gate. Checks skipped for a missing tool are reported to the user. A tree
+# state that failed blocks at most once per session, so Claude can still stop
+# and explain a failure it cannot fix instead of looping.
+#
+# The gate checks the checkout the session is in: the project directory, or
+# a git worktree of it when the session has moved into one.
 #
 # Env: OPENMANETD_STOP_GATE=off disables the gate; OPENMANETD_GATE_BASE
 # overrides the comparison base.
@@ -28,7 +35,7 @@ self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]
 [ "${OPENMANETD_STOP_GATE:-on}" = off ] && exit 0
 
 read_input
-cd "$(project_dir)" 2>/dev/null || exit 0
+cd "$(checkout_root "$(input_field '.cwd')")" 2>/dev/null || exit 0
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 session=$(input_field '.session_id')
 session=${session:-unknown}
@@ -71,11 +78,28 @@ changed_files() {
 	} 2>/dev/null | sort -u
 }
 
-# tree_state: hash of everything the gate looks at, including the gate itself.
+has_static() {
+	[ -n "$(ls -A static 2>/dev/null)" ]
+}
+
+# toolchain_state: which validators can run. Part of the cache key, so a pass
+# recorded while a tool was missing is not reused once it is installed.
+toolchain_state() {
+	printf 'golangci=%s\n' "$(command -v golangci-lint)"
+	printf 'buf=%s\n' "$(command -v buf)"
+	printf 'sqlc=%s\n' "$(command -v sqlc)"
+	printf 'eslint=%s\n' "$([ -x frontend/node_modules/.bin/eslint ] && echo yes)"
+	printf 'static=%s\n' "$(has_static && echo yes)"
+	printf 'proto=%s\n' "$(has_proto_checkout && echo yes)"
+}
+
+# tree_state: hash of everything the gate looks at, including the gate itself
+# and the available validators.
 tree_state() {
 	{
 		printf '%s\n' "$base"
 		sha256sum "$self"
+		toolchain_state
 		git diff --binary "$base"
 		git ls-files -z --others --exclude-standard | xargs -0 -r sha256sum
 		if has_proto_checkout; then
@@ -102,17 +126,25 @@ added_lines() {
 }
 
 report=""
+skipped=""
 
 # fail <heading> <details>
 fail() {
 	report+=$'\n'"### $1"$'\n'"$2"$'\n'
 }
 
+# skip <check>: a check that applied but could not run.
+skip() {
+	skipped+="${skipped:+; }$1"
+}
+
 clip() {
 	tail -n "${2:-40}" <<<"$1"
 }
 
-check_go() {
+# check_go_style: formatting and lint on changed hand-written Go files that
+# still exist.
+check_go_style() {
 	local out files pkgs
 	[ -n "$go_files" ] || return
 	mapfile -t files <<<"$go_files"
@@ -120,38 +152,64 @@ check_go() {
 	out=$(gofmt -l "${files[@]}" 2>&1)
 	[ -n "$out" ] && fail "gofmt: run make lint-go (or gofmt -w)" "$out"
 
-	if command -v golangci-lint >/dev/null; then
-		mapfile -t pkgs < <(for f in "${files[@]}"; do printf './%s\n' "$(dirname "$f")"; done | sort -u)
-		if ! out=$(golangci-lint run --timeout 5m --new-from-rev="$base" "${pkgs[@]}" 2>&1); then
-			fail "golangci-lint (new issues in changed packages; make lint-go auto-fixes some)" "$(clip "$out" 60)"
-		fi
+	if ! command -v golangci-lint >/dev/null; then
+		skip "golangci-lint (not installed)"
+		return
 	fi
 
-	# The root package embeds static/; without it go build cannot succeed.
-	if [ -n "$(ls -A static 2>/dev/null)" ]; then
-		if ! out=$(go build ./... 2>&1); then
-			fail "go build ./..." "$(clip "$out")"
-		fi
+	mapfile -t pkgs < <(for f in "${files[@]}"; do printf './%s\n' "$(dirname "$f")"; done | sort -u)
+	if ! out=$(golangci-lint run --timeout 5m --new-from-rev="$base" "${pkgs[@]}" 2>&1); then
+		fail "golangci-lint (new issues in changed packages; make lint-go auto-fixes some)" "$(clip "$out" 60)"
 	fi
 }
 
+# check_build: compile whenever anything that can break the build changed —
+# Go files (deleted and generated ones included), module files, the proto
+# and alfred submodules.
+check_build() {
+	local out
+	grep -qE '\.go$|^go\.(mod|sum)$|^proto(/|$)|^internal/alfred$' <<<"$changed" || return
+
+	# The root package embeds static/; without it go build cannot succeed.
+	if ! has_static; then
+		skip "go build (static/ is empty; run make frontend)"
+		return
+	fi
+
+	if ! out=$(go build ./... 2>&1); then
+		fail "go build ./..." "$(clip "$out")"
+	fi
+}
+
+# check_snapshot_doc: any change to JSON-tagged lines in a file that defines,
+# or defined at the base, a snapshot struct needs a doc update. Deleted files
+# and removed structs count.
 check_snapshot_doc() {
-	local f flagged=""
+	local f flagged="" defines
 	grep -qx 'docs/instrumentation-snapshot.md' <<<"$changed" && return
 
 	while IFS= read -r f; do
 		case $f in
 		*_test.go) continue ;;
-		internal/comms/* | internal/blos/* | internal/sysupgrade/* | internal/wireless/* | internal/instrumentation/*) ;;
+		internal/comms/*.go | internal/blos/*.go | internal/sysupgrade/*.go | internal/wireless/*.go | internal/instrumentation/*.go) ;;
 		*) continue ;;
 		esac
 
-		grep -q 'Snapshot struct' "$f" || continue
-		if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+		defines=no
+		if [ -f "$f" ] && grep -q 'Snapshot struct' "$f"; then
+			defines=yes
+		elif git show "$base:$f" 2>/dev/null | grep -q 'Snapshot struct'; then
+			defines=yes
+		fi
+		[ "$defines" = yes ] || continue
+
+		if git cat-file -e "$base:$f" 2>/dev/null || git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
 			git diff -U0 "$base" -- "$f" | grep -E '^[+-][^+-]' | grep -q 'json:"' || continue
+		else
+			grep -q 'json:"' "$f" || continue
 		fi
 		flagged+="$f"$'\n'
-	done <<<"$go_files"
+	done <<<"$changed"
 
 	[ -n "$flagged" ] && fail "docs/instrumentation-snapshot.md not updated (.claude/rules/instrumentation.md)" \
 		"JSON-tagged lines changed in files that define snapshot structs. Document added, renamed, or removed snapshot fields; if these are not snapshot fields, say so."$'\n'"$flagged"
@@ -160,11 +218,16 @@ check_snapshot_doc() {
 check_frontend() {
 	local js out files
 	js=$(grep -E '^frontend/src/.*\.(js|jsx)$' <<<"$changed" | grep -v '^frontend/src/gen/' | existing)
-	if [ -n "$js" ] && [ -x frontend/node_modules/.bin/eslint ]; then
-		mapfile -t files < <(sed 's|^frontend/||' <<<"$js")
-		if ! out=$(cd frontend && node_modules/.bin/eslint "${files[@]}" 2>&1); then
-			fail "eslint (pnpm -C frontend exec eslint --fix <file> fixes some)" "$(clip "$out")"
-		fi
+	[ -n "$js" ] || return
+
+	if [ ! -x frontend/node_modules/.bin/eslint ]; then
+		skip "eslint (frontend/node_modules missing; run pnpm -C frontend install)"
+		return
+	fi
+
+	mapfile -t files < <(sed 's|^frontend/||' <<<"$js")
+	if ! out=$(cd frontend && node_modules/.bin/eslint "${files[@]}" 2>&1); then
+		fail "eslint (pnpm -C frontend exec eslint --fix <file> fixes some)" "$(clip "$out")"
 	fi
 }
 
@@ -195,8 +258,14 @@ check_lattice() {
 check_proto() {
 	local out
 	grep -qE '^proto(/|$)' <<<"$changed" || return
-	has_proto_checkout || return
-	command -v buf >/dev/null || return
+	if ! has_proto_checkout; then
+		skip "buf lint (proto/ submodule not checked out)"
+		return
+	fi
+	if ! command -v buf >/dev/null; then
+		skip "buf lint (buf not installed)"
+		return
+	fi
 
 	if ! out=$(cd proto && buf lint 2>&1); then
 		fail "buf lint (cd proto && buf lint)" "$(clip "$out")"
@@ -209,7 +278,10 @@ check_proto() {
 check_sql() {
 	local out
 	grep -qE '^(internal/database/(schema|query)\.sql|sqlc\.yaml)$' <<<"$changed" || return
-	command -v sqlc >/dev/null || return
+	if ! command -v sqlc >/dev/null; then
+		skip "sqlc diff (sqlc not installed)"
+		return
+	fi
 
 	if ! out=$(sqlc diff 2>&1); then
 		fail "sqlc diff: generated models are stale, run make sqlc-gen" "$(clip "$out")"
@@ -229,7 +301,8 @@ find "$pass_dir" "$block_dir" -type f -mtime +7 -delete 2>/dev/null
 
 go_files=$(grep -E '\.go$' <<<"$changed" | grep -vE '^(internal/api/|internal/database/models/|\.claude/)' | existing)
 
-check_go
+check_go_style
+check_build
 check_snapshot_doc
 check_frontend
 check_lattice
@@ -238,6 +311,9 @@ check_sql
 
 if [ -z "$report" ]; then
 	: >"$pass_dir/$state"
+	if [ -n "$skipped" ]; then
+		jq -cn --arg m "Definition-of-done gate passed but could not run: $skipped." '{systemMessage: $m}'
+	fi
 	exit 0
 fi
 
@@ -246,5 +322,6 @@ printf '%s\n' "$state" >"$block_dir/$session"
 	printf 'Definition-of-done gate failed for changes since %s.\n' "$(git rev-parse --short "$base")"
 	printf 'Fix these before finishing. If one cannot be fixed (pre-existing, out of scope, or a false positive), tell the user why; this exact tree state is not blocked again this session.\n'
 	printf '%s' "$report"
+	[ -z "$skipped" ] || printf '\nCould not run: %s.\n' "$skipped"
 } >&2
 exit 2
