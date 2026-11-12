@@ -29,6 +29,19 @@ const LATTICE_THEME = {
   brightWhite:         '#ffffff',
 };
 
+// The server ends the session on any message over 64 KiB (MaxMessageSize in
+// internal/terminal/config.go), and xterm delivers a whole paste as one
+// onData event, so input is sent in chunks well under that limit. Splitting
+// UTF-8 mid-character is safe: the server writes the bytes to the PTY in order.
+const INPUT_CHUNK_BYTES = 16 * 1024;
+
+function sendInput(ws, text) {
+  const bytes = new TextEncoder().encode(text);
+  for (let offset = 0; offset < bytes.length; offset += INPUT_CHUNK_BYTES) {
+    ws.send(bytes.subarray(offset, offset + INPUT_CHUNK_BYTES));
+  }
+}
+
 function sendResize(ws, cols, rows) {
   if (ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type: 'resize', cols, rows }));
@@ -78,7 +91,7 @@ export default function Terminal({ wsUrl, onClose }) {
 
     const dataDisposer = term.onData((d) => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(new TextEncoder().encode(d));
+        sendInput(ws, d);
       }
     });
 

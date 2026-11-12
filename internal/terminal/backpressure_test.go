@@ -1,8 +1,11 @@
 package terminal_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -115,4 +118,38 @@ func TestManager_keepsSessionWhilePingWaitsBehindBlockedOutput(t *testing.T) {
 	// answers it, so the session outlives the deadline set by its last pong
 	// before the stall (PongWait after the session started).
 	assert.Never(t, func() bool { return !mgr.InUse() }, 5*time.Second, 100*time.Millisecond)
+}
+
+// TestManager_deliversPasteSentInChunks covers the client's paste path: a
+// paste larger than MaxMessageSize, sent as messages under it, reaches the
+// shell intact and keeps the session.
+func TestManager_deliversPasteSentInChunks(t *testing.T) {
+	const pasteBytes = 100 * 1024
+
+	out := filepath.Join(t.TempDir(), "paste")
+	cfg := keepaliveConfig()
+	cfg.Env = append(cfg.Env, "OUT="+out)
+	cfg.Shell = shellScript(t, "stty raw -echo\nprintf ready\nhead -c "+strconv.Itoa(pasteBytes)+` > "$OUT"`+"\nprintf done\nexec sleep 30")
+	mgr := terminal.New(zerolog.Nop(), cfg)
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	readUntil(t, c, "ready")
+
+	paste := bytes.Repeat([]byte("0123456789abcdef"), pasteBytes/16)
+	require.Greater(t, int64(len(paste)), cfg.MaxMessageSize)
+
+	for chunk := range slices.Chunk(paste, 16*1024) {
+		require.NoError(t, c.WriteMessage(websocket.BinaryMessage, chunk))
+	}
+
+	readUntil(t, c, "done")
+
+	got, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, paste, got)
+	assert.True(t, mgr.InUse())
 }
