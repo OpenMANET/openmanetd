@@ -1,50 +1,39 @@
-# Concurrency Safety Rules
-
-All Go code must be concurrency safe. Apply these rules to every struct, function, and method you write or modify.
-
+---
+paths:
+  - "**/*.go"
 ---
 
-## Shared State
+# Concurrency Safety
 
-- Protect all mutable shared state with `sync.Mutex` or `sync.RWMutex`. Name the field `mu` and place it directly above the fields it guards, with a comment indicating what it protects:
+All Go code must be safe under concurrent use. Verify new and modified code with `make test-race`.
+
+## Shared state
+
+- Guard mutable shared state with `sync.Mutex`, or `sync.RWMutex` when reads clearly dominate (`RLock` on read paths, `Lock` on write paths). Name it `mu` and place it directly above the fields it guards, with a comment saying so:
   ```go
   mu      sync.Mutex // protects the fields below
   counter int
   cache   map[string]string
   ```
-- Use `sync.RWMutex` when reads significantly outnumber writes. Use `RLock()`/`RUnlock()` for read-only paths and `Lock()`/`Unlock()` for write paths.
-- Keep critical sections as short as possible — do not hold a lock while performing I/O, network calls, or channel operations.
-- Never embed a mutex in a value type that could be copied. Use a pointer receiver on all methods that touch the mutex.
+- `defer mu.Unlock()` immediately after `mu.Lock()`.
+- Keep critical sections short. Never hold a lock across I/O, network calls, or channel operations.
+- Never copy a value containing a mutex; methods that touch it use pointer receivers.
 
-## Channels and Goroutines
+## Maps
 
-- Every goroutine you spawn must have a clear shutdown path. Prefer `context.Context` cancellation or a dedicated `done` / `quit` channel.
-- Always use `select` with a `case <-ctx.Done()` (or equivalent) in goroutine loops so they terminate when the context is cancelled.
-- Ensure channels are closed exactly once and only by the sender. Never close a channel from the receiver side.
-- Use buffered channels deliberately — document why the buffer size was chosen.
+- No plain `map` read and written from multiple goroutines without a lock. `sync.Map` only when the access pattern fits (stable keys, read-heavy).
 
-## Concurrent Map Access
+## Atomics
 
-- Never read and write a plain `map` from multiple goroutines without synchronization. Use either:
-  - A `sync.Mutex` / `sync.RWMutex` guarding the map, or
-  - `sync.Map` when the access pattern fits (stable keys, high read ratio).
+- `sync/atomic` / `atomic.Value` only for simple counters and flags. Anything more complex gets a mutex — clarity over micro-optimisation.
 
-## Atomic Operations
+## Goroutines and channels
 
-- Use `sync/atomic` or `atomic.Value` only for simple counters and flags. Prefer mutexes for anything more complex — clarity matters more than micro-optimization.
+- Every goroutine has a shutdown path: `context.Context` cancellation or a `done` channel, with `case <-ctx.Done()` in every loop's `select`.
+- Only the sender closes a channel, exactly once.
+- Buffered channels are deliberate — comment why the buffer has its size.
 
-## Testing
+## Tests
 
-- All test fakes that hold mutable state must be mutex-protected (this is already enforced in testing rules).
-- Use the `-race` flag (`make test-race`) to verify new and modified code is free of data races.
-- When writing tests that spawn goroutines, use `t.Cleanup()` to ensure they are joined before the test exits.
-
-## Code Review Checklist
-
-When writing or reviewing Go code, verify:
-
-1. Every struct field accessed from multiple goroutines is protected.
-2. Every goroutine has a shutdown path.
-3. No lock is held across blocking operations (I/O, channel sends, network calls).
-4. No plain `map` is accessed concurrently without synchronization.
-5. `defer mu.Unlock()` is used immediately after `mu.Lock()` to prevent deadlocks on early returns.
+- Fakes holding mutable state are mutex-protected.
+- Goroutines a test spawns are joined in `t.Cleanup()` before the test exits.
