@@ -14,11 +14,11 @@ commit_msg_errors() {
 	"Merge "* | "fixup! "* | "squash! "* | "amend! "*) return ;;
 	esac
 
-	if grep -qE '^(feat|fix|chore|docs|refactor|test|perf|ci|build|style|revert)(\([a-z0-9][a-z0-9/_-]*\))?!?: [^[:space:]]' <<<"$subject"; then
+	if grep -qE '^(feat|fix|chore|docs|refactor|test|perf|ci|build|style|revert|deps)(\([a-z0-9][a-z0-9/_-]*\))?!?: [^[:space:]]' <<<"$subject"; then
 		desc=${subject#*: }
 		[[ $desc =~ ^[A-Z] ]] && echo "- start the subject with a lowercase letter after the colon"
 	else
-		echo "- subject must be '<type>(<scope>): <subject>' with type feat|fix|chore|docs|refactor|test|perf|ci|build|style|revert and a lowercase scope"
+		echo "- subject must be '<type>(<scope>): <subject>' with type feat|fix|chore|docs|refactor|test|perf|ci|build|style|revert|deps and a lowercase scope"
 	fi
 
 	[[ $subject == *. ]] && echo "- drop the trailing period from the subject"

@@ -21,7 +21,8 @@ Every commit follows Conventional Commits 1.0 (https://www.conventionalcommits.o
 |---|---|
 | `feat` | A new feature visible to a user, operator, or downstream consumer |
 | `fix` | A bug fix in previously released or merged code |
-| `chore` | Maintenance with no behavior change: dep bumps, lint/format passes, file moves, build config tweaks |
+| `chore` | Maintenance with no behavior change: lint/format passes, file moves, build config tweaks |
+| `deps` | Dependency bumps — Dependabot's format: `deps: bump github.com/rs/zerolog from 1.33.0 to 1.34.0` |
 | `docs` | Documentation only: README, comments, `.claude/` rules and skills, design specs, plans |
 | `refactor` | Restructuring that preserves behavior |
 | `test` | Test-only additions or changes |
@@ -52,6 +53,7 @@ Add one when the motivation or a side effect isn't obvious, when the change touc
 
 - Breaking change: a `BREAKING CHANGE: …` footer, or `!` after the type/scope (`feat(api)!: rename FooService to BarService`).
 - `Refs: #123` and paired-commit links are fine.
+- `Signed-off-by:` is allowed.
 - **No attribution trailers.** Never add `Co-Authored-By:` or a "Generated with Claude Code" line.
 
 ## Examples
