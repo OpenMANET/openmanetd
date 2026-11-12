@@ -68,11 +68,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "FILE=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.file_path // empty'); if [ -n \"$FILE\" ] && echo \"$FILE\" | grep -qE '(internal/api/|frontend/src/gen/|internal/database/models/)'; then echo \"Do not edit generated files. Edit the proto source or SQL and run make buf / make sqlc-gen.\" >&2; exit 2; fi"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-generated.sh"
           }
         ]
       },
@@ -81,41 +81,57 @@
         "hooks": [
           {
             "type": "command",
-            "command": "CMD=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.command // empty'); if echo \"$CMD\" | grep -qE '\\bgo build\\b' && ! echo \"$CMD\" | grep -q 'make'; then if [ -z \"$(ls -A /workspaces/openmanetd/static 2>/dev/null)\" ]; then echo 'Warning: static/ is empty. Use make build instead of go build directly, or run make frontend first.' >&2; fi; fi; exit 0"
+            "if": "Bash(go build *)",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/check-static.sh"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "FILE=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.file_path // empty'); [ -n \"$FILE\" ] && [[ \"$FILE\" == *.go ]] && gofmt -w \"$FILE\" 2>/dev/null; exit 0"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post-edit.sh",
+            "timeout": 300,
+            "statusMessage": "Formatting and regenerating..."
           },
           {
             "type": "command",
-            "command": "FILE=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.file_path // empty'); if [ -n \"$FILE\" ] && echo \"$FILE\" | grep -q '/proto/'; then echo 'Auto-running make buf...' >&2; make -C /workspaces/openmanetd buf >&2; fi; exit 0",
-            "statusMessage": "Running make buf..."
-          },
-          {
-            "type": "command",
-            "command": "FILE=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.file_path // empty'); if [ -n \"$FILE\" ] && echo \"$FILE\" | grep -qE '(schema|query)\\.sql$'; then echo 'Auto-running make sqlc-gen...' >&2; make -C /workspaces/openmanetd sqlc-gen >&2; fi; exit 0",
-            "statusMessage": "Running make sqlc-gen..."
-          },
-          {
-            "type": "command",
-            "command": "FILE=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.file_path // empty'); if [ -n \"$FILE\" ] && echo \"$FILE\" | grep -qE 'frontend/src/.*\\.(js|jsx)$' && ! echo \"$FILE\" | grep -q 'src/gen/'; then pnpm -C /workspaces/openmanetd/frontend run lint:fix -- \"$FILE\" 2>/dev/null; fi; exit 0"
+            "command": "node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/react-app/quality-check.js"
           }
         ]
       },
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "node .claude/hooks/react-app/quality-check.js"
+            "if": "Bash(git commit *)",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/commit-msg.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop-gate.sh",
+            "timeout": 900,
+            "statusMessage": "Running definition-of-done gate..."
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/trace-instructions.sh"
           }
         ]
       }

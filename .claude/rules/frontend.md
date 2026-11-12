@@ -1,115 +1,50 @@
-# Frontend Rules — React + Lattice CSS
-
-The OpenMANETd frontend is a React 18 SPA built with Vite. The visual system is
-**Lattice** — a tactical C2 aesthetic with near-black surfaces, a single cyan
-accent with glow, monospace for data and sans-serif for prose, and sharp
-corners (no border radius). All visual tokens live in
-`frontend/src/styles/lattice.css`. App-shell primitives live in
-`frontend/src/Layout.css`. Page and component CSS exists only for layout glue
-that genuinely doesn't fit a primitive — never to redefine colors, typography,
-borders, or spacing rhythm.
-
-These rules are non-negotiable. If a design ask conflicts with Lattice, raise
-it instead of silently inventing a new style.
-
 ---
+paths:
+  - "frontend/src/**/*.{js,jsx,css}"
+  - "frontend/index.html"
+  - "frontend/vite.config.js"
+---
+
+# Frontend — React + Lattice
+
+React 18 SPA built with Vite. **Lattice** is the design system: a tactical C2 look with near-black surfaces, one cyan accent with glow, monospace for data, sans-serif only for prose, and sharp corners. Tokens live in `frontend/src/styles/lattice.css`, app-shell primitives in `frontend/src/Layout.css`. Page and component CSS is layout glue only. These rules are non-negotiable — if a design ask conflicts with Lattice, raise it rather than inventing a style.
 
 ## Required skills
 
-Two skills MUST be invoked when working on the frontend. Do not skip them —
-they encode patterns that are not duplicated in this rules file.
+- **`react-best-practices`** — whenever React code under `frontend/src/` is written, reviewed, or refactored. Target devices (MIPS routers, embedded ARM) make its performance rules mandatory.
+- **`react-view-transitions`** — whenever UI states animate: route changes, panel enter/exit, list reorder, shared elements, `<ViewTransition>` / `startViewTransition`. The native View Transition API is the only sanctioned animation approach; honor `prefers-reduced-motion`.
 
-- **`react-best-practices`** — invoke whenever writing, reviewing, or
-  refactoring any React code under `frontend/src/`. Vercel's 70-rule
-  performance guide covers waterfalls, bundle size, re-render and rendering
-  perf, and client/server data-fetching patterns. Resource-constrained
-  target devices (MIPS routers, embedded ARM) make these rules non-optional
-  here — performance regressions on the host show up immediately in the field.
-- **`react-view-transitions`** — invoke whenever animating between UI states:
-  route changes, panel enter/exit, list reorder, shared-element transitions,
-  or anything mentioning `<ViewTransition>` / `startViewTransition` /
-  transition types. This skill is the source of truth for animation in the
-  app — Lattice deliberately avoids third-party animation libraries, so the
-  browser's native View Transition API is the only sanctioned approach.
-  Honor `prefers-reduced-motion` per Lattice; the skill aligns with that.
+If a skill conflicts with Lattice (a hard-coded colour, a third-party library), Lattice and the user win — raise the conflict.
 
-If a skill's guidance and these Lattice rules ever conflict (e.g. a perf
-recommendation that would require a hard-coded color or a third-party
-library), Lattice and the user's instructions win — raise the conflict
-rather than silently breaking the design system.
+## Principles
 
----
+1. **Primitive first** — `.lat-panel`, `.lat-btn`, `.lat-chip`, `.lat-table`, `.lat-field`, `.kv`, `.big-num`, `.pbar`, .... Close but not quite? Add a modifier class to `lattice.css`; never fork the style in page CSS.
+2. **Tokens, not literals** — no hard-coded hex/rgb colours, font stacks, or px values that duplicate a token. The Stop hook flags colours and radii on added lines.
+3. **Mobile-first, field-usable** — usable on a 360px phone in direct sunlight, touch targets ≥ 44px, no horizontal page scroll. Test the breakpoint; don't guess.
+4. **Sharp corners** — `--radius` is `0`. Only status dots, signal/meter pips, and the PTT ring are round.
+5. **Restraint** — glow only for live/active state; colour only for status; no gradients except the grid overlay.
+6. **No UI libraries** — no MUI, Chakra, Tailwind, daisyUI, shadcn.
 
-## Core principles
+## Tokens (use; never redefine)
 
-1. **Lattice is the design system.** Reach for an existing primitive
-   (`.lat-panel`, `.lat-btn`, `.lat-chip`, `.lat-table`, `.lat-field`, `.kv`,
-   `.big-num`, `.pbar`, etc.) before writing any new CSS. If a primitive is
-   close-but-not-quite, add a modifier class to `lattice.css` rather than
-   forking the style in a page CSS file.
-2. **Tokens, not literals.** Use the CSS variables defined in `:root`. Never
-   hard-code hex colors, font stacks, or px values that duplicate a token.
-3. **Mobile-first and field-usable.** Every page must be usable on a 360px
-   wide phone in direct sunlight. Touch targets ≥ 44px tall. No horizontal
-   page scroll. Test the breakpoint, do not guess.
-4. **Sharp corners, no rounding.** `--radius` is `0`. The only round elements
-   in the system are status dots, signal/meter pips, and the PTT ring.
-5. **Restraint with motion and color.** Glow is reserved for live/active
-   state. Color is reserved for status (`--ok`, `--warn`, `--crit`, `--accent`).
-   Body copy is `--text` or `--muted`. No gradients other than the grid overlay.
-6. **No external UI libraries.** No MUI, no Chakra, no Tailwind, no daisyUI,
-   no shadcn. Lattice is the system.
+- Surfaces: `--bg`, `--bg-2` (page, deepest); `--surface`, `--surface-2`, `--surface-hi` (panels, inputs, hover).
+- Borders: `--border` (default 1px), `--border-hi` (active, focused, interactive), `--border-subtle` (hairlines inside panels).
+- Text: `--text` (primary), `--muted` (labels, secondary, inactive), `--dim` (tertiary, disabled, ticks).
+- Accent and status: `--accent`, `--accent-2` (primary action, focus, live data, glow); `--ok`, `--warn`, `--crit` (status only).
+- Fonts: `--font-mono` (data, labels, tables, headings, buttons); `--font-sans` (long prose, rare).
+- Legacy `--green`, `--red`, `--yellow`, `--orange`, `--blue` still resolve; don't add uses.
 
----
+## Typography
 
-## Design tokens (must use, never redefine)
+- `body` sets `--font-mono` at 13px — inherit it.
+- Section labels and panel titles: uppercase mono, `letter-spacing: 0.18em`, `--muted`, 9–11px. Use `<h3>` inside `.lat-panel` and let the cascade style it.
+- Big numeric readouts: `.big-num` (36px, `--accent`, optional `.unit` child). Body copy: 11–13px mono.
+- No `font-weight: bold` on body copy; 600/700 only for primary buttons and the brand title.
+- Uppercase text always has letter-spacing > 0.08em; lowercase keeps default tracking.
 
-| Token | Use for |
-|-------|---------|
-| `--bg`, `--bg-2` | Page background, deepest surface |
-| `--surface`, `--surface-2`, `--surface-hi` | Panels, inputs, hover state |
-| `--border` | Default 1px panel/input border |
-| `--border-hi` | Active / focused / interactive border |
-| `--border-subtle` | Hairline separators inside panels |
-| `--text` | Primary text |
-| `--muted` | Labels, secondary text, inactive state |
-| `--dim` | Tertiary text, disabled, hairline ticks |
-| `--accent`, `--accent-2` | Primary action, focus, live data, glow |
-| `--ok` / `--warn` / `--crit` | Success / warning / critical status only |
-| `--font-mono` | All data, labels, table content, headings, buttons |
-| `--font-sans` | Long prose only (rare in this app) |
-| `--radius` | Always `0` — never override |
+## Layout
 
-Legacy aliases (`--green`, `--red`, `--yellow`, `--orange`, `--blue`) still
-resolve, but **do not introduce new uses** — pick the semantic token instead
-(`--ok`, `--crit`, `--warn`, `--accent`).
-
----
-
-## Typography rules
-
-- Default font is `--font-mono` at 13px (set on `body`). Inherit it; do not
-  re-declare on every element.
-- **Section labels and panel titles** use uppercase mono, letter-spaced
-  (`text-transform: uppercase; letter-spacing: 0.18em`), in `--muted` at
-  9–11px. Use `<h3>` inside `.lat-panel` and let `.lat-panel h3` style it.
-- **Big numeric readouts** use `.big-num` (36px, `--accent`, with optional
-  `.unit` child).
-- **Body copy** is 11–13px mono. Avoid sans-serif except for genuine prose.
-- **Never use `font-weight: bold` on body copy.** Weight 600/700 is reserved
-  for primary buttons and the brand title.
-- Letter-spacing > 0.08em is mandatory on any uppercase text. Lowercase text
-  uses default tracking.
-
----
-
-## Layout primitives
-
-The app shell (`.layout-desktop`, `.layout-mobile`, `.sidebar`, `.bottom-tab-bar`,
-`.lat-topbar`, `.lat-view-header`, `.lat-body`) is owned by `Layout.css` and
-`Layout.jsx`. Pages should not redefine these classes.
-
-**A page is composed of:**
+The shell (`.layout-desktop`, `.layout-mobile`, `.sidebar`, `.bottom-tab-bar`, `.lat-topbar`, `.lat-view-header`, `.lat-body`) is owned by `Layout.css` / `Layout.jsx`; pages don't redefine it. A page is:
 
 ```jsx
 <>
@@ -128,237 +63,87 @@ The app shell (`.layout-desktop`, `.layout-mobile`, `.sidebar`, `.bottom-tab-bar
 </>
 ```
 
-**Body grid options:** `.lat-body.grid-2x`, `.grid-3`, `.grid-4`. Panels can
-span columns with `.col-span-2`, `.col-span-3`, `.col-span-all`. The grid
-collapses to 2 columns at 900px and 1 column at 640px automatically — do not
-duplicate that logic in page CSS.
+- Body grids `.lat-body.grid-2x | .grid-3 | .grid-4`; panels span with `.col-span-2 | -3 | -all`. They collapse to 2 columns at 900px and 1 at 640px on their own — don't duplicate that.
+- A custom inner layout gets a small page-prefixed grid (`.dashboard-kpi-row`, `.settings-grid`) with its own 900px and 640px media queries.
+- Below 768px the shell switches to the bottom-tab layout (`Layout.jsx`).
+- Tables wider than the viewport go in `.table-scroll`. Chip rows scroll horizontally under 640px, following `.lat-topbar .chips`.
 
-**When a page needs a custom inner layout** (e.g. KPI rows, two-column panel
-internals): write a small grid in the page CSS file, name it with a page
-prefix (`.dashboard-kpi-row`, `.settings-grid`), and provide media queries
-for 900px and 640px. Mirror the breakpoints used in `Layout.css`.
-
----
-
-## Panels
-
-`.lat-panel` is the only container for grouped content. Structure:
+## Panels and states
 
 ```jsx
 <div className="lat-panel">
   <div className="panel-head">
     <h3>Panel Title</h3>
-    <div className="actions">
-      <button>refresh</button>
-    </div>
+    <div className="actions"><button>refresh</button></div>
   </div>
   <div className="kv"><span className="k">Field</span><span className="v">Value</span></div>
-  …
 </div>
 ```
 
-- Always use a `<h3>` inside `.lat-panel` — the cascade styles it correctly.
-- Use `.kv` rows for label/value pairs. Status uses `.v.ok|warn|crit|accent`.
-- Use `.lat-table` inside a `.table-scroll` wrapper for scrollable tabular data.
-- Loading and empty states are first-class:
-  - **Loading:** muted, uppercase, mono, centered. Re-use the `.dashboard-loading`
-    style only on the dashboard; for other pages use `<div className="lat-panel">Loading…</div>`
-    or a page-local loading class.
-  - **Empty:** short uppercase muted line: `No mesh peers.` Do not use icons
-    or illustrations.
-  - **Error:** use `.lat-alert.crit` with a one-line cause.
-
----
+- `.lat-panel` is the only container for grouped content. `.kv` rows for label/value pairs, status via `.v.ok | warn | crit | accent`. `.lat-table` inside `.table-scroll`.
+- Loading: muted, uppercase, mono, centred — `<div className="lat-panel">Loading…</div>` or a page-local class (`.dashboard-loading` is dashboard-only).
+- Empty: a short uppercase muted line (`No mesh peers.`), no icons or illustrations.
+- Error: `.lat-alert.crit` with a one-line cause.
 
 ## Buttons and inputs
 
-- Use `.lat-btn` for every clickable action. Modifiers: `.primary`, `.ghost`,
-  `.danger`, `.danger.solid`.
-- Use `.lat-input`, `.lat-textarea`, `.lat-select` for all form controls.
-  Wrap each in `.lat-field` with a `<label>` so the uppercase muted label
-  styling applies automatically.
-- Use `.lat-toggle` for boolean switches (track + thumb). Toggle wrappers
-  must be `<button>` elements with the `.on` class controlled by state, not
-  `<input type="checkbox">`.
-- Use `input[type="range"].lat-slider` for sliders.
-- **Never style a raw `<button>` or `<input>` per-page.** If a primitive is
-  missing a variant, add the variant to `lattice.css` and reuse it everywhere.
-- Touch targets: buttons are min 32px tall by default. On primary actions
-  used on mobile, raise to 44px via a page-local rule that bumps padding —
-  do not change the primitive.
-
----
+- Every clickable action is `.lat-btn` (`.primary`, `.ghost`, `.danger`, `.danger.solid`), min 32px tall. Primary actions used on mobile reach 44px through a page-local padding bump — don't change the primitive.
+- Form controls: `.lat-input`, `.lat-textarea`, `.lat-select`, each in a `.lat-field` with a `<label>`.
+- Booleans: `.lat-toggle` (track + thumb) on a `<button>` whose `.on` class follows state — not `<input type="checkbox">`. Sliders: `input[type="range"].lat-slider`.
+- Never style a raw `<button>` or `<input>` per page. A missing variant goes into `lattice.css`.
 
 ## Status indicators
 
 | Use | Primitive |
 |-----|-----------|
-| Inline status pill in a topbar | `.lat-chip` (+ `.ok` / `.warn` / `.crit`) |
-| Tiny status dot inside a row | `.dot-i` (+ `.ok` / `.warn` / `.crit`) |
-| Numeric readout with status color | `.big-num` (+ `.ok` / `.warn` / `.crit`) |
-| Bar gauge (CPU, mem, signal pct) | `.pbar` row with `.pbar-label` / `.pbar-val` |
-| 5-bar signal indicator | `.sig-bars` with per-pip `.on` / `.warn` |
-| Audio level meter | `.meter-row` with per-segment `.on` / `.hot` / `.peak` |
-| Sparkline (in-panel history) | `.spark` (with optional `.warn`) |
-| One-line callout | `.lat-alert` (+ `.ok` / `.warn` / `.crit`) |
+| Status pill in a topbar | `.lat-chip` |
+| Status dot in a row | `.dot-i` |
+| Numeric readout | `.big-num` |
+| Bar gauge (CPU, mem, signal %) | `.pbar` with `.pbar-label` / `.pbar-val` |
+| 5-bar signal | `.sig-bars`, per-pip `.on` / `.warn` |
+| Audio level meter | `.meter-row`, per-segment `.on` / `.hot` / `.peak` |
+| Sparkline | `.spark` (optional `.warn`) |
+| One-line callout | `.lat-alert` |
 
-Color semantics are fixed and **must not be remapped per-page**:
+Status modifiers are `.ok` / `.warn` / `.crit`, with fixed meanings never remapped per page: `--ok` healthy, connected, link-up; `--warn` degraded but working, partial, retrying; `--crit` failure, disconnected, error; `--accent` live, active, selected — never "good".
 
-- `--ok` → success, healthy, connected, link-up
-- `--warn` → degraded but functional, partial data, retrying
-- `--crit` → failure, disconnected, error condition
-- `--accent` → live/active/selected — never used to mean "good"
+## Page CSS
 
----
+Allowed: the page grid that arranges panels; a few page-prefixed classes that compose primitives (`.dashboard-kpi-row`, `.settings-grid`, `.power-selector`); 900px and 640px breakpoints matching the body grid.
 
-## React component conventions
+Not allowed: colours, fonts, or font sizes outside the tokens; descendant selectors that restyle `.lat-panel`, `.lat-btn`, `.lat-chip`, `.lat-table`, `.kv`, ...; border-radius, drop shadows, gradients; `!important` outside a `prefers-reduced-motion` block. Fighting a primitive means extending `lattice.css`.
 
-- **Functional components only.** No class components.
-- **Named exports for utilities, default export for the page/component.**
-  `export default function Dashboard() {…}`.
-- **Hooks at the top of the body**, in this order: `useState`, `useRef`,
-  custom hooks (`useMeshStatus` etc.), `useMemo`, `useCallback`, `useEffect`.
-- **Polling uses `useVisibleInterval`** — never `setInterval` directly. This
-  pauses polling when the tab is hidden and is required for battery life on
-  field devices.
-- **Subscribe to shared real-time state via the `useMeshStatus`,
-  `useMeshTopology`, `useGnssStatus` hooks** rather than each page polling
-  its own copy.
-- **Memoize derived data** with `useMemo` when the input is a polled object
-  and the derivation is non-trivial (sorting, filtering, formatting tables).
-- **Keep effects narrow.** One effect per concern (subscribe, poll, derive).
-- **Cleanup in every effect that subscribes or starts a timer.** Return the
-  unsubscribe / clearInterval function.
-- **No prop drilling for global state** — use the `contexts/` providers
-  (`useAuth`, etc.) or a service module under `services/`.
-- **Do not put logic inside JSX expressions.** Compute it above the return,
-  bind to a const.
-- **Component file = component name** (`PttButton.jsx` exports `PttButton`).
-  Co-located CSS file uses the same base name (`PttButton.css`).
+## React conventions
 
----
+- Function components only. Default export for the page or component, named exports for utilities. File name matches the component (`PttButton.jsx` exports `PttButton`); co-located CSS shares the base name.
+- Hooks at the top in this order: `useState`, `useRef`, custom hooks, `useMemo`, `useCallback`, `useEffect`.
+- Polling uses `useVisibleInterval`, never `setInterval` — it pauses when the tab is hidden, which field-device batteries need.
+- Shared real-time state comes from `useMeshStatus`, `useMeshTopology`, `useGnssStatus`, not per-page polling.
+- `useMemo` for non-trivial derivations of polled data (sorting, filtering, table formatting).
+- One effect per concern; every effect that subscribes or starts a timer returns its cleanup.
+- Global state through `contexts/` providers (`useAuth`, ...) or `services/` modules — no prop drilling.
+- No logic inside JSX expressions; compute into a const above the `return`.
 
-## File organization
+## Files
 
-```
-frontend/src/
-  pages/         One folder-less file per route, plus page-local CSS.
-  components/    Reusable widgets shared by 2+ pages.
-  hooks/         Custom React hooks (no JSX).
-  services/      Transport, stores, websocket, audio engine. No JSX.
-  contexts/      React contexts and their providers.
-  utils/         Pure helpers, no React.
-  gen/           AUTO-GENERATED protobuf clients — never edit.
-  styles/        lattice.css and other shared stylesheets.
-  __tests__/     Vitest tests, mirrors the src/ tree.
-```
-
-- A widget used by exactly one page lives next to (or inside) that page,
-  not in `components/`. Promote to `components/` only when a second consumer
-  appears.
-- Generated code under `gen/` is read-only — regenerate with `make buf`.
-
----
-
-## Page-local CSS rules
-
-A page CSS file is allowed only for:
-
-1. The page-specific grid that arranges panels.
-2. A handful of page-local utility classes (e.g. `.dashboard-kpi-row`,
-   `.settings-grid`, `.power-selector`) that compose Lattice primitives.
-3. Responsive breakpoints at 900px and 640px that match the body grid.
-
-A page CSS file **must not**:
-
-- Redeclare colors, fonts, font sizes outside the token system.
-- Restyle `.lat-panel`, `.lat-btn`, `.lat-chip`, `.lat-table`, `.kv`, etc.
-  (no descendant selectors that override Lattice primitives).
-- Introduce border-radius, drop shadows, or gradients.
-- Use `!important` except in a `prefers-reduced-motion` block.
-
-If you find yourself fighting a primitive, the fix is to extend `lattice.css`,
-not to override it locally.
-
----
-
-## Responsive rules
-
-- Breakpoints: **900px** (desktop → tablet, 4-col grid drops to 2-col) and
-  **640px** (tablet → phone, all grids collapse to 1-col, padding tightens).
-- The shell switches to mobile bottom-tab layout below **768px**, controlled
-  in `Layout.jsx`.
-- Tables that exceed available width must be wrapped in `.table-scroll`.
-- `lat-topbar .chips` switches to horizontal scroll under 640px — use that
-  pattern for any other chip-row layout.
-- Test on a 360×640 viewport before declaring a page complete. The frontend
-  is used in the field on phones; desktop-only is a regression.
-
----
+- `pages/` — one file per route, plus page CSS.
+- `components/` — widgets shared by two or more pages; a single-consumer widget lives with its page until a second consumer appears.
+- `hooks/` (no JSX), `services/` (transport, stores, websocket, audio engine; no JSX), `contexts/`, `utils/` (pure, no React), `styles/`.
+- `__tests__/` mirrors `src/` (see `frontend-testing.md`).
+- `gen/` is generated — never edit; regenerate with `make buf`.
 
 ## Accessibility
 
-- All interactive elements must be `<button>`, `<a>`, or have `role` set.
-  Do not attach `onClick` to `<div>`.
-- Form controls must have a `<label>` (preferred) or `aria-label`.
-- Focus styles are provided by Lattice (`:focus-visible` rings on inputs and
-  buttons). Do not remove them.
-- Provide `aria-checked`, `aria-pressed`, `role="radiogroup"` etc. on custom
-  toggle UIs (see `PowerSelector` in `SettingsWireless.jsx` for the pattern).
-- Color is never the only signal — pair `--crit` with a "FAIL" label, not a
-  red dot alone.
-- Honor `prefers-reduced-motion` — Lattice already disables glow and
-  transitions in that media query; do not re-enable them locally.
+- Interactive elements are `<button>` or `<a>`, or carry a `role`; no `onClick` on a `<div>`.
+- Every form control has a `<label>` (preferred) or `aria-label`.
+- Keep Lattice's `:focus-visible` rings.
+- Custom toggles carry `aria-checked`, `aria-pressed`, `role="radiogroup"`, ... (pattern: `PowerSelector` in `SettingsWireless.jsx`).
+- Colour is never the only signal — pair `--crit` with a "FAIL" label.
+- Honor `prefers-reduced-motion`; don't re-enable glow or transitions Lattice turns off there.
 
----
+## Workflow
 
-## Testing
-
-Defer to `.claude/rules/testing.md` for test infrastructure. Frontend-specific
-points:
-
-- Co-locate tests under `frontend/src/__tests__/` mirroring the source tree.
-- Use Vitest + jsdom + `@testing-library/react`.
-- Use `createRouterTransport` from `@connectrpc/connect` for ConnectRPC
-  service tests instead of mocking HTTP.
-- Visual / layout regressions are not auto-checked — manually verify on a
-  mobile viewport (360px wide) and a desktop viewport before completion.
-- Run `make lint-frontend` and `make test-frontend` before declaring frontend
-  work done.
-
----
-
-## Build and dev workflow
-
-- Vite hot-reload dev server (against a remote daemon):
-  ```bash
-  cd frontend && VITE_API_TARGET=http://<host>:8081 pnpm run dev
-  ```
-- Edits under `frontend/src/` are **not** served by the embedded daemon
-  binary until you run `make frontend` — `static/` is embedded at compile
-  time.
-- Before committing frontend work that the user will exercise via the
-  daemon binary: `make frontend && make lint-frontend && make test-frontend`.
-
----
-
-## Code-review checklist
-
-When writing or reviewing frontend code, verify:
-
-1. Every visual element uses a Lattice primitive or a token-based composition;
-   no hard-coded colors, no `border-radius`, no third-party UI library.
-2. Page CSS contains only layout and page-local composition — no overrides
-   of primitive selectors.
-3. The page renders correctly at 360px wide; touch targets are ≥ 44px on
-   primary mobile actions.
-4. Polling uses `useVisibleInterval`; effects clean up; goroutine-equivalent
-   leaks (subscriptions, timers, websockets) all unsubscribe.
-5. Loading, empty, and error states are present and Lattice-styled.
-6. Status colors follow semantics (`--ok`/`--warn`/`--crit`/`--accent`).
-7. Generated code under `frontend/src/gen/` was not edited by hand.
-8. `make frontend` was re-run if the changes need to ship through the
-   daemon binary.
-9. The `react-best-practices` skill was consulted for any non-trivial React
-   change, and `react-view-transitions` was consulted whenever animation
-   between UI states was added or modified.
+- Hot-reload dev server against a remote daemon: `cd frontend && VITE_API_TARGET=http://<host>:8081 pnpm run dev`. `vite.config.js` proxies `/ws`, `/api`, `/auth`, `/rpc`, and `/whisper` unchanged to `VITE_API_TARGET` (default `http://localhost:8080`); the frontend daemon forwards `/rpc` and `/auth` to the API server, so dev mirrors production's single origin.
+- ESLint (`frontend/eslint.config.js`) covers `src/**/*.{js,jsx}` except `src/gen/`. The PostToolUse hook runs `eslint --fix` on each edited file; `pnpm -C frontend run lint:fix` fixes the tree.
+- The daemon serves `static/`, embedded at compile time — run `make frontend` before exercising a change through the binary.
+- Done means `make lint-frontend` and `make test-frontend` pass and the page has been checked by hand at 360px and at desktop width; layout isn't tested automatically.

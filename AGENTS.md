@@ -2,16 +2,24 @@
 
 `CLAUDE.md` is the canonical repository guide. Before modifying this repository,
 read it completely and follow its commands, architecture notes, generated-code
-boundaries, testing patterns, and platform gotchas.
+boundaries, definition of done, and platform gotchas.
 
-The detailed rules under `.claude/rules/` also apply to Codex. Read the rules
-relevant to the work before editing:
+The detailed rules under `.claude/rules/` also apply to Codex. Claude Code loads
+them automatically from their `paths:` frontmatter; read the ones relevant to
+the work before editing:
 
-- All Go changes: `concurrency.md`, `performance.md`, `idiomatic-go.md`, and
-  `testing.md`.
-- API changes: `api-design.md` and `testing.md`.
-- Frontend changes: `frontend.md` and the frontend sections of `testing.md`.
+- All Go changes: `idiomatic-go.md`, `concurrency.md`, `performance.md`,
+  `linting.md`, and `testing.md`.
+- API handler and server changes: `api-design.md`.
+- Proto changes: `proto.md`.
+- Database schema or query changes: `database.md`.
+- Frontend changes: `frontend.md` and `frontend-testing.md`.
 - Instrumentation snapshot changes: `instrumentation.md`.
+
+Procedures live as skills under `.claude/skills/`:
+
+- Commit messages: `commit/SKILL.md`.
+- Final self-review of non-trivial work: `gap-review/SKILL.md`.
 
 Treat these referenced documents as repository instructions, not optional
 background material. Keep this file as a small entrypoint so the Claude and
