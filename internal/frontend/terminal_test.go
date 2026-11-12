@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/openmanet/openmanetd/internal/auth"
 	"github.com/openmanet/openmanetd/internal/terminal"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -127,4 +128,73 @@ func TestHandleTerminalWS_lanOriginAccepted(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+}
+
+// authedTerminalTestServer wires the terminal handler behind the frontend
+// auth middleware backed by store, as the daemon does with auth enabled.
+func authedTerminalTestServer(t *testing.T, store *auth.SessionStore) (*httptest.Server, *terminal.Manager) {
+	t.Helper()
+
+	cfg := terminal.DefaultConfig()
+	cfg.Shell = "/bin/sh"
+	cfg.GraceShutdown = 200 * time.Millisecond
+	mgr := terminal.New(zerolog.Nop(), cfg)
+	s := &Server{log: zerolog.Nop(), term: mgr, sessionStore: store, authEnabled: true}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/terminal/ws", s.handleTerminalWS)
+	srv := httptest.NewServer(auth.NewFrontendAuthMiddleware(store, true)(mux))
+	t.Cleanup(srv.Close)
+
+	return srv, mgr
+}
+
+// dialTerminalWithToken opens the terminal WebSocket with token as the
+// session cookie.
+func dialTerminalWithToken(t *testing.T, srv *httptest.Server, token string) {
+	t.Helper()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/terminal/ws"
+	header := http.Header{}
+	header.Set("Cookie", auth.SessionCookieName+"="+token)
+
+	c, _, err := websocket.DefaultDialer.Dial(url, header)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+}
+
+func TestHandleTerminalWS_logoutEndsSession(t *testing.T) {
+	store := auth.NewSessionStore(time.Hour, 4)
+	srv, mgr := authedTerminalTestServer(t, store)
+	token := store.Create("root")
+
+	dialTerminalWithToken(t, srv, token)
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	store.Delete(token)
+
+	assert.Eventually(t, func() bool { return !mgr.InUse() }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestHandleTerminalWS_sessionExpiryEndsSession(t *testing.T) {
+	store := auth.NewSessionStore(time.Second, 4)
+	srv, mgr := authedTerminalTestServer(t, store)
+
+	dialTerminalWithToken(t, srv, store.Create("root"))
+	require.Eventually(t, mgr.InUse, 500*time.Millisecond, 10*time.Millisecond)
+
+	assert.Eventually(t, func() bool { return !mgr.InUse() }, 4*time.Second, 20*time.Millisecond)
+}
+
+func TestHandleTerminalWS_otherLogoutKeepsSession(t *testing.T) {
+	store := auth.NewSessionStore(time.Hour, 4)
+	srv, mgr := authedTerminalTestServer(t, store)
+	other := store.Create("root")
+
+	dialTerminalWithToken(t, srv, store.Create("root"))
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	store.Delete(other)
+
+	assert.Never(t, func() bool { return !mgr.InUse() }, 500*time.Millisecond, 20*time.Millisecond)
 }

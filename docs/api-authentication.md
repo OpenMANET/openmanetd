@@ -199,6 +199,9 @@ client := gnssv1connect.NewGnssServiceClient(
 - Maximum concurrent sessions per daemon: **16** (`auth.sessionMaxSize`).
   When full, the session with the oldest `LastAccess` time is evicted.
 - Expired sessions are swept every 5 minutes by a background goroutine.
+- An open web terminal (`/api/terminal/ws`) ends when the session that opened
+  it logs out, is evicted, or expires, and when the browser stops answering
+  WebSocket pings for 60 seconds.
 - Session storage is in-memory only — all sessions are lost on daemon
   restart. Callers that see a 401 after a restart should re-authenticate.
 

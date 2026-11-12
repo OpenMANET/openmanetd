@@ -16,6 +16,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// pingWriteWait bounds how long writing one ping frame may block.
+const pingWriteWait = 10 * time.Second
+
 // resizeMsg is the JSON shape of the only currently supported control frame.
 // Forward-compatible: unknown "type" values are logged and ignored.
 type resizeMsg struct {
@@ -53,12 +56,13 @@ func NewSession(ctx context.Context, log zerolog.Logger, cfg Config, ws *websock
 		return nil, fmt.Errorf("pty.Start: %w", err)
 	}
 
-	return &Session{log: log, cfg: cfg, ws: ws, pty: ptmx, cmd: cmd}, nil
+	return &Session{log: log, cfg: cfg.withKeepaliveDefaults(), ws: ws, pty: ptmx, cmd: cmd}, nil
 }
 
-// Run drives the two pumps and waits for the shell to exit. It returns
-// when (a) ctx is canceled, (b) one of the pumps errors, or (c) the
-// shell exits on its own. In all cases it tears down: cancels the derived
+// Run drives the PTY, WebSocket, and ping pumps and waits for the shell to
+// exit. It returns when (a) ctx is canceled, (b) one of the pumps errors,
+// including a client that stops answering pings within PongWait or sends a
+// message over MaxMessageSize, or (c) the shell exits on its own. In all cases it tears down: cancels the derived
 // context, closes the PTY, signals the shell's process group (SIGTERM
 // → SIGKILL after GraceShutdown), and waits for cmd.Wait() to complete.
 //
@@ -73,10 +77,15 @@ func (s *Session) Run(ctx context.Context) error {
 
 	go func() { shellDone <- s.cmd.Wait() }()
 
-	pumpErr := make(chan error, 2)
+	// One slot per pump so none blocks sending its result after Run has
+	// stopped selecting on pumpErr.
+	const pumps = 3
+
+	pumpErr := make(chan error, pumps)
 
 	go func() { pumpErr <- s.pumpPTYToWS(ctx) }()
 	go func() { pumpErr <- s.pumpWSToPTY(ctx) }()
+	go func() { pumpErr <- s.pumpPings(ctx) }()
 
 	var firstErr error
 	select {
@@ -94,10 +103,10 @@ func (s *Session) Run(ctx context.Context) error {
 	_ = s.pty.Close() // Unblocks pumpPTYToWS blocked on PTY read.
 	_ = s.ws.Close()  // Unblocks pumpWSToPTY blocked on NextReader.
 
-	// Drain both pump goroutines so Run's contract is "all spawned goroutines
+	// Drain the pump goroutines so Run's contract is "all spawned goroutines
 	// have exited" by the time it returns.
 drainLoop:
-	for range 2 {
+	for range pumps {
 		select {
 		case <-pumpErr:
 		case <-time.After(s.cfg.GraceShutdown):
@@ -155,8 +164,20 @@ func (s *Session) pumpPTYToWS(ctx context.Context) error {
 
 // pumpWSToPTY reads frames from the WS. BinaryMessage bytes are written
 // directly to the PTY (stdin). TextMessage frames are decoded as control
-// envelopes; only "resize" is recognized today.
+// envelopes; only "resize" is recognized today. Reads fail, ending the
+// session, when no pong arrives within PongWait or a message exceeds
+// MaxMessageSize.
 func (s *Session) pumpWSToPTY(ctx context.Context) error {
+	s.ws.SetReadLimit(s.cfg.MaxMessageSize)
+
+	if err := s.ws.SetReadDeadline(time.Now().Add(s.cfg.PongWait)); err != nil {
+		return fmt.Errorf("ws read deadline: %w", err)
+	}
+
+	s.ws.SetPongHandler(func(string) error {
+		return s.ws.SetReadDeadline(time.Now().Add(s.cfg.PongWait))
+	})
+
 	for {
 		if ctx.Err() != nil {
 			return fmt.Errorf("ws pump ctx: %w", ctx.Err())
@@ -190,6 +211,25 @@ func (s *Session) pumpWSToPTY(ctx context.Context) error {
 			}
 		case websocket.CloseMessage:
 			return nil
+		}
+	}
+}
+
+// pumpPings pings the client every PingPeriod; each pong extends the read
+// deadline set in pumpWSToPTY. WriteControl may run concurrently with the
+// WriteMessage calls in pumpPTYToWS.
+func (s *Session) pumpPings(ctx context.Context) error {
+	ticker := time.NewTicker(s.cfg.PingPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("ping pump ctx: %w", ctx.Err())
+		case <-ticker.C:
+			if err := s.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(pingWriteWait)); err != nil {
+				return fmt.Errorf("ws ping: %w", err)
+			}
 		}
 	}
 }
