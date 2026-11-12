@@ -29,15 +29,18 @@ type Config struct {
 	GraceShutdown time.Duration
 
 	// PongWait is how long the session waits for the client's next pong
-	// before it treats the client as gone and ends. It frees the single
-	// session slot when a tab disappears without closing.
+	// before it treats the client as gone and ends. It is checked at each
+	// ping, so the session ends between PongWait and PongWait+PingPeriod
+	// after the last pong. It frees the single session slot when a tab
+	// disappears without closing.
 	PongWait time.Duration
 
 	// PingPeriod is how often the session pings the client. A pong may
 	// arrive up to PongWait-PingPeriod after its ping, so keep PingPeriod
 	// well below PongWait: a ping queues behind shell output already in
 	// the socket, which can take tens of seconds to drain on a slow mesh
-	// link.
+	// link. A ping waiting behind that output may take until the pong
+	// deadline to send.
 	PingPeriod time.Duration
 
 	// MaxMessageSize is the largest WebSocket message, in bytes, the

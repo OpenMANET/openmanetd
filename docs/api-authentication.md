@@ -201,7 +201,7 @@ client := gnssv1connect.NewGnssServiceClient(
 - Expired sessions are swept every 5 minutes by a background goroutine.
 - An open web terminal (`/api/terminal/ws`) ends when the session that opened
   it logs out, is evicted, or expires, and when the browser stops answering
-  WebSocket pings for 60 seconds.
+  WebSocket pings for about a minute.
 - Session storage is in-memory only — all sessions are lost on daemon
   restart. Callers that see a 401 after a restart should re-authenticate.
 

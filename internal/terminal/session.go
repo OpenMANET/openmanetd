@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/creack/pty"
@@ -16,8 +17,31 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// pingWriteWait bounds how long writing one ping frame may block.
-const pingWriteWait = 10 * time.Second
+// errPongTimeout ends a session whose client has not answered a ping
+// within PongWait.
+var errPongTimeout = errors.New("no pong within PongWait")
+
+// pongClock records when the client last answered a ping. Times are kept
+// as offsets from a monotonic start so a wall-clock step (NTP setting the
+// time on a router without an RTC) cannot expire a live session.
+type pongClock struct {
+	start time.Time
+	last  atomic.Int64 // time.Duration from start to the last pong
+}
+
+func newPongClock() *pongClock {
+	return &pongClock{start: time.Now()}
+}
+
+// pong records that a pong arrived now.
+func (c *pongClock) pong() {
+	c.last.Store(int64(time.Since(c.start)))
+}
+
+// expiry returns when the session ends if no further pong arrives.
+func (c *pongClock) expiry(pongWait time.Duration) time.Time {
+	return c.start.Add(time.Duration(c.last.Load()) + pongWait)
+}
 
 // resizeMsg is the JSON shape of the only currently supported control frame.
 // Forward-compatible: unknown "type" values are logged and ignored.
@@ -62,9 +86,10 @@ func NewSession(ctx context.Context, log zerolog.Logger, cfg Config, ws *websock
 // Run drives the PTY, WebSocket, and ping pumps and waits for the shell to
 // exit. It returns when (a) ctx is canceled, (b) one of the pumps errors,
 // including a client that stops answering pings within PongWait or sends a
-// message over MaxMessageSize, or (c) the shell exits on its own. In all cases it tears down: cancels the derived
-// context, closes the PTY, signals the shell's process group (SIGTERM
-// → SIGKILL after GraceShutdown), and waits for cmd.Wait() to complete.
+// message over MaxMessageSize, or (c) the shell exits on its own. In all
+// cases it tears down: cancels the derived context, closes the PTY, signals
+// the shell's process group (SIGTERM → SIGKILL after GraceShutdown), and
+// waits for cmd.Wait() to complete.
 //
 // Returns nil for clean shutdown (shell exited / ctx canceled); other
 // errors describe the cause (PTY read error, WS write error).
@@ -83,9 +108,19 @@ func (s *Session) Run(ctx context.Context) error {
 
 	pumpErr := make(chan error, pumps)
 
+	// The pong handler runs on the reader goroutine, so it is installed
+	// before that goroutine starts.
+	pongs := newPongClock()
+
+	s.ws.SetPongHandler(func(string) error {
+		pongs.pong()
+
+		return nil
+	})
+
 	go func() { pumpErr <- s.pumpPTYToWS(ctx) }()
 	go func() { pumpErr <- s.pumpWSToPTY(ctx) }()
-	go func() { pumpErr <- s.pumpPings(ctx) }()
+	go func() { pumpErr <- s.pumpPings(ctx, pongs) }()
 
 	var firstErr error
 	select {
@@ -164,19 +199,12 @@ func (s *Session) pumpPTYToWS(ctx context.Context) error {
 
 // pumpWSToPTY reads frames from the WS. BinaryMessage bytes are written
 // directly to the PTY (stdin). TextMessage frames are decoded as control
-// envelopes; only "resize" is recognized today. Reads fail, ending the
-// session, when no pong arrives within PongWait or a message exceeds
-// MaxMessageSize.
+// envelopes; only "resize" is recognized today. A message over
+// MaxMessageSize fails the read and ends the session. Pong expiry is
+// enforced by pumpPings, not by a read deadline here, because a PTY write
+// can block indefinitely when a raw-mode program stops reading stdin.
 func (s *Session) pumpWSToPTY(ctx context.Context) error {
 	s.ws.SetReadLimit(s.cfg.MaxMessageSize)
-
-	if err := s.ws.SetReadDeadline(time.Now().Add(s.cfg.PongWait)); err != nil {
-		return fmt.Errorf("ws read deadline: %w", err)
-	}
-
-	s.ws.SetPongHandler(func(string) error {
-		return s.ws.SetReadDeadline(time.Now().Add(s.cfg.PongWait))
-	})
 
 	for {
 		if ctx.Err() != nil {
@@ -215,10 +243,12 @@ func (s *Session) pumpWSToPTY(ctx context.Context) error {
 	}
 }
 
-// pumpPings pings the client every PingPeriod; each pong extends the read
-// deadline set in pumpWSToPTY. WriteControl may run concurrently with the
-// WriteMessage calls in pumpPTYToWS.
-func (s *Session) pumpPings(ctx context.Context) error {
+// pumpPings pings the client every PingPeriod and ends the session with
+// errPongTimeout once PongWait passes without a pong. WriteControl may run
+// concurrently with the WriteMessage calls in pumpPTYToWS; it waits for any
+// frame write in progress, so on a stalled link a ping may wait until the
+// pong deadline before it fails.
+func (s *Session) pumpPings(ctx context.Context, pongs *pongClock) error {
 	ticker := time.NewTicker(s.cfg.PingPeriod)
 	defer ticker.Stop()
 
@@ -227,7 +257,12 @@ func (s *Session) pumpPings(ctx context.Context) error {
 		case <-ctx.Done():
 			return fmt.Errorf("ping pump ctx: %w", ctx.Err())
 		case <-ticker.C:
-			if err := s.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(pingWriteWait)); err != nil {
+			expiry := pongs.expiry(s.cfg.PongWait)
+			if !time.Now().Before(expiry) {
+				return errPongTimeout
+			}
+
+			if err := s.ws.WriteControl(websocket.PingMessage, nil, expiry); err != nil {
 				return fmt.Errorf("ws ping: %w", err)
 			}
 		}
