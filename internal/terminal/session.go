@@ -80,7 +80,63 @@ func NewSession(ctx context.Context, log zerolog.Logger, cfg Config, ws *websock
 		return nil, fmt.Errorf("pty.Start: %w", err)
 	}
 
-	return &Session{log: log, cfg: cfg.withKeepaliveDefaults(), ws: ws, pty: ptmx, cmd: cmd}, nil
+	master, err := pollable(ptmx)
+	if err != nil {
+		_ = cmd.Process.Kill() // Best effort; the shell has no children yet.
+		_ = cmd.Wait()
+
+		return nil, fmt.Errorf("pty master: %w", err)
+	}
+
+	return &Session{log: log, cfg: cfg.withKeepaliveDefaults(), ws: ws, pty: master, cmd: cmd}, nil
+}
+
+// pollable returns a non-blocking duplicate of the PTY master that Go's
+// netpoller manages, and closes f. Closing the duplicate unblocks a pending
+// Read or Write. The descriptor pty.Start returns is in blocking mode, so a
+// Write stuck behind a raw-mode program that has stopped reading stdin
+// could outlive teardown, leaking its goroutine and the descriptor.
+//
+// The result must not reach anything that calls its Fd method, which puts
+// it back into blocking mode; resize goes through setWinsize instead of
+// pty.Setsize for that reason.
+func pollable(f *os.File) (*os.File, error) {
+	defer f.Close()
+
+	fd, err := unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("dup: %w", err)
+	}
+
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+
+		return nil, fmt.Errorf("set nonblock: %w", err)
+	}
+
+	return os.NewFile(uintptr(fd), f.Name()), nil
+}
+
+// setWinsize sets the PTY window size without calling f.Fd.
+func setWinsize(f *os.File, cols, rows uint16) error {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("syscall conn: %w", err)
+	}
+
+	var ioctlErr error
+
+	if err := rc.Control(func(fd uintptr) {
+		ioctlErr = unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Row: rows, Col: cols})
+	}); err != nil {
+		return fmt.Errorf("syscall control: %w", err)
+	}
+
+	if ioctlErr != nil {
+		return fmt.Errorf("TIOCSWINSZ: %w", ioctlErr)
+	}
+
+	return nil
 }
 
 // Run drives the PTY, WebSocket, and ping pumps and waits for the shell to
@@ -135,7 +191,7 @@ func (s *Session) Run(ctx context.Context) error {
 
 	cancel()
 
-	_ = s.pty.Close() // Unblocks pumpPTYToWS blocked on PTY read.
+	_ = s.pty.Close() // Unblocks pumpPTYToWS's PTY read and pumpWSToPTY's PTY write.
 	_ = s.ws.Close()  // Unblocks pumpWSToPTY blocked on NextReader.
 
 	// Drain the pump goroutines so Run's contract is "all spawned goroutines
@@ -231,8 +287,8 @@ func (s *Session) pumpWSToPTY(ctx context.Context) error {
 
 			switch msg.Type {
 			case "resize":
-				if err := pty.Setsize(s.pty, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
-					s.log.Debug().Err(err).Msg("terminal: pty.Setsize failed")
+				if err := setWinsize(s.pty, msg.Cols, msg.Rows); err != nil {
+					s.log.Debug().Err(err).Msg("terminal: setWinsize failed")
 				}
 			default:
 				s.log.Debug().Str("type", msg.Type).Msg("terminal: unknown control type")

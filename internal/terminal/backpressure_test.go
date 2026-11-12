@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +29,13 @@ func shellScript(t *testing.T, body string) string {
 	return path
 }
 
+// goroutineRunning reports whether any goroutine's stack includes fn.
+func goroutineRunning(fn string) bool {
+	buf := make([]byte, 1<<20)
+
+	return strings.Contains(string(buf[:runtime.Stack(buf, true)]), fn)
+}
+
 // readUntil reads messages from c until their concatenation contains want.
 func readUntil(t *testing.T, c *websocket.Conn, want string) {
 	t.Helper()
@@ -47,7 +55,8 @@ func readUntil(t *testing.T, c *websocket.Conn, want string) {
 
 // TestManager_closesSessionWhenPongsStopDuringStalledInput covers a client
 // that vanishes while its input is blocked on a raw-mode program that has
-// stopped reading stdin. The pong deadline must still end the session.
+// stopped reading stdin. The pong deadline must still end the session, and
+// teardown must release the goroutine blocked writing that input.
 func TestManager_closesSessionWhenPongsStopDuringStalledInput(t *testing.T) {
 	cfg := keepaliveConfig()
 	cfg.Shell = shellScript(t, "stty raw -echo\nprintf ready\nexec sleep 30")
@@ -67,7 +76,10 @@ func TestManager_closesSessionWhenPongsStopDuringStalledInput(t *testing.T) {
 	}
 
 	// The client stops reading, so it never answers another ping.
-	assert.Eventually(t, func() bool { return !mgr.InUse() }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return !mgr.InUse() }, 5*time.Second, 20*time.Millisecond)
+
+	assert.Eventually(t, func() bool { return !goroutineRunning("terminal.(*Session).pumpWSToPTY") },
+		3*time.Second, 20*time.Millisecond, "PTY input pump still blocked after teardown")
 }
 
 // TestManager_keepsSessionWhilePingWaitsBehindBlockedOutput covers a live
