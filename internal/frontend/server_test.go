@@ -565,3 +565,28 @@ func TestHandler_ProxyRoutesRegistered(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "/foo.v1.Service/Method", capture.path.Load())
 }
+
+func TestHandler_WebSocketOriginPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		origin     string
+		wantStatus int
+	}{
+		{name: "untrusted origin", origin: "https://example.com", wantStatus: http.StatusForbidden},
+		{name: "null origin", origin: "null", wantStatus: http.StatusForbidden},
+		{name: "lan origin", origin: "http://192.168.1.20:8081", wantStatus: http.StatusSwitchingProtocols},
+		{name: "no origin", origin: "", wantStatus: http.StatusSwitchingProtocols},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(newTestServer().handler())
+			t.Cleanup(ts.Close)
+
+			_, resp, _ := dialWS(t, "ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", tt.origin)
+
+			require.NotNil(t, resp)
+			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+		})
+	}
+}

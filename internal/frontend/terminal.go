@@ -1,7 +1,10 @@
 package frontend
 
 import (
+	"context"
 	"net/http"
+
+	"github.com/openmanet/openmanetd/internal/auth"
 )
 
 // handleTerminalWS upgrades the request to a WebSocket and hands it to the
@@ -10,8 +13,9 @@ import (
 //
 // Authentication is enforced by NewFrontendAuthMiddleware before this
 // handler is reached: any /api/* path requires a valid session when auth
-// is enabled. After the upgrade, the WS lifetime is the session lifetime;
-// no further auth checks are performed.
+// is enabled. The terminal then runs under auth.WithSessionLifetime, so it
+// ends when that session logs out, is evicted, or expires. The terminal
+// package also ends sessions whose client stops answering pings.
 func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	if s.term == nil {
 		http.NotFound(w, r)
@@ -27,5 +31,14 @@ func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	_ = s.term.Run(r.Context(), conn)
+	ctx := r.Context()
+
+	if sess := auth.SessionFromContext(ctx); sess != nil {
+		var cancel context.CancelFunc
+
+		ctx, cancel = auth.WithSessionLifetime(ctx, sess)
+		defer cancel()
+	}
+
+	_ = s.term.Run(ctx, conn)
 }

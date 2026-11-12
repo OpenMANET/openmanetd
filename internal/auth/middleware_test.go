@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/openmanet/openmanetd/internal/auth"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAPIAuthMiddleware_Disabled(t *testing.T) {
@@ -353,4 +355,36 @@ func TestAPIAuthMiddleware_MeshJoinRequiresSession(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, rr.Code)
 		})
 	}
+}
+
+func TestAuthMiddleware_putsSessionInContext(t *testing.T) {
+	middlewares := map[string]func(*auth.SessionStore, bool) func(http.Handler) http.Handler{
+		"api":      auth.NewAPIAuthMiddleware,
+		"frontend": auth.NewFrontendAuthMiddleware,
+	}
+
+	for name, newMW := range middlewares {
+		t.Run(name, func(t *testing.T) {
+			store := auth.NewSessionStore(time.Hour, 16)
+			token := store.Create("alice")
+
+			var got *auth.Session
+
+			handler := newMW(store, true)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				got = auth.SessionFromContext(r.Context())
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/system/info", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			require.NotNil(t, got)
+			assert.Equal(t, token, got.Token)
+			assert.Equal(t, "alice", got.Username)
+		})
+	}
+}
+
+func TestSessionFromContext_noSession(t *testing.T) {
+	assert.Nil(t, auth.SessionFromContext(context.Background()))
 }

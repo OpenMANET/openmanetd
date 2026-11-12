@@ -27,6 +27,25 @@ type Config struct {
 	// torn down. Two seconds is enough for ash/bash to flush; longer
 	// risks blocking the operator's tab close.
 	GraceShutdown time.Duration
+
+	// PongWait is how long the session waits for the client's next pong
+	// before it treats the client as gone and ends. It is checked at each
+	// ping, so the session ends between PongWait and PongWait+PingPeriod
+	// after the last pong. It frees the single session slot when a tab
+	// disappears without closing.
+	PongWait time.Duration
+
+	// PingPeriod is how often the session pings the client. A pong may
+	// arrive up to PongWait-PingPeriod after its ping, so keep PingPeriod
+	// well below PongWait: a ping queues behind shell output already in
+	// the socket, which can take tens of seconds to drain on a slow mesh
+	// link. A ping waiting behind that output may take until the pong
+	// deadline to send.
+	PingPeriod time.Duration
+
+	// MaxMessageSize is the largest WebSocket message, in bytes, the
+	// session accepts from the client. A larger message ends the session.
+	MaxMessageSize int64
 }
 
 // DefaultConfig returns a Config wired for OpenWrt + BusyBox.
@@ -39,6 +58,35 @@ func DefaultConfig() Config {
 			"HOME=/root",
 			"LANG=C.UTF-8",
 		},
-		GraceShutdown: 2 * time.Second,
+		GraceShutdown:  2 * time.Second,
+		PongWait:       defaultPongWait,
+		PingPeriod:     defaultPongWait / 3,
+		MaxMessageSize: 64 * 1024,
 	}
+}
+
+// defaultPongWait matches the audio WebSocket's keepalive
+// (internal/websocket/client.go). The terminal pings three times per
+// PongWait rather than once, so a pong may be 40s late.
+const defaultPongWait = 60 * time.Second
+
+// withKeepaliveDefaults returns c with any non-positive keepalive field
+// replaced by its DefaultConfig value. A zero PongWait would time out every
+// read at once and a zero PingPeriod would panic the ping ticker.
+func (c Config) withKeepaliveDefaults() Config {
+	def := DefaultConfig()
+
+	if c.PongWait <= 0 {
+		c.PongWait = def.PongWait
+	}
+
+	if c.PingPeriod <= 0 {
+		c.PingPeriod = def.PingPeriod
+	}
+
+	if c.MaxMessageSize <= 0 {
+		c.MaxMessageSize = def.MaxMessageSize
+	}
+
+	return c
 }

@@ -11,9 +11,38 @@ import (
 // Session holds the state for an authenticated user session.
 type Session struct {
 	CreatedAt  time.Time
+	ExpiresAt  time.Time
 	LastAccess time.Time
+	done       chan struct{} // closed when the session leaves its store
 	Token      string
 	Username   string
+}
+
+// Done returns a channel that is closed when the session is removed from its
+// store: on logout, on eviction, or when the store finds it expired. A
+// session that has passed ExpiresAt but has not yet been removed is not
+// closed; use WithSessionLifetime to also stop at expiry.
+func (s *Session) Done() <-chan struct{} {
+	return s.done
+}
+
+// WithSessionLifetime returns a copy of parent that is canceled when the
+// session ends (Done), when it reaches ExpiresAt, or when the returned cancel
+// function is called. Connections authenticated once, such as a WebSocket at
+// upgrade, run under it so they do not outlive the session. Callers must call
+// cancel to release the watcher goroutine.
+func WithSessionLifetime(parent context.Context, sess *Session) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithDeadline(parent, sess.ExpiresAt)
+
+	go func() {
+		select {
+		case <-sess.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return ctx, cancel
 }
 
 // SessionStore is a thread-safe in-memory store for active sessions.
@@ -53,7 +82,9 @@ func (s *SessionStore) Create(username string) string {
 		Token:      token,
 		Username:   username,
 		CreatedAt:  now,
+		ExpiresAt:  now.Add(s.maxAge),
 		LastAccess: now,
+		done:       make(chan struct{}),
 	}
 
 	return token
@@ -70,8 +101,8 @@ func (s *SessionStore) Validate(token string) (*Session, bool) {
 		return nil, false
 	}
 
-	if time.Since(sess.CreatedAt) > s.maxAge {
-		delete(s.sessions, token)
+	if time.Now().After(sess.ExpiresAt) {
+		s.removeLocked(token)
 
 		return nil, false
 	}
@@ -86,7 +117,7 @@ func (s *SessionStore) Delete(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.sessions, token)
+	s.removeLocked(token)
 }
 
 // Cleanup removes all expired sessions. It is intended to be called
@@ -96,10 +127,17 @@ func (s *SessionStore) Cleanup() {
 	defer s.mu.Unlock()
 
 	now := time.Now()
+
+	var expired []string
+
 	for token, sess := range s.sessions {
-		if now.Sub(sess.CreatedAt) > s.maxAge {
-			delete(s.sessions, token)
+		if now.After(sess.ExpiresAt) {
+			expired = append(expired, token)
 		}
+	}
+
+	for _, token := range expired {
+		s.removeLocked(token)
 	}
 }
 
@@ -137,8 +175,20 @@ func (s *SessionStore) evictOldestLocked() {
 	}
 
 	if oldestToken != "" {
-		delete(s.sessions, oldestToken)
+		s.removeLocked(oldestToken)
 	}
+}
+
+// removeLocked deletes the session for token, if any, and closes its Done
+// channel. The caller must hold s.mu (write lock).
+func (s *SessionStore) removeLocked(token string) {
+	sess, ok := s.sessions[token]
+	if !ok {
+		return
+	}
+
+	delete(s.sessions, token)
+	close(sess.done)
 }
 
 // generateToken returns a 64-character hex-encoded cryptographically random token.
