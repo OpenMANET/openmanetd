@@ -999,6 +999,48 @@ func TestCompat_RouterFirewallEth_Wan6Created(t *testing.T) {
 		"wan6.proto must be dhcpv6")
 }
 
+// A router/firewall gate must retain wan as its sole active ahwlan forwarding
+// destination when setup is applied repeatedly. The legacy LuCI shared Batman
+// helper used to append an unrelated ahwlan→lan forwarding after the scenario
+// had correctly selected wan.
+func TestCompat_RouterFirewallEth_RerunKeepsWanForwarding(t *testing.T) {
+	cfg := setupBLOSTestConfig(t, "setup:\n  enabled: true\n")
+	svc, _ := newFullSetupService(t, cfg)
+	profile := gateRouterFirewallEthProfile()
+
+	require.NoError(t, svc.ApplySetupForTest(context.Background(), profile, &streamCollector{}))
+	// The production wizard requires an explicit factory/reset action before a
+	// second apply. Re-open only that gate so this test exercises the same UCI
+	// tree on the second run rather than creating a fresh fixture.
+	require.NoError(t, cfg.PersistSetupAndAuth(false, true))
+	// Main also records LuCI wizard ownership; setup-reset clears this gate
+	// before allowing another apply against the existing network state.
+	require.NoError(t, svc.UCI.SetType("luci", "wizard", "used", uci.TypeOption, "0"))
+	require.NoError(t, svc.ApplySetupForTest(context.Background(), profile, &streamCollector{}))
+
+	reader, ok := svc.UCI.(*fakeConfigReader)
+	require.True(t, ok, "fakeConfigReader expected on UCI field")
+
+	tr := &uciTree{reader: reader}
+
+	var activeDestinations []string
+
+	for _, section := range tr.sectionsOfType("firewall", "forwarding") {
+		if tr.getOne("firewall", section, "src") != "ahwlan" ||
+			tr.getOne("firewall", section, "enabled") == "0" {
+			continue
+		}
+
+		activeDestinations = append(activeDestinations,
+			tr.getOne("firewall", section, "dest"))
+	}
+
+	assert.Equal(t, []string{"wan"}, activeDestinations,
+		"router/firewall reruns must leave wan as the sole active ahwlan forwarding destination")
+	assert.Equal(t, "dhcp", tr.getOne("network", "wan", "proto"),
+		"router/firewall reruns must retain wan as the DHCP uplink")
+}
+
 // D2 (wizard-parity ledger, 2026-08-27): the router_firewall scenario
 // keeps the factory wan zone policy — input REJECT / output ACCEPT /
 // forward REJECT — and re-applies masq + mtu_fix on it as the

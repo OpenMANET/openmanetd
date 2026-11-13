@@ -3,6 +3,9 @@ package handlers_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
+
+	"github.com/digineo/go-uci/v2"
 	"net"
 	"sync"
 	"testing"
@@ -417,4 +420,18 @@ func newTestDB(t *testing.T) *models.Queries {
 	}
 
 	return models.New(db)
+}
+
+// diskWirelessReader mirrors the production reader's cache refresh on a real
+// temporary UCI tree, allowing RPC tests to exercise whole-file persistence.
+type diskWirelessReader struct{ uci.Tree }
+
+func (r *diskWirelessReader) ReloadConfig() error {
+	if err := r.LoadConfig("wireless", true); err != nil {
+		return fmt.Errorf("reload wireless fixture: %w", err)
+	}
+
+	r.Revert("network")
+
+	return nil
 }

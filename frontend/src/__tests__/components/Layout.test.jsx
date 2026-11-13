@@ -78,6 +78,76 @@ describe('TestLayoutMobile', () => {
   });
 });
 
+describe('TestLayoutNavIcons', () => {
+  function iconsIn(container, selector) {
+    return Array.from(container.querySelectorAll(`${selector} svg[data-icon]`)).map((el) =>
+      el.getAttribute('data-icon')
+    );
+  }
+
+  it('gives every sidebar nav item its own icon', () => {
+    const { container } = renderLayout(1024);
+    expect(iconsIn(container, '.sidebar-nav')).toEqual([
+      'dashboard',
+      'comms',
+      'topology',
+      'gps',
+      'blos',
+      'settings',
+    ]);
+  });
+
+  it('keeps sidebar icons visible when the sidebar is collapsed', () => {
+    // Collapsing hides the labels, so the icon is the only remaining cue and
+    // must survive the collapse.
+    const { container } = renderLayout(1024);
+    fireEvent.click(container.querySelector('.sidebar-toggle'));
+    expect(container.querySelector('.sidebar').classList.contains('collapsed')).toBe(true);
+    expect(container.querySelectorAll('.sidebar-nav .nav-label').length).toBe(0);
+    expect(iconsIn(container, '.sidebar-nav')).toEqual([
+      'dashboard',
+      'comms',
+      'topology',
+      'gps',
+      'blos',
+      'settings',
+    ]);
+  });
+
+  it('gives every bottom tab its own icon', () => {
+    const { container } = renderLayout(500);
+    expect(iconsIn(container, '.bottom-tab-bar')).toEqual([
+      'dashboard',
+      'comms',
+      'topology',
+      'gps',
+      'more',
+    ]);
+  });
+
+  it('gives every overflow sheet row its own icon', () => {
+    const { container } = renderLayout(500);
+    fireEvent.click(screen.getByText('More').closest('button'));
+    expect(iconsIn(container, '.tab-sheet')).toEqual(['blos', 'settings', 'signout']);
+  });
+
+  it('leaves no icon slot empty in either shell', () => {
+    // The sidebar shipped with an empty `<span className="nav-icon" />` for
+    // every route; this pins that regression.
+    const desktop = renderLayout(1024);
+    for (const slot of desktop.container.querySelectorAll('.nav-icon, .tab-icon')) {
+      expect(slot.querySelector('svg[data-icon]')).toBeTruthy();
+    }
+    cleanup();
+
+    const mobile = renderLayout(500);
+    fireEvent.click(screen.getByText('More').closest('button'));
+    for (const slot of mobile.container.querySelectorAll('.nav-icon, .tab-icon')) {
+      expect(slot.querySelector('svg[data-icon]')).toBeTruthy();
+    }
+  });
+});
+
 describe('TestLayoutSidebarCollapse', () => {
   it('collapses and expands sidebar', () => {
     const { container } = renderLayout(1024);

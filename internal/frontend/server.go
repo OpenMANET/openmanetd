@@ -33,8 +33,11 @@ const (
 var upgrader = websocket.Upgrader{ //nolint:gochecknoglobals
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
+	// Upgrades from untrusted origins fail with 403. Browsers apply no CORS
+	// to WebSockets, so this is the only cross-site barrier for /ws and the
+	// terminal.
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		return auth.IsTrustedOrigin(r.Header.Get("Origin"), r)
 	},
 }
 

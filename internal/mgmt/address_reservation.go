@@ -17,9 +17,12 @@ import (
 )
 
 type AddressReservationWorker struct {
-	Config *ManagementConfig
-	Client *alfred.Client
-	done   <-chan struct{}
+	Config             *ManagementConfig
+	Client             *alfred.Client
+	uciOpenMANETConfig network.OpenMANETConfigReader
+	uciDHCPConfig      network.DHCPConfigReader
+	uciNetworkConfig   network.ConfigReader
+	done               <-chan struct{}
 
 	reserveInterval time.Duration
 }
@@ -42,9 +45,12 @@ func NewAddressReservationWorker(config *ManagementConfig, client *alfred.Client
 	config.Log.Info().Msg("AddressReservationWorker initialized")
 
 	return &AddressReservationWorker{
-		Config: config,
-		Client: client,
-		done:   ctx.Done(),
+		Config:             config,
+		Client:             client,
+		uciOpenMANETConfig: network.NewUCIOpenMANETConfigReader(),
+		uciDHCPConfig:      network.NewUCIDHCPConfigReader(),
+		uciNetworkConfig:   network.NewUCINetworkConfigReader(),
+		done:               ctx.Done(),
 
 		reserveInterval: config.addressReservationWorkerReserveInterval,
 	}
@@ -54,9 +60,9 @@ func NewAddressReservationWorker(config *ManagementConfig, client *alfred.Client
 // and the reboot command.
 func (arw *AddressReservationWorker) productionDeps() reservationDeps {
 	return reservationDeps{
-		openMANETReader: arw.Config.uciOpenMANETConfig,
-		networkReader:   arw.Config.uciNetworkConfig,
-		dhcpReader:      arw.Config.uciDHCPConfig,
+		openMANETReader: arw.uciOpenMANETConfig,
+		networkReader:   arw.uciNetworkConfig,
+		dhcpReader:      arw.uciDHCPConfig,
 		client:          arw.Client,
 		getIface:        network.GetInterfaceByName,
 		getMeshConfig:   batmanadv.GetMeshConfig,
@@ -72,18 +78,50 @@ func (arw *AddressReservationWorker) ReserveAddressIfNeeded(ctx context.Context)
 	ticker := time.NewTicker(arw.reserveInterval)
 	defer ticker.Stop()
 
-	deps := arw.productionDeps()
+	arw.runReservationTicks(ctx, ticker.C, arw.productionDeps())
+}
 
+// runReservationTicks accepts clock events separately from I/O so tests can
+// exercise the production loop without wall-clock waits or real hardware.
+func (arw *AddressReservationWorker) runReservationTicks(ctx context.Context, ticks <-chan time.Time, deps reservationDeps) {
 	for {
 		select {
 		case <-arw.done:
 			return
-		case <-ticker.C:
+		case <-ticks:
+			// The LuCI wizard can rewrite these configs while the daemon stays
+			// up. Refresh the worker's private readers before checking the flag
+			// or committing changes against the new network and DHCP state.
+			if err := arw.reloadUCIConfigs(); err != nil {
+				arw.Config.Log.Error().Err(err).Msg("Error reloading UCI config for address reservation")
+
+				continue
+			}
+
 			if err := arw.reserveOnceWithDeps(ctx, deps); err != nil {
 				arw.Config.Log.Error().Err(err).Msg("Error in address reservation tick")
 			}
 		}
 	}
+}
+
+func (arw *AddressReservationWorker) reloadUCIConfigs() error {
+	readers := []struct {
+		reload func() error
+		name   string
+	}{
+		{name: "openmanetd", reload: arw.uciOpenMANETConfig.ReloadConfig},
+		{name: "network", reload: arw.uciNetworkConfig.ReloadConfig},
+		{name: "dhcp", reload: arw.uciDHCPConfig.ReloadConfig},
+	}
+
+	for _, reader := range readers {
+		if err := reader.reload(); err != nil {
+			return fmt.Errorf("reload %s: %w", reader.name, err)
+		}
+	}
+
+	return nil
 }
 
 // reserveOnceWithDeps runs a single reservation tick. Each tick starts from

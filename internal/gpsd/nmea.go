@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-
-	"github.com/openmanet/openmanetd/internal/network"
 )
 
 // ToNMEA converts the current position to NMEA GGA format
@@ -122,7 +120,7 @@ func calculateNMEAChecksum(sentence string) byte {
 // sendRawNMEAToActiveDevices sends a raw NMEA sentence to all active DHCP lease devices.
 func (g *GPSService) sendRawNMEAToActiveDevices(sentence string) {
 	// Get current DHCP leases
-	leases, err := network.GetCurrentDHCPLeases()
+	leases, err := g.getDHCPLeases()
 	if err != nil {
 		g.Log.Debug().Err(err).Msg("Failed to get DHCP leases for NMEA distribution")
 

@@ -31,7 +31,7 @@ const (
 // Lines are requested as inputs with pull-up bias and both-edge events.
 // The switch common is tied to GND, so the selected position reads LOW
 // (active) and every other position reads HIGH (inactive).
-var SelectorPins = [5]int{17, 27, 22, 24, 10} //nolint:gochecknoglobals // hardware constant table
+var SelectorPins = [5]int{10, 27, 22, 24, 17} //nolint:gochecknoglobals // hardware constant table
 
 // lineGroup is the consumer-side view of the requested lines.
 type lineGroup interface {

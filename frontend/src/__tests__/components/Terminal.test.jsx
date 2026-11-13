@@ -91,6 +91,49 @@ describe('Terminal component', () => {
     expect(disposeMock).toHaveBeenCalled();
   });
 
+  // Mirrors the server's terminal MaxMessageSize (internal/terminal/config.go);
+  // a larger message closes the connection and ends the shell.
+  const SERVER_MAX_MESSAGE_BYTES = 64 * 1024;
+
+  function typeIntoOpenTerminal(text) {
+    render(<Terminal wsUrl="ws://example/test" />);
+    const ws = socketInstances[0];
+    ws.readyState = MockWebSocket.OPEN;
+    const onData = onDataMock.mock.calls[0][0];
+    onData(text);
+    return ws.send.mock.calls.map(([payload]) => payload);
+  }
+
+  it('sends typed input as one binary message', () => {
+    const sent = typeIntoOpenTerminal('ls\n');
+    expect(sent).toHaveLength(1);
+    expect(Array.from(sent[0])).toEqual(Array.from(new TextEncoder().encode('ls\n')));
+  });
+
+  it('splits a large paste into messages within the server limit', () => {
+    // Multi-byte characters make the UTF-8 size exceed the string length.
+    const paste = 'é€'.repeat(20 * 1024) + 'tail';
+    const expected = new TextEncoder().encode(paste);
+    expect(expected.length).toBeGreaterThan(SERVER_MAX_MESSAGE_BYTES);
+
+    const sent = typeIntoOpenTerminal(paste);
+
+    expect(sent.length).toBeGreaterThan(1);
+    for (const chunk of sent) {
+      // jsdom's TextEncoder returns another realm's Uint8Array.
+      expect(ArrayBuffer.isView(chunk)).toBe(true);
+      expect(chunk.length).toBeLessThanOrEqual(SERVER_MAX_MESSAGE_BYTES);
+    }
+    const joined = new Uint8Array(expected.length);
+    let offset = 0;
+    for (const chunk of sent) {
+      joined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    expect(offset).toBe(expected.length);
+    expect(joined.every((b, i) => b === expected[i])).toBe(true);
+  });
+
   it('invokes onClose with the close event', () => {
     const onClose = vi.fn();
     render(<Terminal wsUrl="ws://example/test" onClose={onClose} />);

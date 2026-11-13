@@ -18,9 +18,10 @@ Create a new ConnectRPC API service for OpenMANETd following established pattern
 1. **Create proto definition** in `proto/openmanet/<service>/v1/`:
    - `<service>_service.proto` with service and RPC definitions
    - `<service>.proto` for shared message types
-   - Follow naming conventions from `.claude/rules/api-design.md` (Get/List/Set/Update/Execute/Stream verbs)
+   - Follow naming and layout conventions from `.claude/rules/proto.md` (Get/List/Set/Update/Execute/Send/Stream verbs)
    - Use `buf.validate` annotations for field validation
    - Use `google.protobuf.Empty` for RPCs with no meaningful request/response
+   - `make proto-lint` must be clean
 
 2. **Generate code**: Run `make buf` to generate Go stubs in `internal/api/` and JS clients in `frontend/src/gen/`
 
@@ -44,4 +45,4 @@ Create a new ConnectRPC API service for OpenMANETd following established pattern
    - Add integration test cases in `integration_test.go`
    - Add proto validation tests if using `buf.validate` annotations
 
-7. **Verify**: Run `make test` and `make lint-go` to confirm everything compiles and passes
+7. **Verify**: `make test`, `make integration-test`, and `make lint-go` pass; then run the `gap-review` skill and commit per the `commit` skill (generated `internal/api/` and `frontend/src/gen/` go in with the proto)

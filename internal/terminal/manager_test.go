@@ -174,3 +174,154 @@ func TestManager_NoLeakOnConcurrentDial(t *testing.T) {
 	// Exactly one wins; the rest are rejected.
 	assert.Equal(t, n-1, len(rejected))
 }
+
+// keepaliveConfig returns a /bin/sh config with keepalive timings short
+// enough for tests.
+func keepaliveConfig() terminal.Config {
+	cfg := terminal.DefaultConfig()
+	cfg.Shell = "/bin/sh"
+	cfg.GraceShutdown = 200 * time.Millisecond
+	cfg.PongWait = 300 * time.Millisecond
+	cfg.PingPeriod = 100 * time.Millisecond
+
+	return cfg
+}
+
+func TestManager_closesSessionWhenPongsStop(t *testing.T) {
+	mgr := terminal.New(zerolog.Nop(), keepaliveConfig())
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	// The client never reads, so it never answers the server's pings.
+	assert.Eventually(t, func() bool { return !mgr.InUse() }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestManager_keepsSessionThatAnswersPings(t *testing.T) {
+	cfg := keepaliveConfig()
+	mgr := terminal.New(zerolog.Nop(), cfg)
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+
+	// Reading lets gorilla's default ping handler answer each ping.
+	readerDone := make(chan struct{})
+
+	go func() {
+		defer close(readerDone)
+
+		for {
+			if _, _, rerr := c.ReadMessage(); rerr != nil {
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = c.Close()
+
+		<-readerDone
+	})
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	assert.Never(t, func() bool { return !mgr.InUse() }, 4*cfg.PongWait, 20*time.Millisecond)
+}
+
+func TestManager_closesSessionOnOversizedMessage(t *testing.T) {
+	cfg := terminal.DefaultConfig()
+	cfg.Shell = "/bin/sh"
+	cfg.GraceShutdown = 200 * time.Millisecond
+	cfg.MaxMessageSize = 1024
+	mgr := terminal.New(zerolog.Nop(), cfg)
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, c.WriteMessage(websocket.BinaryMessage, []byte(strings.Repeat("a", 4096))))
+
+	assert.Eventually(t, func() bool { return !mgr.InUse() }, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestManager_zeroKeepaliveFieldsUseDefaults(t *testing.T) {
+	cfg := terminal.DefaultConfig()
+	cfg.Shell = "/bin/sh"
+	cfg.PongWait = 0
+	cfg.PingPeriod = 0
+	cfg.MaxMessageSize = 0
+	mgr := terminal.New(zerolog.Nop(), cfg)
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	assert.Never(t, func() bool { return !mgr.InUse() }, 300*time.Millisecond, 20*time.Millisecond)
+}
+
+// TestManager_defaultKeepaliveToleratesDelayedPongs runs the default ping
+// and pong timings scaled down 100x against a client whose pongs arrive a
+// third of PongWait late, as when a ping waits behind queued shell output on
+// a slow mesh link. The session must stay open.
+func TestManager_defaultKeepaliveToleratesDelayedPongs(t *testing.T) {
+	const scale = 100
+
+	def := terminal.DefaultConfig()
+	cfg := keepaliveConfig()
+	cfg.PongWait = def.PongWait / scale
+	cfg.PingPeriod = def.PingPeriod / scale
+	pongDelay := cfg.PongWait / 3
+
+	mgr := terminal.New(zerolog.Nop(), cfg)
+
+	srv := newManagerTestServer(t, mgr)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	require.NoError(t, err)
+
+	var pongs sync.WaitGroup
+
+	c.SetPingHandler(func(data string) error {
+		pongs.Add(1)
+		time.AfterFunc(pongDelay, func() {
+			defer pongs.Done()
+
+			_ = c.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
+		})
+
+		return nil
+	})
+
+	readerDone := make(chan struct{})
+
+	go func() {
+		defer close(readerDone)
+
+		for {
+			if _, _, rerr := c.ReadMessage(); rerr != nil {
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = c.Close()
+
+		<-readerDone
+		pongs.Wait()
+	})
+	require.Eventually(t, mgr.InUse, time.Second, 10*time.Millisecond)
+
+	assert.Never(t, func() bool { return !mgr.InUse() }, 4*cfg.PongWait, 20*time.Millisecond)
+}

@@ -237,10 +237,10 @@ func Start(staticFS fs.FS) {
 	interfaceProvider := &network.NetlinkInterfaceProvider{}
 
 	// Setup wizard wiring: shared UCI reader (production wraps the
-	// default go-uci tree, so all six wizard configs are addressed
+	// default go-uci tree, so all nine wizard configs are addressed
 	// through one reader). The snapshotter captures the raw file
 	// contents of /etc/config/{wireless,network,dhcp,firewall,system,
-	// mesh11sd} before phase 3 runs and restores them atomically on
+	// mesh11sd,umdns,openmanetd,luci} before phase 3 runs and restores them atomically on
 	// any failure between phases 3 and 12. The post-bricking
 	// restructure makes this load-bearing: without it, a phase-12
 	// commit failure leaves the device with a half-applied wizard

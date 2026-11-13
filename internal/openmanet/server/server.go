@@ -330,10 +330,12 @@ func (s *APIServer) Stop(ctx context.Context) error {
 
 func withCORS(handler http.Handler) http.Handler {
 	c := cors.New(cors.Options{
-		// AllowOriginFunc reflects the request origin rather than using a wildcard
-		// so that AllowCredentials: true is compatible with the CORS spec. This is
-		// safe for a private-network device where all LAN clients are trusted.
-		AllowOriginFunc:  func(_ string) bool { return true },
+		// Reflect only trusted LAN origins (auth.IsTrustedOrigin) rather than
+		// a wildcard, so AllowCredentials: true stays valid under the CORS spec
+		// and pages from other sites get no CORS grant.
+		AllowOriginVaryRequestFunc: func(r *http.Request, origin string) (bool, []string) {
+			return auth.IsTrustedOrigin(origin, r), nil
+		},
 		AllowedMethods:   connectcors.AllowedMethods(),
 		AllowedHeaders:   append(connectcors.AllowedHeaders(), "Access-Control-Request-Private-Network"),
 		ExposedHeaders:   connectcors.ExposedHeaders(),
@@ -348,8 +350,9 @@ func withCORS(handler http.Handler) http.Handler {
 		// 1. Handle the Vary header for caching safety
 		w.Header().Add("Vary", "Access-Control-Request-Private-Network")
 
-		// 2. If it's a PNA preflight request, allow it
-		if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+		// 2. Grant Private Network Access preflights only to trusted origins
+		if r.Header.Get("Access-Control-Request-Private-Network") == "true" &&
+			auth.IsTrustedOrigin(r.Header.Get("Origin"), r) {
 			w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		}
 

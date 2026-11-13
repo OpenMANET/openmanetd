@@ -15,10 +15,13 @@
 | Format Go code | `make fmt` |
 | Lint Go with auto-fix | `make lint-go` |
 | Lint React & Go | `make lint` |
+| Format + lint protos | `make proto-lint` |
 | Generate protobuf code | `make buf` |
 | Generate sqlc database code | `make sqlc-gen` |
 
 `make build` runs fmt → vet → buf → sqlc-gen → frontend → compile in sequence.
+
+Frontend-only binary (no local database or hardware): `./bin/openmanetd frontend --api-address http://<remote-host>:8087`.
 
 ## Architecture
 
@@ -31,9 +34,10 @@ internal/api/                     AUTO-GENERATED protobuf + ConnectRPC Go stubs 
 internal/frontend/                HTTP server: serves React SPA, proxies /api/* and /ws to port 8087
 internal/database/                SQLite: schema.sql + query.sql; models/ is generated
 internal/config/                  Viper-backed config (reads /etc/openmanetd/config.yml)
-internal/comms/                   Opus/RTP audio (portaudio, CGO required)
+internal/comms/                   Opus/RTP push-to-talk audio (malgo/miniaudio, CGO required)
 internal/blos/                    BLOS/Tailscale overlay
 internal/mgmt/                    Alfred mesh management + wireless config
+internal/instrumentation/         Periodic JSON runtime snapshot (field reference: docs/instrumentation-snapshot.md)
 proto/                            Git submodule — .proto source files
 frontend/                         React SPA (Vite); build output → static/
 frontend/src/gen/                 AUTO-GENERATED protobuf JS clients — DO NOT EDIT
@@ -42,70 +46,40 @@ static/                           Embedded build output (go:embed target in stat
 
 Ports: API + WebSocket = **8087**. Frontend server = **8081** (proxies `/api/*` and `/ws` → 8087).
 
-## Code Generation
+## Hard rules
 
-**Protobuf (`make buf`)**
-- Source: `proto/` git submodule — if empty: `git submodule update --init --recursive`
-- Config: `buf.yaml`, `buf.gen.yaml`
-- Go output: `internal/api/` — never edit
-- JS output: `frontend/src/gen/` — never edit
-
-**Database (`make sqlc-gen`)**
-- Edit: `internal/database/schema.sql` (schema) and `internal/database/query.sql` (queries)
-- Config: `sqlc.yaml`
-- Output: `internal/database/models/` — never edit
-
-## Adding a New API Service
-
-1. Add `.proto` file in `proto/openmanet/<service>/v1/`
-2. `make buf` — generates Go in `internal/api/` and JS in `frontend/src/gen/`
-3. Create `internal/openmanet/server/handlers/<service>.go`:
-   - Struct with `Log zerolog.Logger` + dependencies
-   - Implement generated `<Service>Handler` interface
-   - Return `connect.NewError(connect.CodeInternal, err)` for errors
-4. Register in `internal/openmanet/server/server.go` — add `api.Handle(...)` call
-5. Wire dependencies via `APIServer` struct in `server.go` and `internal/openmanet/openmanet.go`
-6. Write comprehensive unit and integration tests.  The test environment is not the same as production.  Mock tests where appropriate.
-7. All code should lint cleanly
-
-## Frontend Development
-
-**Vite hot-reload dev server:**
-```bash
-cd frontend && VITE_API_TARGET=http://<remote-host>:8081 pnpm run dev
-```
-
-Proxy rules (`frontend/vite.config.js`):
-- `/ws`, `/api`, `/whisper` → `VITE_API_TARGET` (default `http://localhost:8080`)
-- `/rpc` → `VITE_RPC_TARGET` (default `http://localhost:8087`), `/rpc` prefix stripped before forwarding
-
-**Frontend-only binary mode** (no local database/hardware):
-```bash
-./bin/openmanetd frontend --api-address http://<remote-host>:8087
-```
-
-**Linting:**
-Run `make lint-frontend` before committing frontend changes. The ESLint config at `frontend/eslint.config.js` covers all `.js`/`.jsx` files under `frontend/src/` (excluding `src/gen/`). To auto-fix fixable issues: `pnpm -C frontend run lint:fix`.
-
-## Gotchas
-
-- **CGO required** for full build (`go-sqlite3`, `malgo`/miniaudio, `go-alfred`). Use `make build-lite` to skip comms/whisper. The DevContainer has all required native libraries.
+- **Never edit generated code**: `internal/api/` and `frontend/src/gen/` (edit `proto/`, run `make buf`), `internal/database/models/` (edit `internal/database/schema.sql` / `query.sql`, run `make sqlc-gen`; config in `sqlc.yaml`). A hook denies these edits.
 - **`proto/` is a git submodule.** If empty: `git submodule update --init --recursive`, then `make buf`.
-- **`static/` must be populated** before compiling the Go binary. The `//go:embed static/*` directive in `static.go` fails at compile time if the directory is empty. Run `make frontend` first, or use `make build`.
-- **Never edit `internal/api/`, `frontend/src/gen/`, or `internal/database/models/`** — generated, will be overwritten.
-- **No WriteTimeout on the API server** — intentional, required for long-lived streaming RPCs in CommsService.
-- **Cross-architecture builds**: The application must compile for `linux/amd64`, `linux/arm64`, and `linux/mipsle`. Use `golang.org/x/sys/unix` (not the frozen `syscall` package) for socket options and other OS-level constants to ensure portability. **`malgo` requires `-tags noasm` for non-SIMD targets** — miniaudio's CGO directives apply `-msse2` to any non-arm/non-arm64 target by default, which breaks `linux/mipsle` builds. The OpenWrt SDK build wrapper that produces the mipsle binary must pass `-tags noasm` so miniaudio's resampler/mixer fall back to scalar C; on soft-float mipsle the linker may also need `-latomic`. amd64 and arm64 builds are unaffected and use the SIMD-enabled defaults.
-- **Concurrency safety is mandatory** for all Go code. Protect shared state with mutexes, ensure every goroutine has a shutdown path, and never access a plain `map` concurrently. Run `make test-race` to verify. See `.claude/rules/concurrency.md` for full rules.
-- **Resource efficiency is mandatory** — target devices include embedded ARM board and MIPS routers (nice to have) with limited memory and CPU. Preallocate slices/maps, reuse buffers, avoid allocations in hot loops, compile regexps at package level, stream large data, and bound all caches and goroutine counts. See `.claude/rules/performance.md` for full rules.
-- **Idiomatic Go is mandatory** — follow community patterns from Effective Go and the Go Code Review Comments wiki. Early returns, error wrapping with `%w`, accept interfaces / return concrete types, `context.Context` as the first parameter, short names in short scopes, all-caps acronyms. See `.claude/rules/idiomatic-go.md` for full rules.
-- **Lattice is the frontend design system** — all React/CSS work must use the tokens and primitives in `frontend/src/styles/lattice.css` (panels, buttons, chips, kv rows, etc.). No third-party UI libraries, no border-radius, no hard-coded colors. Pages must work on a 360px mobile viewport. See `.claude/rules/frontend.md` for full rules.
-- **Instrumentation snapshot doc stays in sync** — any addition, removal, or rename of fields on a snapshot struct (`CommsSnapshot`, `PortSnapshot`, `JitterBufferSnapshot`, `AudioEncoderSnapshot`, `BridgeSnapshot`, etc.) must be reflected in `docs/instrumentation-snapshot.md` in the same changeset. See `.claude/rules/instrumentation.md` for full rules.
-- **Development Environment** - development environment is `linux/amd64` or `linux/arm64`.  The development environment does not match the runtime environment.
-- **Production Build** - openmanetd is built as part of the OpenMANET firmware in a different repository.  It handles all cross compilation requirements for supported cpu architectures.
+- **`static/` must be populated** before compiling the root package — `//go:embed static/*` in `static.go` fails otherwise. Run `make frontend` first, or use `make build`.
+- **CGO is required** for every build (`go-sqlite3`, `malgo`/miniaudio, `go-alfred`); there is no pure-Go fallback. `make build-lite` only drops the embedded whisper WASM and UPX-compresses. The DevContainer has the native libraries.
+- **No `WriteTimeout` on the API server** — intentional; long-lived CommsService streams need it.
+- **Targets are resource-constrained**: embedded ARM boards and MIPS routers. Go must compile for `linux/amd64`, `linux/arm64`, and `linux/mipsle`, be concurrency-safe, and be frugal with memory and CPU.
+- **Dev ≠ runtime.** Development happens on `linux/amd64` or `linux/arm64`. Production binaries are built and cross-compiled by the OpenMANET firmware repository.
 
-## Testing Patterns
+## Detailed rules load on demand
 
-- **Unit tests**: package `handlers_test`, file `<service>_test.go`. Use `newTestDB(t)` for in-memory SQLite, `zerolog.Nop()` for logger.
-- **No mock framework**: hand-written fakes only (see `mocks_test.go` pattern in handlers/).
-- **Integration tests**: build tag `//go:build integration`. Use `newTestServer(t)` + `httptest.NewServer`. Run with `make integration-test`.
-- **Frontend tests**: Vitest + jsdom. Run with `make test-frontend`.
+Files in `.claude/rules/` carry `paths:` frontmatter and load into context only when you read or edit a matching file. Before creating a file in an area you haven't touched yet, read a neighbouring file so its rules are loaded first.
+
+| Working on | Rules |
+|---|---|
+| Any `*.go` | `idiomatic-go`, `concurrency`, `performance`, `linting`, `testing` |
+| `internal/openmanet/server/**`, `internal/openmanet/openmanet.go` | `api-design` |
+| `proto/**`, `buf*.yaml` | `proto` |
+| `internal/database/**`, `sqlc.yaml` | `database` |
+| `internal/{comms,blos,sysupgrade,wireless,instrumentation}/**`, `docs/instrumentation-snapshot.md` | `instrumentation` |
+| `frontend/src/**` | `frontend` (Lattice design system), `frontend-testing` |
+
+Skills in `.claude/skills/` load when invoked: `commit` (before any `git commit`), `gap-review` (before reporting non-trivial work done), `/new-service <name>` (scaffold a ConnectRPC service), `/gen` (run all code generation).
+
+## Definition of done
+
+1. Every behavior change has tests in the same changeset.
+2. `go build ./...` and `go test -count=1 ./internal/...` pass. Handler or server changes also pass `make integration-test` (tagged `//go:build integration`; plain `go test ./...` never runs them). Concurrency-sensitive changes pass `make test-race`.
+3. `golangci-lint run --timeout 5m` reports `0 issues.`
+4. Proto changes: `make proto-lint` is clean, `make buf` regenerates, and the generated code is committed with the proto.
+5. Frontend changes: `make lint-frontend` and `make test-frontend` pass, the page works at 360px wide, and `make frontend` has been re-run if the change ships through the binary.
+6. Snapshot struct field changes are reflected in `docs/instrumentation-snapshot.md`.
+7. Non-trivial work (a plan, 3+ files, a new package/schema/RPC, a multi-file fix, a refactor) has been through the `gap-review` skill.
+8. Commits follow the `commit` skill: Conventional Commits, no trailers.
+
+Hooks in `.claude/hooks/` enforce the mechanical parts. Before a turn ends, the Stop hook checks everything changed since the merge base with `main` — gofmt, golangci-lint, `go build`, eslint, buf lint/format, `sqlc diff`, Lattice colours/radii, the snapshot doc — and blocks once with the failures. Commit messages are checked right after `git commit`. Fix the cause rather than working around a hook; if a failure can't be fixed, tell the user why. Hook self-test: `bash .claude/hooks/test.sh`.

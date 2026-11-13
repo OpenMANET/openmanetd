@@ -199,6 +199,9 @@ client := gnssv1connect.NewGnssServiceClient(
 - Maximum concurrent sessions per daemon: **16** (`auth.sessionMaxSize`).
   When full, the session with the oldest `LastAccess` time is evicted.
 - Expired sessions are swept every 5 minutes by a background goroutine.
+- An open web terminal (`/api/terminal/ws`) ends when the session that opened
+  it logs out, is evicted, or expires, and when the browser stops answering
+  WebSocket pings for about a minute.
 - Session storage is in-memory only — all sessions are lost on daemon
   restart. Callers that see a 401 after a restart should re-authenticate.
 
@@ -208,6 +211,15 @@ client := gnssv1connect.NewGnssServiceClient(
   on both `http://` and `https://` origins on a local LAN. Do not expose the
   API to the public internet without putting it behind HTTPS and adjusting
   this policy at the reverse proxy.
+- Browser access is limited to LAN origins. The API server grants CORS (with
+  credentials) and Private Network Access, and the frontend server accepts
+  WebSocket upgrades on `/ws` and `/api/terminal/ws`, only when the `Origin`
+  header is absent, matches the request `Host`, is a loopback, RFC 1918,
+  link-local, IPv6 ULA, or `100.64.0.0/10` (Tailscale) address, or is a
+  single-label name or a name under `.lan`, `.local`, or `.home.arpa`. Pages
+  served from any other site cannot call the API with the operator's session
+  or open those WebSockets. Origin checks do not defend against DNS
+  rebinding.
 - Session tokens are generated with `crypto/rand`, 32 bytes / 256 bits of
   entropy per token, hex-encoded.
 - The error message for `POST /auth/login` is deliberately vague

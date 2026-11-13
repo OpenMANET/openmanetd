@@ -356,6 +356,15 @@ func (s *WifiConfigService) UpdateRadioSettings(ctx context.Context, req *wifico
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Refresh before any setter can commit the cached wireless file. LuCI or
+	// CLI edits may have changed unrelated interfaces since our last read.
+	if err := s.ConfigReader.ReloadConfig(); err != nil {
+		return &wificonfigv1.UpdateRadioSettingsResponse{
+			Success: false,
+			Message: strPtr(fmt.Sprintf("refresh config before write: %v", err)),
+		}, nil
+	}
+
 	if err := s.stageRadioSettings(ctx, req.GetRadioName(), req.GetSettings()); err != nil {
 		var sw *stageWriteError
 		if errors.As(err, &sw) {
@@ -382,6 +391,11 @@ func (s *WifiConfigService) UpdateRadioSettings(ctx context.Context, req *wifico
 func (s *WifiConfigService) ApplyRadioSettingsBatch(ctx context.Context, updates []RadioSettingsUpdate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Refresh once for the batch; never discard earlier staged updates.
+	if err := s.ConfigReader.ReloadConfig(); err != nil {
+		return fmt.Errorf("refresh config before batch: %w", err)
+	}
 
 	for _, u := range updates {
 		if err := s.stageRadioSettings(ctx, u.RadioName, u.Settings); err != nil {

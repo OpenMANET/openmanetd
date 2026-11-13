@@ -3,6 +3,7 @@ package gpsd
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -15,7 +16,6 @@ import (
 	"github.com/mdlayher/arp"
 	"github.com/openmanet/openmanetd/internal/camera"
 	"github.com/openmanet/openmanetd/internal/config"
-	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/openmanet/openmanetd/internal/util/board"
 	"golang.org/x/net/ipv4"
 )
@@ -46,7 +46,7 @@ func (g *GPSService) SendIfRequiredAsCoT() {
 		return
 	}
 
-	leases, err := network.GetCurrentDHCPLeases()
+	leases, err := g.getDHCPLeases()
 	if err != nil {
 		g.Log.Error().Err(err).Msg("Error getting DHCP leases for EUD location update")
 
@@ -147,82 +147,109 @@ func (g *GPSService) sendCameraCoTToMulticast(ctx context.Context) error {
 	}, stream)
 }
 
-// checkDeviceActive performs an ARP request to check if a device is active at the given IP address
+// checkDeviceActive reports whether a DHCP-leased address belongs to a
+// live, directly-connected EUD. It finds the local interface whose subnet
+// contains ipAddr and ARP-probes the address on it. Any failure (no local
+// subnet contains the address, the ARP client cannot be opened, or the
+// probe times out) reports inactive: a stale lease must never suppress
+// the multicast fallback, which is the only way the marker reaches the
+// mesh when no EUD is attached.
 func (g *GPSService) checkDeviceActive(ipAddr string) bool {
-	// Parse the IP address as netip.Addr
-	ipAddrParsed, err := netip.ParseAddr(ipAddr)
+	target, err := netip.ParseAddr(ipAddr)
 	if err != nil {
 		g.Log.Debug().Str("ip", ipAddr).Msg("Invalid IP address for ARP check")
 
 		return false
 	}
 
-	// Get all network interfaces
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		g.Log.Debug().Err(err).Msg("Failed to get network interfaces for ARP check")
+	ifi := g.interfaceForAddr(target)
+	if ifi == nil {
+		g.Log.Debug().Str("ip", ipAddr).Msg("No local interface contains lease address; treating device as inactive")
 
 		return false
 	}
 
-	// Try to find an interface on the same subnet as the target IP
-	for _, iface := range ifaces {
-		// Skip down or loopback interfaces
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+	probe := g.arpProbe
+	if probe == nil {
+		probe = g.resolveARP
+	}
+
+	if err := probe(ifi, target); err != nil {
+		g.Log.Debug().Err(err).Str("ip", ipAddr).Str("interface", ifi.Name).Msg("Device did not answer ARP")
+
+		return false
+	}
+
+	return true
+}
+
+// interfaceForAddr returns the up, non-loopback interface whose IPv4
+// subnet contains target, or nil when none does.
+func (g *GPSService) interfaceForAddr(target netip.Addr) *net.Interface {
+	list := g.listInterfaces
+	if list == nil {
+		list = net.Interfaces
+	}
+
+	addrsOf := g.interfaceAddrs
+	if addrsOf == nil {
+		addrsOf = (*net.Interface).Addrs
+	}
+
+	ifaces, err := list()
+	if err != nil {
+		g.Log.Debug().Err(err).Msg("Failed to get network interfaces for ARP check")
+
+		return nil
+	}
+
+	ip := net.IP(target.AsSlice())
+
+	for i := range ifaces {
+		ifi := &ifaces[i]
+
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 
-		// Get addresses for this interface
-		addrs, err := iface.Addrs()
+		addrs, err := addrsOf(ifi)
 		if err != nil {
 			continue
 		}
 
-		// Check if any address is on the same subnet
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-
-			// Convert to check if target IP is in this subnet
-			ip := net.ParseIP(ipAddr)
-			if ip == nil {
-				continue
-			}
-
-			// Check if target IP is in this subnet
-			if ipNet.Contains(ip) {
-				// Create ARP client for this interface
-				client, err := arp.Dial(&iface)
-				if err != nil {
-					g.Log.Debug().Err(err).Str("interface", iface.Name).Msg("Failed to create ARP client")
-
-					continue
-				}
-				defer client.Close()
-
-				// Set a short timeout for ARP request
-				err = client.SetDeadline(time.Now().Add(500 * time.Millisecond))
-				if err != nil {
-					g.Log.Debug().Err(err).Msg("Failed to set ARP deadline")
-					client.Close()
-
-					continue
-				}
-
-				// Perform ARP request using netip.Addr
-				_, err = client.Resolve(ipAddrParsed)
-				client.Close()
-
-				return err == nil
+			if ok && ipNet.Contains(ip) {
+				return ifi
 			}
 		}
 	}
 
-	// If we get here, we couldn't find a suitable interface
-	// Return true to allow the send attempt (conservative approach)
-	return true
+	return nil
+}
+
+// resolveARP is the real ARP probe: one request on ifi with a short
+// deadline. A client that cannot be opened (raw socket denied, interface
+// without a hardware address) is logged at Warn because it silently
+// degrades EUD detection on every lease.
+func (g *GPSService) resolveARP(ifi *net.Interface, target netip.Addr) error {
+	client, err := arp.Dial(ifi)
+	if err != nil {
+		g.Log.Warn().Err(err).Str("interface", ifi.Name).Msg("Failed to create ARP client")
+
+		return fmt.Errorf("arp dial %s: %w", ifi.Name, err)
+	}
+	defer client.Close()
+
+	if err := client.SetDeadline(time.Now().Add(arpProbeTimeout)); err != nil {
+		return fmt.Errorf("set ARP deadline: %w", err)
+	}
+
+	if _, err := client.Resolve(target); err != nil {
+		return fmt.Errorf("arp resolve %s: %w", target, err)
+	}
+
+	return nil
 }
 
 // sendCoTToMulticast creates and sends an ATAK CoT message to the standard multicast address
@@ -300,26 +327,7 @@ func (g *GPSService) sendCoTToMulticast() error {
 		return fmt.Errorf("failed to marshal CoT protobuf: %w", err)
 	}
 
-	// Send to multicast address
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", config.ATAKSAAddress, atakSAMulticastPort))
-	if err != nil {
-		return fmt.Errorf("failed to resolve multicast address: %w", err)
-	}
-
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		return fmt.Errorf("failed to dial multicast: %w", err)
-	}
-	defer conn.Close()
-
-	// Set multicast TTL to 64
-	pconn := ipv4.NewPacketConn(conn)
-	if ttlErr := pconn.SetMulticastTTL(atakMulticastTTL); ttlErr != nil {
-		g.Log.Warn().Err(ttlErr).Msg("Failed to set multicast TTL")
-	}
-
-	_, err = pconn.WriteTo(data, nil, addr)
-	if err != nil {
+	if err := g.sendMulticast(data); err != nil {
 		return fmt.Errorf("failed to send CoT message: %w", err)
 	}
 
@@ -428,28 +436,152 @@ func (g *GPSService) sendCoTPing() error {
 		return fmt.Errorf("failed to marshal CoT protobuf: %w", err)
 	}
 
-	// Send to multicast address
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", config.ATAKSAAddress, atakSAMulticastPort))
-	if err != nil {
-		return fmt.Errorf("failed to resolve multicast address: %w", err)
-	}
-
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		return fmt.Errorf("failed to dial multicast: %w", err)
-	}
-	defer conn.Close()
-
-	// Set multicast TTL to 64
-	pconn := ipv4.NewPacketConn(conn)
-	if ttlErr := pconn.SetMulticastTTL(atakMulticastTTL); ttlErr != nil {
-		g.Log.Warn().Err(ttlErr).Msg("Failed to set multicast TTL")
-	}
-
-	_, err = pconn.WriteTo(data, nil, addr)
-	if err != nil {
+	if err := g.sendMulticast(data); err != nil {
 		return fmt.Errorf("failed to send CoT message: %w", err)
 	}
 
 	return nil
+}
+
+// sendMulticast dispatches to the injected SendMulticast override when set
+// (tests), falling back to the real interface-pinned sender otherwise.
+func (g *GPSService) sendMulticast(data []byte) error {
+	if g.SendMulticast != nil {
+		return g.SendMulticast(data)
+	}
+
+	return g.sendCoTMulticast(data)
+}
+
+// sendCoTMulticast writes one datagram to the ATAK SA multicast group with
+// the egress interface pinned explicitly, rather than letting the kernel
+// route the group address. An unpinned dial to 239.2.3.1 depends on the
+// unicast routing table: a node with no uplink and no batman-adv gateway
+// selected has no default route and the dial fails with "network is
+// unreachable", while a node with a WAN uplink sends the marker out the
+// WAN instead of the mesh bridge. Pinning mirrors the listener's join
+// strategy (see joinMulticastOnAllInterfaces) and the camera publisher.
+//
+// The configured mesh bridge is preferred; when it is absent or down the
+// datagram is sent on every up, multicast-capable, non-loopback interface
+// so a differently-named bridge still carries the marker. The send
+// succeeds if at least one interface accepted the datagram.
+func (g *GPSService) sendCoTMulticast(data []byte) error {
+	byName := g.interfaceByName
+	if byName == nil {
+		byName = net.InterfaceByName
+	}
+
+	list := g.listInterfaces
+	if list == nil {
+		list = net.Interfaces
+	}
+
+	candidates := selectMulticastInterfaces(g.meshInterfaceName(), byName, list)
+	if len(candidates) == 0 {
+		return errors.New("no multicast-capable interface available for CoT send")
+	}
+
+	write := g.writeMulticast
+	if write == nil {
+		write = writeMulticastOn
+	}
+
+	dst := &net.UDPAddr{IP: net.ParseIP(config.ATAKSAAddress), Port: atakSAMulticastPortNum}
+
+	var (
+		errs []error
+		sent bool
+	)
+
+	for i := range candidates {
+		if err := write(&candidates[i], dst, data); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", candidates[i].Name, err))
+
+			continue
+		}
+
+		sent = true
+	}
+
+	if !sent {
+		return errors.Join(errs...)
+	}
+
+	for _, err := range errs {
+		g.Log.Debug().Err(err).Msg("CoT multicast send failed on one interface")
+	}
+
+	return nil
+}
+
+// writeMulticastOn sends data to dst with the socket's multicast egress
+// forced to ifi.
+func writeMulticastOn(ifi *net.Interface, dst *net.UDPAddr, data []byte) error {
+	conn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return fmt.Errorf("open multicast socket: %w", err)
+	}
+	defer conn.Close()
+
+	pconn := ipv4.NewPacketConn(conn)
+
+	if err := pconn.SetMulticastInterface(ifi); err != nil {
+		return fmt.Errorf("set multicast interface: %w", err)
+	}
+
+	if err := pconn.SetMulticastTTL(atakMulticastTTL); err != nil {
+		return fmt.Errorf("set multicast TTL: %w", err)
+	}
+
+	if _, err := pconn.WriteTo(data, nil, dst); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+
+	return nil
+}
+
+// meshInterfaceName returns the configured mesh bridge name, or the
+// package default when no Config was wired up.
+func (g *GPSService) meshInterfaceName() string {
+	if g.Config == nil {
+		return config.DefaultMeshNetInterface
+	}
+
+	return g.Config.GetMeshNetInterface()
+}
+
+// selectMulticastInterfaces picks the interfaces a CoT multicast datagram
+// is sent on. The named mesh interface wins when it resolves and is up;
+// otherwise every up, multicast-capable, non-loopback interface is a
+// candidate. An empty result means no usable interface exists.
+func selectMulticastInterfaces(
+	meshName string,
+	byName func(string) (*net.Interface, error),
+	list func() ([]net.Interface, error),
+) []net.Interface {
+	if ifi, err := byName(meshName); err == nil && multicastCapable(ifi) {
+		return []net.Interface{*ifi}
+	}
+
+	ifaces, err := list()
+	if err != nil {
+		return nil
+	}
+
+	out := make([]net.Interface, 0, len(ifaces))
+
+	for i := range ifaces {
+		if multicastCapable(&ifaces[i]) {
+			out = append(out, ifaces[i])
+		}
+	}
+
+	return out
+}
+
+func multicastCapable(ifi *net.Interface) bool {
+	return ifi.Flags&net.FlagUp != 0 &&
+		ifi.Flags&net.FlagMulticast != 0 &&
+		ifi.Flags&net.FlagLoopback == 0
 }

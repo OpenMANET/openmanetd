@@ -2,6 +2,11 @@ package network
 
 import "strings"
 
+const (
+	htModeHE20 = "HE20"
+	htModeHE80 = "HE80"
+)
+
 // HTModeBandwidthMHz maps a UCI htmode string to its channel width in
 // MHz. It is the inverse of the wizard's bandwidthToHTMode: S1G widths
 // are LuCI's "1 MHz".."8 MHz" literals; HT/VHT/HE modes map to their
@@ -16,11 +21,11 @@ func HTModeBandwidthMHz(htmode string) (uint32, bool) {
 		return 4, true
 	case "8 MHZ":
 		return 8, true
-	case "NOHT", "HT20", "VHT20", "HE20":
+	case "NOHT", "HT20", "VHT20", htModeHE20:
 		return 20, true
 	case "HT40", "HT40-", "HT40+", "VHT40", "HE40":
 		return 40, true
-	case "VHT80", "HE80":
+	case "VHT80", htModeHE80:
 		return 80, true
 	case "VHT160", "HE160":
 		return 160, true
@@ -39,7 +44,7 @@ func SecondaryMeshHTMode(bandwidthMHz uint32) string {
 	case 0, 40:
 		return SecondaryMeshHTMode2G
 	case 20:
-		return "HE20"
+		return htModeHE20
 	default:
 		return ""
 	}

@@ -245,7 +245,7 @@ func waitValuesCall(t *testing.T, fl *fakeLines) {
 // talk group i+1. A regression to the pre-schematic placeholders or a
 // duplicated line would silently break the switch in the field.
 func TestSelectorPins_RavenMapping(t *testing.T) {
-	assert.Equal(t, [5]int{17, 27, 22, 24, 10}, SelectorPins)
+	assert.Equal(t, [5]int{10, 27, 22, 24, 17}, SelectorPins)
 
 	seen := make(map[int]struct{}, len(SelectorPins))
 
@@ -390,7 +390,7 @@ func TestSelector_DebugTracesReads(t *testing.T) {
 	assert.Equal(t, 3, recvChannel(t, events))
 
 	out := logs.String()
-	assert.Contains(t, out, `"pins":[17,27,22,24,10]`)
+	assert.Contains(t, out, `"pins":[10,27,22,24,17]`)
 	assert.Contains(t, out, `"values":[0,1,1,1,1]`)
 	assert.Contains(t, out, `"values":[1,1,0,1,1]`)
 	assert.Contains(t, out, `"decoded":3`)
