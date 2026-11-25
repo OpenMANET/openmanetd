@@ -9,13 +9,14 @@ it('saves the local encoder choice and switches the playback URL to RTSP', async
   let saved;
   vi.stubGlobal('fetch', vi.fn(async (url, req) => {
     let data;
-    if (url.endsWith('/status')) data = { connections: { items: [] } };
+    if (url.endsWith('/status')) data = { connections: { items: [] }, adaptive: { kbps: 500, reason: 'clean', mesh_routes: { '10.41.0.1': { hard_ifname: 'wlh0', neigh_address: 'aa:bb:cc:dd:ee:ff' } } } };
     else if (req.method === 'PUT') data = saved = JSON.parse(req.body);
     else data = { options, cameraPath: 'camera', srtPort: '8890', rtspPort: '554', softwareAvailable: true };
     return { ok: true, json: async () => data };
   }));
   render(<SettingsVideo />);
   const toggle = await screen.findByLabelText('Hardware acceleration');
+  await screen.findByText('wlh0 via aa:bb:cc:dd:ee:ff');
   expect(toggle.checked).toBe(true);
   expect(screen.getByLabelText('Camera playback URL').value).toContain('?streamid=read:camera');
   const resolution = screen.getByLabelText('Resolution');

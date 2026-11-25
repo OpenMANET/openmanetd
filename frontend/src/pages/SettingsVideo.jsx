@@ -98,7 +98,7 @@ export default function SettingsVideo() {
         <label><input type="checkbox" checked={adaptive.enabled}
           onChange={e => change('adaptive', { ...adaptive, enabled: e.target.checked })} /> GhostNet adaptive bitrate</label>
         {adaptive.enabled && <>
-          <p>The Pi camera adjusts its bitrate to the HaLow link while keeping the selected resolution.</p>
+          <p>Auto (mesh route) follows the radio Batman selects for each viewer. The camera keeps the selected resolution.</p>
           <label className="lat-field">Minimum bitrate (kbit/s)
             <input className="lat-input" required type="number" min="1" max={adaptive.maxKbps} value={adaptive.minKbps || ''} onChange={e => change('adaptive', { ...adaptive, minKbps: Number(e.target.value) })} />
           </label>
@@ -137,6 +137,8 @@ export default function SettingsVideo() {
       </dl>)}
       {status?.adaptive && <dl className="kv"><dt>Adaptive bitrate target</dt><dd>{status.adaptive.kbps} kbit/s</dd>
         <dt>Bitrate decision</dt><dd>{status.adaptive.reason}</dd>
+        {Object.entries(status.adaptive.mesh_routes ?? {}).map(([host, hop]) =>
+          <React.Fragment key={host}><dt>Route to {host}</dt><dd>{hop.hard_ifname} via {hop.neigh_address}</dd></React.Fragment>)}
       </dl>}
       {status?.push && <dl className="kv"><dt>Outgoing push</dt><dd>{status.push.state} {status.push.remoteAddr}</dd>
         {status.push.state === 'Sending' && <><dt>RTT / send buffer</dt><dd>{status.push.rttMillis.toFixed(1)} / {status.push.sendBufferMillis} ms</dd>
