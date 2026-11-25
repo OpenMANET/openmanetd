@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/coreywagehoft/go-tak/pkg/cot"
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +65,7 @@ func TestResolveStream_configuredEndpoint(t *testing.T) {
 	t.Parallel()
 
 	reader := newFakeConfigReader(t, map[string][]string{
-		"openmanet_video.playback.transport":                  {"rtsp"},
+		"openmanet_video.playback.transport":      {"rtsp"},
 		"camera-onvif-server.rpicamera.interface": {"ahwlan"},
 		"camera-onvif-server.rpicamera.rtsp_name": {"camera/main"},
 		"network.ahwlan.device":                   {"br-ahwlan"},
@@ -80,6 +81,15 @@ func TestResolveStream_configuredEndpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, Stream{Protocol: "rtsp", Address: "10.41.0.1", Port: 8554, Path: "/camera/main"}, stream)
+	event := BuildMessage(testPosition(t), Node{UID: "camera-test"}, stream).GetCotEvent()
+	detail, err := cot.DetailsFromString(event.GetDetail().GetXmlDetail())
+	require.NoError(t, err)
+	video := detail.GetFirst("__video")
+	assert.Equal(t, "rtsp://10.41.0.1:8554/camera/main", video.GetAttr("url"))
+	entry := video.GetFirst("ConnectionEntry")
+	assert.Equal(t, "rtsp", entry.GetAttr("protocol"))
+	assert.Equal(t, "8554", entry.GetAttr("port"))
+	assert.Equal(t, "/camera/main", entry.GetAttr("path"))
 }
 
 func TestResolveStream_defaults(t *testing.T) {

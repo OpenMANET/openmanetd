@@ -1,7 +1,12 @@
 package frontend
 
 import (
+	"github.com/digineo/go-uci/v2"
+	"github.com/openmanet/openmanetd/internal/camera"
+	"github.com/stretchr/testify/require"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,5 +31,25 @@ func TestSaveVideoRejectsUnsupportedResolution(t *testing.T) {
 	new(Server).saveVideoSettings(w, r)
 	if w.Code != 400 || !strings.Contains(w.Body.String(), "Unsupported camera resolution") {
 		t.Fatalf("unexpected response: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSaveVideoSettingsPushWithCameraCoTDisabled(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, videoConfig), []byte("config video 'playback'\n"), 0600))
+	server := new(Server)
+	for _, added := range []string{`,"cameraCoTEnabled":false`, ""} {
+		// The second save models an older client that omits the CoT preference.
+		body := `{"transport":"rtsp","hardwareAcceleration":true,"push":true,"destination":"srt://receiver:8890?streamid=publish:camera"` + added + "}"
+		r := httptest.NewRequest("PUT", "/api/settings/video", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.saveVideoSettingsWith(w, r, dir, "/bin/true")
+		require.Equal(t, 200, w.Code, w.Body.String())
+		tree := uci.NewTree(dir)
+		require.NoError(t, tree.LoadConfig(videoConfig, false))
+		require.False(t, camera.CoTEnabled(tree))
+		require.Equal(t, "rtsp", option(tree, videoConfig, "playback", "transport", ""))
+		require.Equal(t, "1", option(tree, videoConfig, "playback", "push_enabled", ""))
+		require.Equal(t, "srt://receiver:8890?streamid=publish:camera", option(tree, videoConfig, "playback", "push_destination", ""))
 	}
 }

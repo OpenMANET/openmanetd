@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/digineo/go-uci/v2"
+	"github.com/openmanet/openmanetd/internal/camera"
 )
 
 const videoConfig = "openmanet_video"
@@ -25,6 +26,7 @@ const videoConfig = "openmanet_video"
 var videoPath = regexp.MustCompile(`^[a-zA-Z0-9._~-]+(/[a-zA-Z0-9._~-]+)*$`)
 
 type videoOptions struct {
+	CameraCoT   *bool  `json:"cameraCoTEnabled,omitempty"`
 	Resolution  string `json:"resolution,omitempty"`
 	Hardware    bool   `json:"hardwareAcceleration"`
 	Transport   string `json:"transport"`
@@ -55,6 +57,7 @@ func (s *Server) videoSettings(w http.ResponseWriter, _ *http.Request) {
 	tree := uci.NewTree(uci.DefaultTreePath)
 	get := func(key, def string) string { return option(tree, videoConfig, "playback", key, def) }
 	latency, _ := strconv.Atoi(get("srt_latency_ms", "0"))
+	advertise := camera.CoTEnabled(tree)
 	_, softErr := os.Stat("/usr/share/mediamtx/software-h264")
 	w.Header().Set("Cache-Control", "no-store")
 	s.writeJSON(w, struct {
@@ -65,6 +68,7 @@ func (s *Server) videoSettings(w http.ResponseWriter, _ *http.Request) {
 		SoftwareAvailable bool         `json:"softwareAvailable"`
 	}{
 		Options: videoOptions{
+			CameraCoT:   &advertise,
 			Transport:   get("transport", "srt"),
 			Resolution:  get("resolution", "current"),
 			Latency:     latency,
@@ -107,6 +111,10 @@ func srtCallerURL(raw string) (string, error) {
 }
 
 func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
+	s.saveVideoSettingsWith(w, r, uci.DefaultTreePath, "/etc/init.d/mediamtx-srt-push")
+}
+
+func (s *Server) saveVideoSettingsWith(w http.ResponseWriter, r *http.Request, configDir, pushService string) {
 	var v videoOptions
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&v); err != nil || (v.Transport != "srt" && v.Transport != "rtsp") || (v.Latency != 0 && (v.Latency < 20 || v.Latency > 8000)) || (v.Path != "" && !videoPath.MatchString(v.Path)) {
 		s.writeErrorStatus(w, 400, "Invalid video settings")
@@ -126,7 +134,7 @@ func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.videoMu.Lock()
 	defer s.videoMu.Unlock()
-	tree := uci.NewTree(uci.DefaultTreePath)
+	tree := uci.NewTree(configDir)
 	enabled := "0"
 	if v.Push {
 		enabled = "1"
@@ -140,6 +148,15 @@ func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
 		hardware = "0"
 	}
 	values := map[string]string{"hardware_acceleration": hardware, "transport": v.Transport, "srt_latency_ms": strconv.Itoa(v.Latency), "push_enabled": enabled, "push_path": v.Path, "push_destination": v.Destination}
+	if v.CameraCoT == nil {
+		// A client with the older settings schema can still save push options.
+		advertise := camera.CoTEnabled(tree)
+		v.CameraCoT = &advertise
+	} else if *v.CameraCoT {
+		values["camera_cot_enabled"] = "1"
+	} else {
+		values["camera_cot_enabled"] = "0"
+	}
 	if v.Resolution != "" {
 		values["resolution"] = v.Resolution
 	} else {
@@ -147,7 +164,14 @@ func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
 		v.Resolution = option(tree, videoConfig, "playback", "resolution", "current")
 	}
 	for key, value := range values {
-		if err := tree.SetType(videoConfig, "playback", key, uci.TypeOption, value); err != nil {
+		var err error
+		if value == "" {
+			// go-uci cannot parse an empty quoted option on the next load.
+			err = tree.Del(videoConfig, "playback", key)
+		} else {
+			err = tree.SetType(videoConfig, "playback", key, uci.TypeOption, value)
+		}
+		if err != nil {
 			s.writeErrorStatus(w, 503, "Video configuration unavailable. Check the MediaMTX package.")
 			return
 		}
@@ -156,7 +180,7 @@ func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorStatus(w, 500, "Could not save video settings")
 		return
 	}
-	if _, err := runCmd(r.Context(), "/etc/init.d/mediamtx-srt-push", "reload"); err != nil {
+	if _, err := runCmd(r.Context(), pushService, "reload"); err != nil {
 		s.writeErrorStatus(w, 503, "Settings saved. Could not reload the outgoing push service.")
 		return
 	}

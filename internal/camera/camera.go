@@ -85,6 +85,12 @@ type configReader interface {
 	Get(config, section, option string) ([]string, bool)
 }
 
+// CoTEnabled reports whether the node should advertise its camera. Images
+// predating the switch advertised by default.
+func CoTEnabled(reader configReader) bool {
+	return firstConfigValue(reader, "openmanet_video", "playback", "camera_cot_enabled", "1") == "1"
+}
+
 type interfaceLookup func(string) network.NetworkInterface
 
 func resolveCameraStreamWith(ctx context.Context, reader configReader, lookup interfaceLookup) (Stream, error) {

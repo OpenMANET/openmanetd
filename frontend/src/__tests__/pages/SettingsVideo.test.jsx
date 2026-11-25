@@ -21,10 +21,18 @@ it('saves the local encoder choice and switches the playback URL to RTSP', async
   const resolution = screen.getByLabelText('Resolution');
   expect(resolution.value).toBe('current');
   fireEvent.change(resolution, { target: { value: '720p' } });
+  const advertise = screen.getByLabelText('Advertise camera via CoT');
+  expect(advertise.checked).toBe(true);
+  fireEvent.click(advertise);
+  fireEvent.click(screen.getByLabelText('Push video to a remote SRT listener'));
+  fireEvent.change(screen.getByLabelText('Remote publish URL'), { target: { value: 'srt://receiver:8890?streamid=publish:camera' } });
   fireEvent.click(toggle);
   fireEvent.change(screen.getByLabelText('Preferred transport'), { target: { value: 'rtsp' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save video settings' }));
   await screen.findByText('Video settings saved.');
+  expect(saved.cameraCoTEnabled).toBe(false);
+  expect(saved.push).toBe(true);
+  expect(saved.destination).toBe('srt://receiver:8890?streamid=publish:camera');
   expect(saved.resolution).toBe('720p');
   expect(saved.hardwareAcceleration).toBe(false);
   expect(screen.getByLabelText('Camera playback URL').value).toMatch(/^rtsp:.*:554\/camera$/);

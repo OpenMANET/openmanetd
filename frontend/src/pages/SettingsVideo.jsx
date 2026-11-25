@@ -78,6 +78,9 @@ export default function SettingsVideo() {
         <input className="lat-input" type="number" min="20" max="8000" step="1" placeholder="Client default" value={draft.latency || ''} onChange={e => change('latency', Number(e.target.value))} />
       </label>
       {urlField('Camera playback URL', playback)}
+      <label><input type="checkbox" checked={draft.cameraCoTEnabled ?? true}
+        onChange={e => change('cameraCoTEnabled', e.target.checked)} /> Advertise camera via CoT</label>
+      <p>Camera announcements use the saved playback transport. Turning this off stops future camera announcements.</p>
       <h3>Local H.264 encoder</h3>
       <label className="lat-field">Resolution
         <select className="lat-select" value={draft.resolution || 'current'} onChange={e => change('resolution', e.target.value)}>
