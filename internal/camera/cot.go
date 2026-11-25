@@ -58,15 +58,20 @@ func BuildMessage(position Position, node Node, stream Stream) *cotproto.TakMess
 		xmlAttributeUID: videoUID,
 		"url":           stream.URL(),
 	}, "")
+	path := stream.Path
+	if stream.Protocol == "srt" {
+		endpoint := stream.endpoint()
+		path = endpoint.RequestURI()
+	}
 	video.AddChild("ConnectionEntry", map[string]string{
 		"address":           stream.Address,
 		"alias":             node.Callsign + " Video",
 		"bufferTime":        "-1",
 		"ignoreEmbeddedKLV": "false",
 		"networkTimeout":    "12000",
-		"path":              stream.Path,
+		"path":              path,
 		"port":              strconv.Itoa(stream.Port),
-		"protocol":          "rtsp",
+		"protocol":          stream.Protocol,
 		"roverPort":         "-1",
 		"rtspReliable":      "0",
 		xmlAttributeUID:     videoUID,

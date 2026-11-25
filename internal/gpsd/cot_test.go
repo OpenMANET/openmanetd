@@ -3,6 +3,8 @@ package gpsd
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -26,10 +28,10 @@ func TestSendCameraCoTIfPresent_suppressesRadioMarker(t *testing.T) {
 		lastMulticastTime: time.Now(),
 	}
 
-	assert.True(t, gps.sendCameraCoTIfPresent(context.Background()), "camera update must suppress the radio marker")
+	assert.True(t, gps.sendCameraCoTIfPresent(context.Background(), t.TempDir()), "camera update must suppress the radio marker")
 
 	gps.cameraPresent = false
-	assert.False(t, gps.sendCameraCoTIfPresent(context.Background()), "non-camera update must retain the radio path")
+	assert.False(t, gps.sendCameraCoTIfPresent(context.Background(), t.TempDir()), "non-camera update must retain the radio path")
 }
 
 func TestSendIfRequiredAsCoT_cameraSuppressesNormalPath(t *testing.T) {
@@ -59,7 +61,7 @@ func TestSendCameraCoTIfPresent_publishErrorStillOwnsUpdate(t *testing.T) {
 		position:      PositionReport{Valid: true},
 	}
 
-	assert.True(t, gps.sendCameraCoTIfPresent(ctx))
+	assert.True(t, gps.sendCameraCoTIfPresent(ctx, t.TempDir()))
 	assert.Contains(t, logs.String(), "Failed to send camera CoT to multicast")
 }
 
@@ -389,5 +391,18 @@ func TestSendIfRequiredAsCoT_InvalidPosition(t *testing.T) {
 
 	if !lastTime.IsZero() {
 		t.Error("Expected lastMulticastTime to remain zero when position is invalid")
+	}
+}
+
+func TestCameraCoTSettingAppliedOnNextUpdate(t *testing.T) {
+	dir := t.TempDir()
+	gps := &GPSService{cameraPresent: true, lastMulticastTime: time.Now()}
+	for _, enabled := range []bool{true, false, true} {
+		value := "0"
+		if enabled {
+			value = "1"
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "openmanet_video"), []byte("config video 'playback'\n option camera_cot_enabled '"+value+"'\n"), 0600))
+		assert.Equal(t, enabled, gps.sendCameraCoTIfPresent(context.Background(), dir))
 	}
 }

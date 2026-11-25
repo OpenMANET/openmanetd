@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/coreywagehoft/go-tak/pkg/cot"
 	"github.com/openmanet/openmanetd/internal/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,7 @@ func TestResolveStream_configuredEndpoint(t *testing.T) {
 	t.Parallel()
 
 	reader := newFakeConfigReader(t, map[string][]string{
+		"openmanet_video.playback.transport":      {"rtsp"},
 		"camera-onvif-server.rpicamera.interface": {"ahwlan"},
 		"camera-onvif-server.rpicamera.rtsp_name": {"camera/main"},
 		"network.ahwlan.device":                   {"br-ahwlan"},
@@ -78,7 +80,16 @@ func TestResolveStream_configuredEndpoint(t *testing.T) {
 	stream, err := resolveCameraStreamWith(context.Background(), reader, lookup)
 	require.NoError(t, err)
 
-	assert.Equal(t, Stream{Address: "10.41.0.1", Port: 8554, Path: "/camera/main"}, stream)
+	assert.Equal(t, Stream{Protocol: "rtsp", Address: "10.41.0.1", Port: 8554, Path: "/camera/main"}, stream)
+	event := BuildMessage(testPosition(t), Node{UID: "camera-test"}, stream).GetCotEvent()
+	detail, err := cot.DetailsFromString(event.GetDetail().GetXmlDetail())
+	require.NoError(t, err)
+	video := detail.GetFirst("__video")
+	assert.Equal(t, "rtsp://10.41.0.1:8554/camera/main", video.GetAttr("url"))
+	entry := video.GetFirst("ConnectionEntry")
+	assert.Equal(t, "rtsp", entry.GetAttr("protocol"))
+	assert.Equal(t, "8554", entry.GetAttr("port"))
+	assert.Equal(t, "/camera/main", entry.GetAttr("path"))
 }
 
 func TestResolveStream_defaults(t *testing.T) {
@@ -93,7 +104,7 @@ func TestResolveStream_defaults(t *testing.T) {
 		}}
 	})
 	require.NoError(t, err)
-	assert.Equal(t, Stream{Address: "10.41.2.3", Port: defaultRTSPPort, Path: "/" + defaultRTSPName}, stream)
+	assert.Equal(t, Stream{Protocol: "srt", Address: "10.41.2.3", Port: defaultSRTPort, Path: "/" + defaultRTSPName}, stream)
 }
 
 func TestResolveStream_missingIPv4Address(t *testing.T) {
@@ -146,7 +157,7 @@ func TestResolveStream_contextCanceledDuringLookup(t *testing.T) {
 func TestStream_URL(t *testing.T) {
 	t.Parallel()
 
-	stream := Stream{Address: "10.41.0.1", Path: "/rpicamera main", Port: 8554}
+	stream := Stream{Protocol: "rtsp", Address: "10.41.0.1", Path: "/rpicamera main", Port: 8554}
 	assert.Equal(t, "rtsp://10.41.0.1:8554/rpicamera%20main", stream.URL())
 }
 

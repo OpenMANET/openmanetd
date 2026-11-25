@@ -13,6 +13,7 @@ import (
 
 	"github.com/coreywagehoft/go-tak/pkg/cot"
 	"github.com/coreywagehoft/go-tak/pkg/cotproto"
+	"github.com/digineo/go-uci/v2"
 	"github.com/mdlayher/arp"
 	"github.com/openmanet/openmanetd/internal/camera"
 	"github.com/openmanet/openmanetd/internal/config"
@@ -42,7 +43,7 @@ func (g *GPSService) SendIfRequiredAsCoT() {
 		return
 	}
 
-	if g.sendCameraCoTIfPresent(context.Background()) {
+	if g.sendCameraCoTIfPresent(context.Background(), uci.DefaultTreePath) {
 		return
 	}
 
@@ -90,8 +91,8 @@ func (g *GPSService) SendIfRequiredAsCoT() {
 // sendCameraCoTIfPresent reports whether camera publication owns this update.
 // A true result always prevents the caller from emitting a normal radio marker,
 // including when the camera stream cannot currently be advertised.
-func (g *GPSService) sendCameraCoTIfPresent(ctx context.Context) bool {
-	if !g.cameraPresent {
+func (g *GPSService) sendCameraCoTIfPresent(ctx context.Context, configDir string) bool {
+	if !g.cameraPresent || !camera.CoTEnabled(uci.NewTree(configDir)) {
 		return false
 	}
 

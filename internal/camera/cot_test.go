@@ -163,5 +163,18 @@ func testPosition(t *testing.T) Position {
 func testStream(t *testing.T) Stream {
 	t.Helper()
 
-	return Stream{Address: "10.41.0.1", Path: "/" + defaultRTSPName, Port: 8554}
+	return Stream{Protocol: "rtsp", Address: "10.41.0.1", Path: "/" + defaultRTSPName, Port: 8554}
+}
+
+func TestBuildMessage_srtPlayback(t *testing.T) {
+	t.Parallel()
+	stream := Stream{Protocol: "srt", Address: "10.41.2.3", Port: 8890, Path: "/camera/main", LatencyMS: 200}
+	event := BuildMessage(testPosition(t), Node{UID: "node"}, stream).GetCotEvent()
+	detail, err := cot.DetailsFromString(event.GetDetail().GetXmlDetail())
+	require.NoError(t, err)
+	video := detail.GetFirst("__video")
+	assert.Equal(t, "srt://10.41.2.3:8890?streamid=read:camera/main&latency=200000", video.GetAttr("url"))
+	entry := video.GetFirst("ConnectionEntry")
+	assert.Equal(t, "srt", entry.GetAttr("protocol"))
+	assert.Equal(t, "/?streamid=read:camera/main&latency=200000", entry.GetAttr("path"))
 }
