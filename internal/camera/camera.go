@@ -21,26 +21,41 @@ import (
 const (
 	defaultCameraInterface = "ahwlan"
 	defaultRTSPPort        = 554
+	defaultSRTPort         = 8890
 	defaultRTSPName        = "rpicamera"
 	cameraProbeTimeout     = 2 * time.Second
 )
 
-// Stream describes the RTSP endpoint advertised to ATAK.
+// Stream describes the video endpoint advertised to ATAK.
 type Stream struct {
-	Address string
-	Path    string
-	Port    int
+	Protocol  string
+	LatencyMS int
+	Address   string
+	Path      string
+	Port      int
 }
 
-// URL returns the stream's canonical RTSP URL.
+// URL returns the stream's playback URL.
 func (s Stream) URL() string {
+	u := s.endpoint()
+	return u.String()
+}
+
+func (s Stream) endpoint() url.URL {
 	u := url.URL{
-		Scheme: "rtsp",
+		Scheme: s.Protocol,
 		Host:   net.JoinHostPort(s.Address, strconv.Itoa(s.Port)),
 		Path:   s.Path,
 	}
 
-	return u.String()
+	if s.Protocol == "srt" {
+		u.RawQuery = "streamid=read:" + strings.TrimPrefix(u.EscapedPath(), "/")
+		u.Path = ""
+		if s.LatencyMS > 0 {
+			u.RawQuery += "&latency=" + strconv.Itoa(s.LatencyMS*1000)
+		}
+	}
+	return u
 }
 
 // Detect reports whether cam can see a libcamera-compatible sensor.
@@ -90,13 +105,27 @@ func resolveCameraStreamWith(ctx context.Context, reader configReader, lookup in
 		return Stream{}, fmt.Errorf("camera interface %q has no IPv4 address", deviceName)
 	}
 
-	rtspAddress := firstConfigValue(reader, "mediamtx", "@mediamtx[0]", "rtsp_address", "")
+	protocol := firstConfigValue(reader, "openmanet_video", "playback", "transport", "srt")
+	port := defaultSRTPort
+	var latency int
+	if protocol == "rtsp" {
+		port = defaultRTSPPort
+	} else {
+		protocol = "srt"
+		ms, err := strconv.Atoi(firstConfigValue(reader, "openmanet_video", "playback", "srt_latency_ms", ""))
+		if err == nil && ms >= 20 && ms <= 8000 {
+			latency = ms
+		}
+	}
+	listener := firstConfigValue(reader, "mediamtx", "@mediamtx[0]", protocol+"_address", "")
 	rtspName := firstConfigValue(reader, "camera-onvif-server", "rpicamera", "rtsp_name", defaultRTSPName)
 
 	return Stream{
-		Address: address,
-		Path:    "/" + strings.TrimLeft(rtspName, "/"),
-		Port:    parseRTSPPort(rtspAddress),
+		Address:   address,
+		Path:      "/" + strings.TrimLeft(rtspName, "/"),
+		Protocol:  protocol,
+		LatencyMS: latency,
+		Port:      parsePort(listener, port),
 	}, nil
 }
 
@@ -136,7 +165,7 @@ func firstIPv4Address(iface network.NetworkInterface) string {
 	return ""
 }
 
-func parseRTSPPort(address string) int {
+func parsePort(address string, fallback int) int {
 	value := strings.TrimSpace(address)
 	if _, port, err := net.SplitHostPort(value); err == nil {
 		value = port
@@ -146,7 +175,7 @@ func parseRTSPPort(address string) int {
 
 	port, err := strconv.Atoi(value)
 	if err != nil || port < 1 || port > 65535 {
-		return defaultRTSPPort
+		return fallback
 	}
 
 	return port

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -40,6 +41,7 @@ var upgrader = websocket.Upgrader{ //nolint:gochecknoglobals
 
 // Server is the HTTP/WebSocket server for the WebUI.
 type Server struct {
+	videoMu      sync.Mutex // serializes video settings and transfer mutations
 	log          zerolog.Logger
 	staticFS     fs.FS
 	hub          *ws.Hub
@@ -294,6 +296,10 @@ func (s *Server) handler() http.Handler {
 
 	// Settings API endpoints.
 	mux.HandleFunc("/api/settings/config", s.handleSettingsConfig)
+	mux.HandleFunc("GET /api/settings/video", s.videoSettings)
+	mux.HandleFunc("PUT /api/settings/video", s.saveVideoSettings)
+	mux.HandleFunc("GET /api/settings/video/status", s.videoStatus)
+	mux.HandleFunc("POST /api/settings/video/transfer", s.videoTransfer)
 	mux.HandleFunc("/api/settings/hostname", s.handleSettingsHostname)
 
 	// Whisper management endpoints.

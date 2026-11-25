@@ -24,6 +24,7 @@ import SetupGate from './components/SetupGate.jsx';
 const SettingsBluetooth = lazy(() => import('./pages/SettingsBluetooth.jsx'));
 const SettingsTerminal = lazy(() => import('./pages/SettingsTerminal.jsx'));
 const SettingsLogs = lazy(() => import('./pages/SettingsLogs.jsx'));
+const SettingsVideo = lazy(() => import('./pages/SettingsVideo.jsx'));
 const SettingsWireless = lazy(() => import('./pages/SettingsWireless.jsx'));
 const SettingsNetwork = lazy(() => import('./pages/SettingsNetwork.jsx'));
 const SettingsFirmware = lazy(() => import('./pages/SettingsFirmware.jsx'));
@@ -45,6 +46,7 @@ export default function AppRouter() {
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<SettingsPage />} />
               <Route path="bluetooth" element={<SettingsBluetooth />} />
+              <Route path="video" element={<SettingsVideo />} />
               <Route path="wireless" element={<SettingsWireless />} />
               <Route path="network" element={<SettingsNetwork />} />
               <Route path="firmware" element={<SettingsFirmware />} />
