@@ -18,10 +18,14 @@ it('saves the local encoder choice and switches the playback URL to RTSP', async
   const toggle = await screen.findByLabelText('Hardware acceleration');
   expect(toggle.checked).toBe(true);
   expect(screen.getByLabelText('Camera playback URL').value).toContain('?streamid=read:camera');
+  const resolution = screen.getByLabelText('Resolution');
+  expect(resolution.value).toBe('current');
+  fireEvent.change(resolution, { target: { value: '720p' } });
   fireEvent.click(toggle);
   fireEvent.change(screen.getByLabelText('Preferred transport'), { target: { value: 'rtsp' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save video settings' }));
   await screen.findByText('Video settings saved.');
+  expect(saved.resolution).toBe('720p');
   expect(saved.hardwareAcceleration).toBe(false);
   expect(screen.getByLabelText('Camera playback URL').value).toMatch(/^rtsp:.*:554\/camera$/);
 });

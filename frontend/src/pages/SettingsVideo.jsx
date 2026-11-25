@@ -79,6 +79,14 @@ export default function SettingsVideo() {
       </label>
       {urlField('Camera playback URL', playback)}
       <h3>Local H.264 encoder</h3>
+      <label className="lat-field">Resolution
+        <select className="lat-select" value={draft.resolution || 'current'} onChange={e => change('resolution', e.target.value)}>
+          <option value="current">Keep current resolution</option>
+          <option value="720p">1280 × 720</option>
+          <option value="1080p">1920 × 1080</option>
+        </select>
+      </label>
+      <p>The selected resolution applies to all viewers the next time the local camera starts.</p>
       <label><input type="checkbox" checked={draft.hardwareAcceleration} disabled={!settings.softwareAvailable && draft.hardwareAcceleration}
         onChange={e => change('hardwareAcceleration', e.target.checked)} /> Hardware acceleration</label>
       <p>{settings.softwareAvailable ? 'Turn off to encode on the CPU. Takes effect the next time the local camera starts.' : 'Software H.264 encoding is unavailable on this image.'}</p>

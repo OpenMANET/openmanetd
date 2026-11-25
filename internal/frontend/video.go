@@ -25,6 +25,7 @@ const videoConfig = "openmanet_video"
 var videoPath = regexp.MustCompile(`^[a-zA-Z0-9._~-]+(/[a-zA-Z0-9._~-]+)*$`)
 
 type videoOptions struct {
+	Resolution  string `json:"resolution,omitempty"`
 	Hardware    bool   `json:"hardwareAcceleration"`
 	Transport   string `json:"transport"`
 	Latency     int    `json:"latency"`
@@ -65,6 +66,7 @@ func (s *Server) videoSettings(w http.ResponseWriter, _ *http.Request) {
 	}{
 		Options: videoOptions{
 			Transport:   get("transport", "srt"),
+			Resolution:  get("resolution", "current"),
 			Latency:     latency,
 			Hardware:    get("hardware_acceleration", "1") != "0",
 			Push:        get("push_enabled", "0") == "1",
@@ -110,6 +112,12 @@ func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorStatus(w, 400, "Invalid video settings")
 		return
 	}
+	switch v.Resolution {
+	case "", "current", "720p", "1080p":
+	default:
+		s.writeErrorStatus(w, http.StatusBadRequest, "Unsupported camera resolution")
+		return
+	}
 	if v.Push || v.Destination != "" {
 		if _, err := srtCallerURL(v.Destination); err != nil {
 			s.writeErrorStatus(w, 400, err.Error())
@@ -131,7 +139,14 @@ func (s *Server) saveVideoSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		hardware = "0"
 	}
-	for key, value := range map[string]string{"hardware_acceleration": hardware, "transport": v.Transport, "srt_latency_ms": strconv.Itoa(v.Latency), "push_enabled": enabled, "push_path": v.Path, "push_destination": v.Destination} {
+	values := map[string]string{"hardware_acceleration": hardware, "transport": v.Transport, "srt_latency_ms": strconv.Itoa(v.Latency), "push_enabled": enabled, "push_path": v.Path, "push_destination": v.Destination}
+	if v.Resolution != "" {
+		values["resolution"] = v.Resolution
+	} else {
+		// Older clients omit this field when changing other settings.
+		v.Resolution = option(tree, videoConfig, "playback", "resolution", "current")
+	}
+	for key, value := range values {
 		if err := tree.SetType(videoConfig, "playback", key, uci.TypeOption, value); err != nil {
 			s.writeErrorStatus(w, 503, "Video configuration unavailable. Check the MediaMTX package.")
 			return
