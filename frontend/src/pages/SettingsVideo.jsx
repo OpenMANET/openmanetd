@@ -54,6 +54,7 @@ export default function SettingsVideo() {
   const host = window.location.hostname;
   const options = settings.options;
   const srt = (action, path) => `srt://${host}:${settings.srtPort}?streamid=${action}:${path}${options.latency ? '&latency=' + options.latency * 1000 : ''}`;
+  const adaptive = draft.adaptive ?? { enabled: false, minKbps: 125, maxKbps: 1100 };
   const playback = options.transport === 'rtsp'
     ? `rtsp://${host}:${settings.rtspPort}/${settings.cameraPath}`
     : srt('read', settings.cameraPath);
@@ -93,6 +94,19 @@ export default function SettingsVideo() {
       <label><input type="checkbox" checked={draft.hardwareAcceleration} disabled={!settings.softwareAvailable && draft.hardwareAcceleration}
         onChange={e => change('hardwareAcceleration', e.target.checked)} /> Hardware acceleration</label>
       <p>{settings.softwareAvailable ? 'Turn off to encode on the CPU. Takes effect the next time the local camera starts.' : 'Software H.264 encoding is unavailable on this image.'}</p>
+      {draft.transport === 'srt' && <>
+        <label><input type="checkbox" checked={adaptive.enabled}
+          onChange={e => change('adaptive', { ...adaptive, enabled: e.target.checked })} /> GhostNet adaptive bitrate</label>
+        {adaptive.enabled && <>
+          <p>The Pi camera adjusts its bitrate to the HaLow link while keeping the selected resolution.</p>
+          <label className="lat-field">Minimum bitrate (kbit/s)
+            <input className="lat-input" required type="number" min="1" max={adaptive.maxKbps} value={adaptive.minKbps || ''} onChange={e => change('adaptive', { ...adaptive, minKbps: Number(e.target.value) })} />
+          </label>
+          <label className="lat-field">Maximum bitrate (kbit/s)
+            <input className="lat-input" required type="number" min={adaptive.minKbps || 1} max="100000" value={adaptive.maxKbps || ''} onChange={e => change('adaptive', { ...adaptive, maxKbps: Number(e.target.value) })} />
+          </label>
+        </>}
+      </>}
       <h3>Outgoing push</h3>
       <label><input type="checkbox" checked={draft.push} onChange={e => change('push', e.target.checked)} /> Push video to a remote SRT listener</label>
       {draft.push && <>
@@ -121,6 +135,9 @@ export default function SettingsVideo() {
         <dt>RTT / send buffer</dt><dd>{peer.rttMillis?.toFixed(1) ?? '—'} / {peer.sendBufferMillis ?? '—'} ms</dd>
         <dt>Sent / received</dt><dd>{peer.bytesSent} / {peer.bytesReceived} bytes</dd>
       </dl>)}
+      {status?.adaptive && <dl className="kv"><dt>Adaptive bitrate target</dt><dd>{status.adaptive.kbps} kbit/s</dd>
+        <dt>Bitrate decision</dt><dd>{status.adaptive.reason}</dd>
+      </dl>}
       {status?.push && <dl className="kv"><dt>Outgoing push</dt><dd>{status.push.state} {status.push.remoteAddr}</dd>
         {status.push.state === 'Sending' && <><dt>RTT / send buffer</dt><dd>{status.push.rttMillis.toFixed(1)} / {status.push.sendBufferMillis} ms</dd>
           <dt>Sent / retransmitted</dt><dd>{status.push.bytesSent} bytes / {status.push.retransmissions} packets</dd></>}

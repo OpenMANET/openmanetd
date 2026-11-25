@@ -53,3 +53,23 @@ func TestSaveVideoSettingsPushWithCameraCoTDisabled(t *testing.T) {
 		require.Equal(t, "srt://receiver:8890?streamid=publish:camera", option(tree, videoConfig, "playback", "push_destination", ""))
 	}
 }
+
+func TestAdaptiveSettingsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, videoConfig), []byte("config video 'playback'\n"), 0600))
+	for _, tc := range []struct {
+		field  string
+		status int
+	}{
+		{"," + `"adaptive":{"enabled":true,"minKbps":125,"maxKbps":1000}`, 200},
+		{"," + `"adaptive":{"enabled":false,"minKbps":999,"maxKbps":500}`, 400},
+		{"", 200},
+	} {
+		body := `{"transport":"srt","hardwareAcceleration":true` + tc.field + "}"
+		req := httptest.NewRequest("PUT", "/api/settings/video", strings.NewReader(body))
+		res := httptest.NewRecorder()
+		new(Server).saveVideoSettingsWith(res, req, dir, "/bin/true")
+		require.Equal(t, tc.status, res.Code, res.Body.String())
+		require.Equal(t, &adaptiveOptions{true, 125, 1000}, adaptiveSettings(uci.NewTree(dir)))
+	}
+}

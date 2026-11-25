@@ -26,11 +26,14 @@ it('saves the local encoder choice and switches the playback URL to RTSP', async
   fireEvent.click(advertise);
   fireEvent.click(screen.getByLabelText('Push video to a remote SRT listener'));
   fireEvent.change(screen.getByLabelText('Remote publish URL'), { target: { value: 'srt://receiver:8890?streamid=publish:camera' } });
+  fireEvent.click(screen.getByLabelText('GhostNet adaptive bitrate'));
+  fireEvent.change(screen.getByLabelText('Maximum bitrate (kbit/s)'), { target: { value: '900' } });
   fireEvent.click(toggle);
   fireEvent.change(screen.getByLabelText('Preferred transport'), { target: { value: 'rtsp' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save video settings' }));
   await screen.findByText('Video settings saved.');
   expect(saved.cameraCoTEnabled).toBe(false);
+  expect(saved.adaptive).toEqual({ enabled: true, minKbps: 125, maxKbps: 900 });
   expect(saved.push).toBe(true);
   expect(saved.destination).toBe('srt://receiver:8890?streamid=publish:camera');
   expect(saved.resolution).toBe('720p');

@@ -25,15 +25,28 @@ const videoConfig = "openmanet_video"
 
 var videoPath = regexp.MustCompile(`^[a-zA-Z0-9._~-]+(/[a-zA-Z0-9._~-]+)*$`)
 
+type adaptiveOptions struct {
+	Enabled bool `json:"enabled"`
+	Min     int  `json:"minKbps"`
+	Max     int  `json:"maxKbps"`
+}
+
+func adaptiveSettings(tree uci.Tree) *adaptiveOptions {
+	minRate, _ := strconv.Atoi(option(tree, videoConfig, "playback", "adaptive_min_kbps", "125"))
+	maxRate, _ := strconv.Atoi(option(tree, videoConfig, "playback", "adaptive_max_kbps", "1100"))
+	return &adaptiveOptions{option(tree, videoConfig, "playback", "adaptive_bitrate", "0") == "1", minRate, maxRate}
+}
+
 type videoOptions struct {
-	CameraCoT   *bool  `json:"cameraCoTEnabled,omitempty"`
-	Resolution  string `json:"resolution,omitempty"`
-	Hardware    bool   `json:"hardwareAcceleration"`
-	Transport   string `json:"transport"`
-	Latency     int    `json:"latency"`
-	Push        bool   `json:"push"`
-	Path        string `json:"path"`
-	Destination string `json:"destination"`
+	Adaptive    *adaptiveOptions `json:"adaptive,omitempty"`
+	CameraCoT   *bool            `json:"cameraCoTEnabled,omitempty"`
+	Resolution  string           `json:"resolution,omitempty"`
+	Hardware    bool             `json:"hardwareAcceleration"`
+	Transport   string           `json:"transport"`
+	Latency     int              `json:"latency"`
+	Push        bool             `json:"push"`
+	Path        string           `json:"path"`
+	Destination string           `json:"destination"`
 }
 
 func option(tree uci.Tree, config, section, key, fallback string) string {
@@ -69,6 +82,7 @@ func (s *Server) videoSettings(w http.ResponseWriter, _ *http.Request) {
 	}{
 		Options: videoOptions{
 			CameraCoT:   &advertise,
+			Adaptive:    adaptiveSettings(tree),
 			Transport:   get("transport", "srt"),
 			Resolution:  get("resolution", "current"),
 			Latency:     latency,
@@ -148,6 +162,20 @@ func (s *Server) saveVideoSettingsWith(w http.ResponseWriter, r *http.Request, c
 		hardware = "0"
 	}
 	values := map[string]string{"hardware_acceleration": hardware, "transport": v.Transport, "srt_latency_ms": strconv.Itoa(v.Latency), "push_enabled": enabled, "push_path": v.Path, "push_destination": v.Destination}
+	if v.Adaptive == nil {
+		v.Adaptive = adaptiveSettings(tree)
+	} else {
+		if v.Adaptive.Min < 1 || v.Adaptive.Max < v.Adaptive.Min || v.Adaptive.Max > 100000 {
+			s.writeErrorStatus(w, 400, "Enter bitrate limits between 1 and 100000 kbit/s with minimum ≤ maximum")
+			return
+		}
+		values["adaptive_bitrate"] = "0"
+		if v.Adaptive.Enabled {
+			values["adaptive_bitrate"] = "1"
+		}
+		values["adaptive_min_kbps"] = strconv.Itoa(v.Adaptive.Min)
+		values["adaptive_max_kbps"] = strconv.Itoa(v.Adaptive.Max)
+	}
 	if v.CameraCoT == nil {
 		// A client with the older settings schema can still save push options.
 		advertise := camera.CoTEnabled(tree)
@@ -181,7 +209,7 @@ func (s *Server) saveVideoSettingsWith(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 	if _, err := runCmd(r.Context(), pushService, "reload"); err != nil {
-		s.writeErrorStatus(w, 503, "Settings saved. Could not reload the outgoing push service.")
+		s.writeErrorStatus(w, 503, "Settings saved. Could not reload the video services.")
 		return
 	}
 	s.writeJSON(w, v)
@@ -226,7 +254,16 @@ func (s *Server) videoStatus(w http.ResponseWriter, r *http.Request) {
 			push = data
 		}
 	}
-	s.writeJSON(w, map[string]json.RawMessage{"connections": data, "push": push})
+	var adaptive json.RawMessage
+	if state, err := os.ReadFile("/var/run/openmanet-videorate.json"); err == nil {
+		var sample struct {
+			Time float64 `json:"t"`
+		}
+		if json.Unmarshal(state, &sample) == nil && time.Since(time.Unix(int64(sample.Time), 0)) < 10*time.Second {
+			adaptive = state
+		}
+	}
+	s.writeJSON(w, map[string]json.RawMessage{"connections": data, "push": push, "adaptive": adaptive})
 }
 
 func (s *Server) videoTransfer(w http.ResponseWriter, r *http.Request) {
